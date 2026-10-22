@@ -114,7 +114,7 @@ notice() {
   elif fresh; then
     case $(field http) in
       401)
-        say "O Unio recusou o token $whose na última verificação (revogado, vencido, ou de quem perdeu o acesso): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
+        say "O Unio recusou o token $whose na última verificação (revogado, vencido, ou de quem perdeu o acesso): gere outro em Configurações > Pessoal > Agente de código e rode /unio:connect."
         tell "Unio refused this computer's token at the last check, so the Unio tools will fail until the user runs /unio:connect." ;;
       403)
         say "Os agentes do Unio estão desligados $where: um administrador pode ligá-los em Configurações > Sistema > Agentes."
@@ -122,7 +122,7 @@ notice() {
       200)
         days=$(field days)
         if [ -n "$days" ] && [ "$days" -le 7 ]; then
-          say "O token do Unio $whose $(unio_expires_in "$days"): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
+          say "O token do Unio $whose $(unio_expires_in "$days"): gere outro em Configurações > Pessoal > Agente de código e rode /unio:connect."
         fi
         case $(field status) in
           unsupported)

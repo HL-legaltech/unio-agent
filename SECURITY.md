@@ -11,8 +11,10 @@ A Unio agent token (`unio_` followed by 46 letters and digits) acts in its
 workspace as Unio Bot. If one appears where it should not, such as a chat, a
 commit, a log or a screenshot:
 
-1. Revoke it in Unio, in Configurações > Sistema > Agentes.
-2. Issue a new one and store it with `/unio:connect`.
+1. Revoke it in Unio, in Configurações > Pessoal > Agente de código. An
+   administrator can also revoke anyone's token in Configurações > Sistema >
+   Agentes.
+2. Generate a new one there and store it with the command the page shows.
 
 Deleting the file or the message does not revoke the token.
 

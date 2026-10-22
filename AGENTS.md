@@ -9,8 +9,11 @@ is public: every file, commit and pull request here is visible to anyone.
 - `plugins/unio/`: the `unio` plugin for Claude Code. Its skill
   (`skills/unio/SKILL.md`) and its header helper (`scripts/mcp-headers.sh`)
   also serve Codex from a clone of this repository.
-- `tests/`: the plugin's scripts, run against a fake Unio API in a throwaway
-  HOME.
+- `install.sh`: the installer the Agente de código page in Unio runs with
+  `curl … | sh`. It installs the plugin (or, for Codex, the clone) and stores
+  a token per workspace.
+- `tests/`: the plugin's scripts and the installer, run against a fake Unio
+  API in a throwaway HOME.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.
@@ -85,6 +88,10 @@ No AI attribution. Stage named paths only.
   and Git Bash. They call POSIX utilities, plus `curl`, `mktemp` and
   `date +%s`, which every supported system has. Check any other tool on
   macOS and Git Bash before a script depends on it.
+- `install.sh` runs piped into `sh`, so it cannot source `lib.sh`: its copies
+  of `lib.sh`'s helpers must change with them. Its stdin is the script
+  itself, so it reads answers only from `/dev/tty` and starts `claude` and
+  `git` with stdin from `/dev/null`.
 - A token never reaches a process's argv. It leaves a script only through the
   `printf` builtin, and `curl` reads it from stdin with `-K -`.
 - A script that a command skill injects with `` !`…` `` must exit 0, or Claude

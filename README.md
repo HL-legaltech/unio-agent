@@ -11,11 +11,34 @@ The plugin carries four things:
 
 ## What you need
 
-- A Unio workspace with agents turned on, and a token for it. Today a workspace administrator with the developer role issues tokens in Unio, under Configurações > Sistema > Agentes > Gerar token (<https://unio.so/app/settings/agents>).
+- A Unio workspace with agents turned on, where you have the developer role. You generate your own token in Unio, under Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>).
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
 - `sh` and `curl`: Linux, macOS, WSL, or Windows with Git Bash.
 
-## Install in Claude Code
+<a id="install"></a>
+
+## Install with one command
+
+In Unio, open Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>), generate a token, and paste the command the page shows into a terminal of your own, outside Claude Code:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_…
+```
+
+The page fills in `--workspace`, the workspace the token belongs to. `--client codex` sets up Codex instead of Claude Code, and `--renew` only replaces the token, installing nothing. The installer:
+
+1. checks that `claude` is Claude Code 2.1.292 or later;
+2. installs the plugin from this marketplace, unless it is installed already;
+3. turns on auto-update, when your settings hold the marketplace entry exactly as Claude Code wrote it, and otherwise says how;
+4. reads the token at a hidden prompt, so it never appears on screen, in the chat or in the shell history, and checks its shape (`unio_` followed by 46 letters and digits);
+5. asks Unio whether it accepts the token, and tells a network failure apart from a refused token and from another workspace's token;
+6. only then saves it to `~/.config/unio/workspaces/<workspace>/token`, readable by you alone.
+
+The first workspace on a computer serves every folder. For another one, it asks whether that workspace serves only the folder you ran it in (the default) or the whole computer, except the folders tied to another workspace. Each line it prints is in Portuguese, and the last one is `Conectado ao Unio.` when everything worked.
+
+To read the script before running it, open [install.sh](install.sh). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
+
+## Install in Claude Code by hand
 
 ```sh
 claude plugin marketplace add HL-legaltech/unio-agent
@@ -32,16 +55,11 @@ In a session that is already open, run `/reload-plugins`. On a computer without 
 
 ## Connect
 
-Run `/unio:connect` in Claude Code. It says where the token comes from and prints one command to run in another terminal, outside Claude Code. That command:
+[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It sends you to Configurações > Pessoal > Agente de código for a new token, and when the folder already has a workspace, it prints the installer's command with `--renew` for it, to run in another terminal, outside Claude Code. Otherwise, run the command the page shows.
 
-1. reads the token at a hidden prompt, so it never appears on screen, in the chat or in the shell history;
-2. checks its shape (`unio_` followed by 46 letters and digits);
-3. asks Unio whether it accepts the token, and tells a network failure apart from a refused token;
-4. only then saves it to `~/.config/unio/token`, readable by you alone.
+Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Pessoal > Agente de código and generate a new one.
 
-Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Sistema > Agentes and issue a new one.
-
-The same command takes the token from a pipe instead, for example from a password manager.
+For a setup made by hand, `/unio:connect` also prints `sh <plugin folder>/scripts/connect.sh` when the folder has no workspace yet. That command makes the same checks as the installer and saves the token to `~/.config/unio/token`. It also takes the token from a pipe, for example from a password manager.
 
 ### Allow Unio's tools
 
@@ -116,15 +134,16 @@ Type them as ordinary messages, in either language; the skill recognizes them.
 
 ## Where things live
 
-- **Token:** `~/.config/unio/token`, mode 600. Claude Code, Codex and the commands all read this one file.
-- **Another workspace for some folders:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each (the longest match wins; the id starts with `org_` and is the `ws=` value of a Unio link), and that workspace's token is `~/.config/unio/workspaces/<workspace id>/token`. `~/.config/unio/default-workspace` names the workspace for every other folder; while it exists, no folder reads `~/.config/unio/token`, so the connect command refuses to save a token there.
+- **Tokens:** `~/.config/unio/workspaces/<workspace id>/token`, mode 600, one per workspace. The id starts with `org_` and is the `ws=` value of a Unio link. Claude Code, Codex and the commands all read these files.
+- **Which workspace a folder uses:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each, and the longest match wins. Every other folder uses the workspace named in `~/.config/unio/default-workspace`. The installer writes both.
+- **A setup from before the installer:** `~/.config/unio/token`, read only while `default-workspace` does not exist. The hand-setup command (`connect.sh`) still saves a token there, and refuses to while `default-workspace` exists.
 - **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
 
 <a id="codex"></a>
 
 ## Codex
 
-Codex uses the same skill, the same header helper and the same token file, from a clone of this repository.
+Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. By hand:
 
 1. Clone it, and link the skill where Codex looks for skills:
 
@@ -194,7 +213,7 @@ claude plugin uninstall unio@unio
 claude plugin marketplace remove unio
 ```
 
-For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting `~/.config/unio/token` does not revoke the token: revoke it in Unio, under Configurações > Sistema > Agentes.
+For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
 
 ## Security
 

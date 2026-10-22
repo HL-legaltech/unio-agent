@@ -2,11 +2,13 @@
 # Stores a Unio token on this computer without it entering a chat, a command
 # line or the shell history.
 #
-#   connect.sh               In a terminal of your own: reads the token at a
-#                            hidden prompt, checks it with Unio, and only then
-#                            saves it to ~/.config/unio/token. With stdin from
-#                            a pipe (a password manager), reads it there.
-#   connect.sh instructions  What /unio:connect shows inside Claude Code.
+#   connect.sh               The hand setup, in a terminal of your own: reads
+#                            the token at a hidden prompt, checks it with Unio,
+#                            and only then saves it to ~/.config/unio/token.
+#                            With stdin from a pipe (a password manager), reads
+#                            it there.
+#   connect.sh instructions  What /unio:connect shows inside Claude Code: the
+#                            Agente de código page and the installer.
 
 # shellcheck source=lib.sh
 . "$(dirname -- "$0")/lib.sh"
@@ -21,29 +23,36 @@ quote() {
 
 
 instructions() {
-  command="sh $(quote "$(unio_root)/scripts/connect.sh")"
+  workspace=$(unio_workspace "${CLAUDE_PROJECT_DIR:-$PWD}")
   file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
-  default=$(unio_workspace '')
   cat <<EOF
 Para conectar este computador ao Unio:
 
-1. Gere um token no Unio, em Configurações > Sistema > Agentes > Gerar token (https://unio.so/app/settings/agents). Essa página aparece para administradores do workspace com papel de desenvolvedor; se não for o seu caso, peça o token a um deles.
-2. Em outro terminal, fora do Claude Code, rode o comando abaixo e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
+1. No Unio, abra Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent${workspace:+?ws=$workspace}) e gere um token.
+EOF
+  if [ -n "$workspace" ]; then
+    cat <<EOF
+2. Em outro terminal, fora do Claude Code, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
 
-$command
+$(unio_renew_command "$workspace")
 
+EOF
+  else
+    cat <<EOF
+2. Em outro terminal, fora do Claude Code, rode o comando que a página mostra e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
+EOF
+  fi
+  cat <<EOF
 3. De volta aqui, rode /mcp, escolha plugin:unio:unio e depois Reconnect (ou rode /reload-plugins). Em seguida, /unio:doctor confirma a conexão.
 
 Nunca cole o token neste chat.
 EOF
-  if [ -n "$default" ]; then
-    printf '\nAtenção: %s escolhe o workspace %s para as pastas sem workspace próprio, então nenhuma pasta lê %s e o comando se recusa a gravá-lo. Apague esse arquivo antes de rodar o comando, ou troque o token desta pasta direto em %s.\n' \
-      "$(unio_tilde "$UNIO_CONF/default-workspace")" "$default" "$(unio_tilde "$UNIO_CONF/token")" "$(unio_tilde "$file")"
-  elif [ "$file" != "$UNIO_CONF/token" ]; then
-    printf '\nEsta pasta usa o token de outro workspace (%s). O comando grava %s, que vale só para as pastas fora de %s.\n' \
-      "$(unio_tilde "$file")" "$(unio_tilde "$UNIO_CONF/token")" "$(unio_tilde "$UNIO_CONF/projects")"
-  elif [ -e "$file" ]; then
-    printf '\nJá existe um token em %s; o comando o substitui.\n' "$(unio_tilde "$file")"
+  # Only a folder without a workspace reads ~/.config/unio/token, the one
+  # file the hand setup writes.
+  if [ -z "$workspace" ]; then
+    printf '\nNuma configuração à mão, sem o comando da página, este comando faz o mesmo e guarda o token em %s:\n\n%s\n' \
+      "$(unio_tilde "$file")" "sh $(quote "$(unio_root)/scripts/connect.sh")"
+    [ ! -e "$file" ] || printf '\nJá existe um token em %s; o comando o substitui.\n' "$(unio_tilde "$file")"
   fi
 }
 
@@ -74,7 +83,10 @@ connect() {
   fi
   default=$(unio_workspace '')
   if [ -n "$default" ]; then
-    echo "$(unio_tilde "$UNIO_CONF/default-workspace") escolhe o workspace $default para as pastas sem workspace próprio, então nenhuma pasta leria $(unio_tilde "$UNIO_CONF/token"). Apague esse arquivo e rode este comando de novo. Nada foi lido."
+    echo "$(unio_tilde "$UNIO_CONF/default-workspace") escolhe o workspace $default para as pastas sem workspace próprio, então nenhuma pasta leria $(unio_tilde "$UNIO_CONF/token"). Nada foi lido. Para trocar o token desse workspace, gere outro em Configurações > Pessoal > Agente de código e rode:"
+    echo
+    unio_renew_command "$default"
+    echo
     return 1
   fi
   if [ -t 0 ] && ! { : </dev/tty; } 2>/dev/null; then
@@ -102,7 +114,7 @@ connect() {
       echo "O Unio não respondeu: confira a rede e tente de novo. Nada foi salvo."
       return 1 ;;
     401)
-      echo "O Unio recusou este token: ele foi revogado, venceu ou é de alguém que perdeu o acesso. Nada foi salvo. Gere outro em Configurações > Sistema > Agentes."
+      echo "O Unio recusou este token: ele foi revogado, venceu ou é de alguém que perdeu o acesso. Nada foi salvo. Gere outro em Configurações > Pessoal > Agente de código."
       return 1 ;;
     403)
       echo "Os agentes do Unio estão desligados neste workspace, então o token não serve agora. Nada foi salvo. Um administrador pode ligá-los em Configurações > Sistema > Agentes."
