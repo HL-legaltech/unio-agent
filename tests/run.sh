@@ -30,6 +30,8 @@ trap 'if [ -n "$server" ]; then kill "$server" 2>/dev/null; fi; rm -rf "$tmp"' E
 trap 'exit 130' INT TERM HUP
 
 unset CLAUDECODE CLAUDE_CONFIG_DIR CLAUDE_PROJECT_DIR UNIO_INBOX_RUN XDG_STATE_HOME
+# No browser opens unless a check asks for one, and then only the fake below.
+unset DISPLAY WAYLAND_DISPLAY SSH_CONNECTION
 HOME=$tmp/home
 CLAUDE_PLUGIN_DATA=$tmp/data
 export HOME CLAUDE_PLUGIN_DATA
@@ -95,7 +97,12 @@ case \$1 in
   *) exit 64 ;;
 esac
 EOF
-chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git"
+# xdg-open, as far as the browser approval calls it: it logs the URL.
+cat > "$tmp/bin/xdg-open" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/xdg-open.log"
+EOF
+chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open"
 PATH=$tmp/bin:$PATH
 
 free_port() {
@@ -104,7 +111,8 @@ free_port() {
 port=$(free_port)
 closed=$(free_port)
 cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
-python3 -I "$here/fake_api.py" "$port" "$tmp/clients.log" "$tmp/skill_block.json" \
+mkdir -p "$tmp/connect"
+FAKE_CONNECT_DIR=$tmp/connect python3 -I "$here/fake_api.py" "$port" "$tmp/clients.log" "$tmp/skill_block.json" \
   "$refused" "$off" "$good" "$other" "$second=org_Second" 2>"$tmp/server.err" &
 server=$!
 tries=0
@@ -228,6 +236,7 @@ out=$("$shell" "$scripts/connect.sh" instructions)
 has "$out" "Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent)" &&
   has "$out" "rode o comando que a página mostra"; check "connect sends a computer without a workspace to the Agente de código page"
 has_line "$out" "sh $scripts/connect.sh" && has "$out" "Nunca cole o token neste chat"; check "connect prints the command to run elsewhere"
+has_line "$out" "sh $scripts/connect.sh browser" && has "$out" "confira que o código é o mesmo do terminal"; check "connect leads with the browser approval"
 mkdir -p "$tmp/my plugins"
 cp -R "$plugin" "$tmp/my plugins/unio"
 out=$("$shell" "$tmp/my plugins/unio/scripts/connect.sh" instructions)
@@ -251,10 +260,11 @@ mkdir -p "$tmp/mapped"
 printf '%s\torg_A\n' "$tmp/mapped" > "$conf/projects"
 out=$(CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions)
 renew_a="curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_A --renew"
-has_line "$out" "$renew_a" && has "$out" "coding-agent?ws=org_A" && lacks "$out" "connect\.sh"; check "connect gives a folder with a workspace the installer's renewal for it, and no hand command"
+has_line "$out" "$renew_a" && has "$out" "coding-agent?ws=org_A" && ! has_line "$out" "sh $scripts/connect.sh" &&
+  has_line "$out" "sh $scripts/connect.sh browser"; check "connect gives a folder with a workspace the browser approval and the installer's renewal, and no hand command"
 printf 'org_A\n' > "$conf/default-workspace"
 out=$("$shell" "$scripts/connect.sh" instructions)
-has_line "$out" "$renew_a" && lacks "$out" "connect\.sh"; check "connect gives the default workspace's renewal, and no hand command, while default-workspace exists"
+has_line "$out" "$renew_a" && ! has_line "$out" "sh $scripts/connect.sh"; check "connect gives the default workspace's renewal, and no hand command, while default-workspace exists"
 before=$(calls)
 out=$(connect "$good")
 has "$out" "default-workspace escolhe o workspace org_A" && has_line "$out" "$renew_a" && [ ! -e "$conf/token" ] &&
@@ -334,9 +344,11 @@ user=$(hook "$out" user)
 model=$(hook "$out" model)
 has "$user" "abaixo da versão mínima que o Unio aceita (1.2)" && has "$model" "below the minimum"; check "below the minimum, the person and Claude are told to update"
 cp "$tmp/my plugins/unio/.claude-plugin/plugin.json" "$tmp/plugin.json"
-sed 's/"version": *"[^"]*"/"version": "1.2.0"/' "$tmp/plugin.json" > "$tmp/my plugins/unio/.claude-plugin/plugin.json"
+# A release above this one and above the served minimum, whatever this is.
+later=$((${version%%.*} + 1)).0.0
+sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$later\"/" "$tmp/plugin.json" > "$tmp/my plugins/unio/.claude-plugin/plugin.json"
 user=$(hook "$("$shell" "$tmp/my plugins/unio/scripts/session-start.sh" notice)" user)
-has "$user" "atualizado para 1.2.0" && lacks "$user" "abaixo da versão mínima"; check "after an update, the old version's verdict is not repeated"
+has "$user" "atualizado para $later" && lacks "$user" "abaixo da versão mínima"; check "after an update, the old version's verdict is not repeated"
 printf '%s' "$version" > "$CLAUDE_PLUGIN_DATA/seen-version"
 cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
 expire status-default
@@ -469,9 +481,6 @@ minimum=$(sed -n 's/.*"minimumClaudeCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/
 home args
 types "$good"
 before=$(claude_calls)
-out=$(install_in "$tmp/repo")
-code=$?
-[ "$code" -eq 2 ] && has_text "$out" "Falta --workspace" && [ "$(claude_calls)" -eq "$before" ]; check "the installer needs --workspace and runs nothing without it"
 refused_all=1
 for key in org_ org_a-b 'org_../x' ORG_x 'org_a b' "org_x$(printf '\033')"; do
   out=$(install_in "$tmp/repo" --workspace "$key")
@@ -664,6 +673,79 @@ home codex-taken
 mkdir -p "$HOME/.local/share/unio/agent"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
 has_text "$out" "não é um clone do Unio" && lacks "$out" "Cole o token"; check "Codex: a folder in the clone's place stops the installer"
+
+# The browser approval (connect.sh browser and the installer without
+# --workspace), against the fake's scripted polls. The fake asks for a poll
+# a second; each scenario gets a home folder of its own.
+approval() { printf '%s\n' "$@" > "$tmp/connect/polls"; }
+polls() { n=$(grep -c '^/v1/agents/connect/poll ' "$tmp/connect/log" 2>/dev/null); printf '%s' "${n:-0}"; }
+# connect.sh browser from folder $1, with no terminal, as Claude Code's own
+# shell would run it.
+approve_in() {
+  (cd "$1" && python3 -I "$here/pty_run.py" --no-tty /dev/null -- "$shell" "$scripts/connect.sh" browser) 2>&1
+}
+
+home browser
+rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+approval pending "approved $good"
+out=$(DISPLAY=:0 approve_in "$tmp/repo")
+code=$?
+[ "$code" -eq 0 ] && has "$out" "confira o código BCDF-GHJK" && has_line "$out" "  https://unio.so/app/connect?code=BCDF-GHJK" &&
+  has "$out" "Aprovado no Unio\." && [ "$(polls)" -eq 2 ]; check "browser: connect shows the page and the code, polls while pending, and is approved"
+[ "$(token_of org_test)" = "$good" ] && private "$conf/workspaces/org_test/token" && [ "$(cat "$conf/default-workspace")" = org_test ] &&
+  has "$out" "Token salvo em ~/.config/unio/workspaces/org_test/token, para o workspace WorkspaceNameMarker" &&
+  has "$out" "Ele vence em 30 dias\." && has "$out" "vale em todas as pastas deste computador"; check "browser: the first workspace's token is saved as the installer saves it, the computer's default"
+[ -z "$(find "$conf" -name '*.new')" ] && [ -z "$(find "$conf" -name 'token.new.*')" ]; check "browser: no temporary file is left"
+grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/xdg-open.log"; check "browser: the page opens in a browser on this screen"
+grep -q '^/v1/agents/connect/start [0-9.]* {"client":"claude-code","host":"[A-Za-z0-9][A-Za-z0-9_-]*"}$' "$tmp/connect/log"; check "browser: start names the client and a host name"
+lacks "$out" "unio_" && lacks "$out" "FakeDeviceCode" &&
+  ! grep -q -e "$good" -e FakeDeviceCode "$tmp/curl-argv.log"; check "browser: neither the token nor the device code is printed or on curl's command line"
+has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "browser: the header helper sends the approved token"
+
+rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+approval slow_down "approved $second"
+out=$(approve_in "$tmp/repo2")
+gap=$(grep '^/v1/agents/connect/poll ' "$tmp/connect/log" | awk '{ t[NR] = $2 } END { printf "%d", t[NR] - t[NR - 1] }')
+[ "$(polls)" -eq 2 ] && [ "$gap" -ge 6 ]; check "browser: slow_down adds five seconds to the interval"
+[ "$(token_of org_Second)" = "$second" ] && [ "$(cat "$conf/default-workspace")" = org_test ] &&
+  grep -q "^$tmp/repo2	org_Second\$" "$conf/projects" && has "$out" "vale só nesta pasta"; check "browser: a second workspace, with no terminal to ask, covers only this folder"
+[ ! -e "$tmp/xdg-open.log" ]; check "browser: without a display, no browser is started"
+
+home browser-refused
+approval denied
+out=$(approve_in "$tmp/repo")
+code=$?
+[ "$code" -ne 0 ] && has "$out" "recusado no navegador" && [ ! -e "$conf/workspaces" ]; check "browser: a refused request saves nothing"
+approval gone
+out=$(approve_in "$tmp/repo")
+has "$out" "venceu ou já foi usado" && [ ! -e "$conf/workspaces" ]; check "browser: an expired or used request (410) saves nothing"
+printf '2\n' > "$tmp/connect/ttl"
+approval
+out=$(approve_in "$tmp/repo")
+rm -f "$tmp/connect/ttl"
+has "$out" "venceu sem aprovação" && [ ! -e "$conf/workspaces" ]; check "browser: connect stops polling when the request's time is up"
+printf '404\n' > "$tmp/connect/start"
+rm -f "$tmp/connect/log"
+out=$(approve_in "$tmp/repo")
+rm -f "$tmp/connect/start"
+has "$out" "ainda não está disponível" && has "$out" "Configurações > Pessoal > Agente de código" && [ "$(polls)" -eq 0 ]; check "browser: before Unio offers it, connect points at the page"
+rm -f "$tmp/connect/log"
+out=$(CLAUDECODE=1 approve_in "$tmp/repo")
+has "$out" "fora do Claude Code" && [ ! -e "$tmp/connect/log" ]; check "browser: connect refuses to run inside Claude Code"
+
+home browser-install
+: > "$tmp/answers"
+approval pending "approved $good"
+out=$(install_in "$tmp/repo")
+[ "$(last_line "$out")" = "Conectado ao Unio." ] && has_text "$out" "Plugin do Unio instalado." && has_text "$out" "Aprovado no Unio." &&
+  lacks "$out" "Cole o token" && [ "$(token_of org_test)" = "$good" ]; check "the installer without --workspace installs and connects through the browser"
+approval "approved $good"
+out=$(install_in "$tmp/repo" --workspace org_Second --browser --renew)
+has_text "$out" "aprovado no workspace org_test, e não no org_Second do comando" && [ ! -e "$conf/workspaces/org_Second" ] &&
+  [ "$(token_of org_test)" = "$good" ]; check "--browser: a request approved in another workspace is saved for that workspace, and said"
+approval denied
+out=$(install_in "$tmp/repo" --browser --renew)
+has_text "$out" "recusado no navegador" && [ "$(token_of org_test)" = "$good" ]; check "--browser: a refusal keeps the token there was"
 
 ! grep -q -e "$good" -e "$other" -e "$refused" -e "$off" -e "$second" "$tmp/claude-argv.log" "$tmp/git-argv.log" &&
   ! grep -q 'unio_[A-Za-z0-9]\{20\}' "$tmp/transcripts.log"; check "no token was ever on claude's or git's command line, or on the installer's terminal"

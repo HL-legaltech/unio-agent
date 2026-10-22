@@ -2,13 +2,17 @@
 # Stores a Unio token on this computer without it entering a chat, a command
 # line or the shell history.
 #
+#   connect.sh browser       Asks Unio for a token and waits while you approve
+#                            the request in the browser; the token goes from
+#                            Unio straight into the workspace's token file.
 #   connect.sh               The hand setup, in a terminal of your own: reads
 #                            the token at a hidden prompt, checks it with Unio,
 #                            and only then saves it to ~/.config/unio/token.
 #                            With stdin from a pipe (a password manager), reads
 #                            it there.
 #   connect.sh instructions  What /unio:connect shows inside Claude Code: the
-#                            Agente de código page and the installer.
+#                            browser approval, then the Agente de código page
+#                            and the installer.
 
 # shellcheck source=lib.sh
 . "$(dirname -- "$0")/lib.sh"
@@ -28,25 +32,28 @@ instructions() {
   cat <<EOF
 Para conectar este computador ao Unio:
 
-1. No Unio, abra Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent${workspace:+?ws=$workspace}) e gere um token.
-EOF
-  if [ -n "$workspace" ]; then
-    cat <<EOF
-2. Em outro terminal, fora do Claude Code, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
+1. Em outro terminal, fora do Claude Code, rode o comando abaixo na pasta do seu projeto:
 
-$(unio_renew_command "$workspace")
+sh $(quote "$(unio_root)/scripts/connect.sh") browser
 
-EOF
-  else
-    cat <<EOF
-2. Em outro terminal, fora do Claude Code, rode o comando que a página mostra e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
-EOF
-  fi
-  cat <<EOF
+2. Ele mostra um link e um código, e abre o navegador quando pode. Entre no Unio, confira que o código é o mesmo do terminal, escolha o workspace e aprove. O token vai do Unio direto para este computador, sem passar pela tela nem pela área de transferência. Sem navegador aqui, abra o link em qualquer aparelho.
 3. De volta aqui, rode /mcp, escolha plugin:unio:unio e depois Reconnect (ou rode /reload-plugins). Em seguida, /unio:doctor confirma a conexão.
 
 Nunca cole o token neste chat.
+
+Se preferir copiar um token, abra Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent${workspace:+?ws=$workspace}) e gere um.
 EOF
+  if [ -n "$workspace" ]; then
+    cat <<EOF
+Depois, em outro terminal, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
+
+$(unio_renew_command "$workspace")
+EOF
+  else
+    cat <<EOF
+Depois, em outro terminal, rode o comando que a página mostra e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
+EOF
+  fi
   # Only a folder without a workspace reads ~/.config/unio/token, the one
   # file the hand setup writes.
   if [ -z "$workspace" ]; then
@@ -54,6 +61,18 @@ EOF
       "$(unio_tilde "$file")" "sh $(quote "$(unio_root)/scripts/connect.sh")"
     [ ! -e "$file" ] || printf '\nJá existe um token em %s; o comando o substitui.\n' "$(unio_tilde "$file")"
   fi
+}
+
+browser() {
+  if [ -n "${CLAUDECODE:-}" ]; then
+    echo "Rode este comando em outro terminal, fora do Claude Code: a aprovação é sua, não da sessão."
+    return 1
+  fi
+  unio_connect_browser claude-code || return 1
+  echo "Aprovado no Unio."
+  unio_store_token "$token" "$owner" "$owner_name" "$days" || return 1
+  token=
+  echo "No Claude Code, rode /mcp, escolha plugin:unio:unio e depois Reconnect (ou rode /reload-plugins). Em seguida, /unio:doctor confirma a conexão."
 }
 
 read_token() {
@@ -144,6 +163,7 @@ connect() {
 
 case ${1:-} in
   instructions) instructions; exit 0 ;;
+  browser) browser ;;
   '') connect ;;
-  *) echo "Uso: connect.sh [instructions]"; exit 2 ;;
+  *) echo "Uso: connect.sh [browser|instructions]"; exit 2 ;;
 esac
