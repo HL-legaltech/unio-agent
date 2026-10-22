@@ -3,12 +3,16 @@
 # command the Agente de código page in Unio shows:
 #
 #   curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh |
-#     sh -s -- --workspace org_<id> [--client claude-code|codex] [--renew]
+#     sh -s -- [--workspace org_<id>] [--client claude-code|codex] [--renew] [--browser]
 #
-#   --workspace  The workspace the token belongs to (its Clerk organization id).
+#   --workspace  The workspace the token belongs to (its Clerk organization id),
+#                for a token pasted at a hidden prompt.
 #   --client     claude-code (default) installs the plugin; codex clones this
 #                repository and links the skill.
 #   --renew      Only replaces the token: nothing is installed.
+#   --browser    Asks Unio for the token and waits while you approve it in the
+#                browser, where you also pick the workspace. The default
+#                without --workspace.
 #
 # It runs piped into sh, so it cannot source the plugin's lib.sh, and its stdin
 # is this script: the token and every answer are read from /dev/tty. All of it
@@ -306,6 +310,113 @@ codex_config() {
     "$(api)" "$clone/plugins/unio/scripts/mcp-headers.sh"
 }
 
+# POSTs the JSON on stdin to path $1 of the API, body to file $2, as lib.sh's
+# unio_post does.
+post() {
+  code=$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' \
+    --data-binary @- -o "$2" -w '%{http_code}' "$(api)$1" 2>/dev/null)
+  case $code in [0-9][0-9][0-9]) ;; *) code=000 ;; esac
+  printf '%s' "$code"
+}
+
+# The value of key $2 in JSON $1, as lib.sh's unio_json_value reads it.
+json_value() {
+  printf '%s' "$1" | tr -d '\n' |
+    sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([A-Za-z0-9_:/?=.&-]*\)[\",}].*/\1/p" | head -n 1
+}
+
+host_name() {
+  h=$(uname -n 2>/dev/null | cut -d. -f1 | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+  case $h in [A-Za-z0-9]*) ;; *) h=computador ;; esac
+  printf '%s' "$h"
+}
+
+# As lib.sh's unio_open_url: never over SSH or without a display, where
+# xdg-open would start a text browser in this terminal.
+open_url() {
+  [ -z "${SSH_CONNECTION:-}" ] || return 0
+  case $(uname -s 2>/dev/null) in
+    Darwin)
+      if command -v open >/dev/null 2>&1; then (open "$1" </dev/null >/dev/null 2>&1 &); fi ;;
+    *)
+      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+        (xdg-open "$1" </dev/null >/dev/null 2>&1 &)
+      fi ;;
+  esac
+  return 0
+}
+
+# lib.sh's unio_connect_browser: sets secret, owner, owner_name and days.
+connect_browser() {
+  secret=
+  reply=$(mktemp 2>/dev/null) || reply=
+  if [ -z "$reply" ]; then
+    say "Não foi possível criar um arquivo temporário. Nada foi salvo."
+    return 1
+  fi
+  trap 'rm -f "$reply"' EXIT
+  trap 'rm -f "$reply"; printf "\nCancelado. Nada foi salvo.\n"; exit 130' INT TERM HUP
+  status=$(printf '{"client":"%s","host":"%s"}' "$1" "$(host_name)" | post /agents/connect/start "$reply")
+  started=$(cat "$reply" 2>/dev/null)
+  case $status in
+    201) ;;
+    000) say "O Unio não respondeu: confira a rede e rode o comando de novo. Nada foi salvo."; return 1 ;;
+    404) say "A aprovação pelo navegador ainda não está disponível. Gere um token em Configurações > Pessoal > Agente de código, no Unio, e rode o comando que a página mostra."; return 1 ;;
+    429) say "Muitos pedidos de conexão deste endereço. Espere um minuto e rode o comando de novo."; return 1 ;;
+    *) say "O Unio respondeu HTTP $status. Nada foi salvo; rode o comando de novo em instantes."; return 1 ;;
+  esac
+  device=$(json_value "$started" deviceCode)
+  user_code=$(json_value "$started" userCode)
+  url=$(json_value "$started" verifyUrl)
+  interval=$(json_value "$started" interval)
+  ttl=$(json_value "$started" expiresIn)
+  case $interval in ''|*[!0-9]*) interval=5 ;; esac
+  [ "$interval" -ge 1 ] && [ "$interval" -le 60 ] || interval=5
+  case $ttl in ''|*[!0-9]*) ttl=600 ;; esac
+  case $user_code in [A-Z][A-Z][A-Z][A-Z]-[A-Z][A-Z][A-Z][A-Z]) ;; *) user_code= ;; esac
+  case $url in https://?*|http://127.0.0.1:*|http://localhost:*) ;; *) url= ;; esac
+  if [ "${#device}" -ne 43 ] || [ -z "$user_code" ] || [ -z "$url" ]; then
+    say "O Unio respondeu de um jeito inesperado. Nada foi salvo; rode o comando de novo em instantes."
+    return 1
+  fi
+
+  say "Abra esta página no navegador, entre no Unio e confira o código $user_code:"
+  say ""
+  say "  $url"
+  say ""
+  say "Escolha o workspace na página e aprove. Esperando a aprovação por até $((ttl / 60)) minutos; Ctrl+C cancela."
+  open_url "$url"
+
+  deadline=$(($(date +%s) + ttl))
+  while :; do
+    sleep "$interval"
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      say "O pedido venceu sem aprovação. Nada foi salvo; rode o comando de novo."
+      return 1
+    fi
+    status=$(printf '{"deviceCode":"%s"}' "$device" | post /agents/connect/poll "$reply")
+    case $status in
+      200) break ;;
+      202|000) ;;
+      429) interval=$((interval + 5)) ;;
+      403) say "O pedido foi recusado no navegador. Nada foi salvo."; return 1 ;;
+      410) say "O pedido venceu ou já foi usado. Nada foi salvo; rode o comando de novo."; return 1 ;;
+      *) say "O Unio respondeu HTTP $status. Nada foi salvo; rode o comando de novo."; return 1 ;;
+    esac
+  done
+  secret=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\(unio_[0-9A-Za-z]*\)".*/\1/p' "$reply" | head -n 1)
+  approved=$(sed 's/"token"[[:space:]]*:[[:space:]]*"[^"]*"//' "$reply")
+  rm -f "$reply"
+  owner=$(json_field "$approved" workspace clerkId)
+  owner_name=$(clean "$(json_field "$approved" workspace name)")
+  days=$(json_field "$approved" connection expiresInDays)
+  if ! is_token "$secret" || ! is_org "$owner"; then
+    secret=
+    say "O Unio aprovou, mas a resposta veio incompleta. Nada foi salvo; revogue a conexão nova em Configurações > Pessoal > Agente de código e rode o comando de novo."
+    return 1
+  fi
+}
+
 restore_echo() { stty echo </dev/tty 2>/dev/null; }
 
 read_secret() {
@@ -323,6 +434,43 @@ read_secret() {
   printf '\n' >/dev/tty
   secret=${secret#"${secret%%[![:space:]]*}"}
   secret=${secret%"${secret##*[![:space:]]}"}
+}
+
+# The token pasted at a hidden prompt, checked with Unio against
+# $workspace; sets secret, name and days.
+paste_secret() {
+  read_secret || return 1
+  if ! is_token "$secret"; then
+    say "Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo."
+    return 1
+  fi
+
+  body=$(mktemp 2>/dev/null) || body=
+  if [ -z "$body" ]; then
+    say "Não foi possível criar um arquivo temporário. Nada foi salvo."
+    return 1
+  fi
+  code=$(get_me "$secret" "$body")
+  json=$(cat "$body" 2>/dev/null)
+  rm -f "$body"
+  case $code in
+    200) ;;
+    000) say "O Unio não respondeu: confira a rede e rode o comando de novo. Nada foi salvo."; return 1 ;;
+    401) say "O Unio recusou o token. Gere outro na página Agente de código e rode o comando de novo."; return 1 ;;
+    403) say "Os agentes do Unio estão desligados neste workspace, então o token não serve agora. Nada foi salvo. Um administrador pode ligá-los em Configurações > Sistema > Agentes."; return 1 ;;
+    *) say "O Unio respondeu HTTP $code. Nada foi salvo; rode o comando de novo em instantes."; return 1 ;;
+  esac
+  owner=$(json_field "$json" workspace clerkId)
+  if [ "$owner" != "$workspace" ]; then
+    if is_org "$owner"; then
+      say "Este token é do workspace $owner, mas o comando é para o $workspace. Nada foi salvo. Use o token e o comando da mesma página Agente de código."
+    else
+      say "O Unio não confirmou que este token é do workspace $workspace. Nada foi salvo. Use o token e o comando da mesma página Agente de código."
+    fi
+    return 1
+  fi
+  name=$(clean "$(json_field "$json" workspace name)")
+  days=$(json_field "$json" token expiresInDays)
 }
 
 # Whether the computer's own token (~/.config/unio/token, read while no
@@ -379,9 +527,63 @@ map_folder() {
   } > "$conf/projects.new" && mv -f "$conf/projects.new" "$conf/projects"
 }
 
+# Saves $secret for $workspace (named $1, $2 days left), as lib.sh's
+# unio_store_token does, keeping the folders of a --renew.
+store_token() {
+  here=$(pwd -P)
+  logical=$(pwd -L 2>/dev/null)
+  default=$(default_org)
+  if [ "$(workspace_of "$here")" = "$workspace" ] || [ "$(workspace_of "$logical")" = "$workspace" ]; then
+    scope=kept
+  elif [ -n "$renew" ] && { [ "$default" = "$workspace" ] || mapped "$workspace"; }; then
+    scope=kept
+  elif [ -z "$default" ] && ! mapped '' && ! legacy_elsewhere "$workspace"; then
+    scope=first
+  else
+    ask_scope
+  fi
+
+  file=$conf/workspaces/$workspace/token
+  if ! { mkdir -p "$conf/workspaces/$workspace" &&
+    chmod 700 "$conf" "$conf/workspaces" "$conf/workspaces/$workspace" &&
+    printf '%s' "$secret" > "$file.new" && mv -f "$file.new" "$file"; } 2>/dev/null; then
+    rm -f "$file.new"
+    say "Não foi possível gravar $(tilde "$file"). Nada foi salvo."
+    return 1
+  fi
+  printf 'Token salvo em %s' "$(tilde "$file")"
+  [ -z "$1" ] || printf ', para o workspace %s' "$1"
+  case $2 in ''|*[!0-9]*) printf '.\n' ;; *) printf '. Ele %s.\n' "$(expires_in "$2")" ;; esac
+
+  case $scope in
+    first|default)
+      if ! { printf '%s\n' "$workspace" > "$conf/default-workspace.new" &&
+        mv -f "$conf/default-workspace.new" "$conf/default-workspace"; } 2>/dev/null; then
+        rm -f "$conf/default-workspace.new"
+        say "Não foi possível gravar $(tilde "$conf/default-workspace"), então nenhuma pasta usa este token ainda."
+        return 1
+      fi
+      if [ "$scope" = first ]; then
+        say "O workspace $workspace vale em todas as pastas deste computador."
+      else
+        say "O workspace $workspace passa a valer em todas as pastas deste computador, menos nas ligadas a outro workspace em $(tilde "$conf/projects")."
+      fi
+      if [ -z "$default" ] && [ -e "$conf/token" ]; then
+        say "O token em $(tilde "$conf/token") deixa de ser lido."
+      fi ;;
+    folder)
+      if ! map_folder 2>/dev/null; then
+        rm -f "$conf/projects.new"
+        say "Não foi possível ligar esta pasta ao workspace em $(tilde "$conf/projects"), então nenhuma pasta usa este token ainda."
+        return 1
+      fi
+      say "O workspace $workspace vale só em $(tilde "$here") e nas pastas dentro dela." ;;
+  esac
+}
+
 usage() {
   [ -z "${1:-}" ] || say "$1"
-  say "Uso: curl -fsSL https://raw.githubusercontent.com/$marketplace/main/install.sh | sh -s -- --workspace org_... [--client claude-code|codex] [--renew]"
+  say "Uso: curl -fsSL https://raw.githubusercontent.com/$marketplace/main/install.sh | sh -s -- [--workspace org_...] [--client claude-code|codex] [--renew] [--browser]"
   exit 2
 }
 
@@ -391,6 +593,7 @@ main() {
   client=claude-code
   workspace=
   renew=
+  browser=
   while [ $# -gt 0 ]; do
     case $1 in
       --workspace) [ $# -ge 2 ] || usage "Falta o valor de --workspace."; workspace=$2; shift 2 ;;
@@ -398,13 +601,13 @@ main() {
       --client) [ $# -ge 2 ] || usage "Falta o valor de --client."; client=$2; shift 2 ;;
       --client=*) client=${1#*=}; shift ;;
       --renew) renew=1; shift ;;
+      --browser) browser=1; shift ;;
       *) usage "Opção desconhecida: $(clean "$1")." ;;
     esac
   done
   if [ -z "$workspace" ]; then
-    usage "Falta --workspace. Copie de novo o comando da página Agente de código, no Unio."
-  fi
-  if ! is_org "$workspace"; then
+    browser=1
+  elif ! is_org "$workspace"; then
     usage "O valor de --workspace não é um workspace do Unio (org_ seguido de letras e números). Copie de novo o comando da página Agente de código."
   fi
   case $client in
@@ -436,88 +639,19 @@ main() {
     fi
   fi
 
-  read_secret || return 1
-  if ! is_token "$secret"; then
-    say "Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo."
-    return 1
-  fi
-
-  body=$(mktemp 2>/dev/null) || body=
-  if [ -z "$body" ]; then
-    say "Não foi possível criar um arquivo temporário. Nada foi salvo."
-    return 1
-  fi
-  code=$(get_me "$secret" "$body")
-  json=$(cat "$body" 2>/dev/null)
-  rm -f "$body"
-  case $code in
-    200) ;;
-    000) say "O Unio não respondeu: confira a rede e rode o comando de novo. Nada foi salvo."; return 1 ;;
-    401) say "O Unio recusou o token. Gere outro na página Agente de código e rode o comando de novo."; return 1 ;;
-    403) say "Os agentes do Unio estão desligados neste workspace, então o token não serve agora. Nada foi salvo. Um administrador pode ligá-los em Configurações > Sistema > Agentes."; return 1 ;;
-    *) say "O Unio respondeu HTTP $code. Nada foi salvo; rode o comando de novo em instantes."; return 1 ;;
-  esac
-  owner=$(json_field "$json" workspace clerkId)
-  if [ "$owner" != "$workspace" ]; then
-    if is_org "$owner"; then
-      say "Este token é do workspace $owner, mas o comando é para o $workspace. Nada foi salvo. Use o token e o comando da mesma página Agente de código."
-    else
-      say "O Unio não confirmou que este token é do workspace $workspace. Nada foi salvo. Use o token e o comando da mesma página Agente de código."
+  if [ -n "$browser" ]; then
+    connect_browser "$client" || return 1
+    say "Aprovado no Unio."
+    if [ -n "$workspace" ] && [ "$owner" != "$workspace" ]; then
+      say "O pedido foi aprovado no workspace $owner, e não no $workspace do comando; o token vale para o $owner."
     fi
-    return 1
-  fi
-
-  here=$(pwd -P)
-  logical=$(pwd -L 2>/dev/null)
-  default=$(default_org)
-  if [ "$(workspace_of "$here")" = "$workspace" ] || [ "$(workspace_of "$logical")" = "$workspace" ]; then
-    scope=kept
-  elif [ -n "$renew" ] && { [ "$default" = "$workspace" ] || mapped "$workspace"; }; then
-    scope=kept
-  elif [ -z "$default" ] && ! mapped '' && ! legacy_elsewhere "$workspace"; then
-    scope=first
+    workspace=$owner
+    name=$owner_name
   else
-    ask_scope
+    paste_secret || return 1
   fi
-
-  file=$conf/workspaces/$workspace/token
-  if ! { mkdir -p "$conf/workspaces/$workspace" &&
-    chmod 700 "$conf" "$conf/workspaces" "$conf/workspaces/$workspace" &&
-    printf '%s' "$secret" > "$file.new" && mv -f "$file.new" "$file"; } 2>/dev/null; then
-    rm -f "$file.new"
-    say "Não foi possível gravar $(tilde "$file"). Nada foi salvo."
-    return 1
-  fi
-  name=$(clean "$(json_field "$json" workspace name)")
-  days=$(json_field "$json" token expiresInDays)
-  printf 'Token salvo em %s' "$(tilde "$file")"
-  [ -z "$name" ] || printf ', para o workspace %s' "$name"
-  case $days in ''|*[!0-9]*) printf '.\n' ;; *) printf '. Ele %s.\n' "$(expires_in "$days")" ;; esac
-
-  case $scope in
-    first|default)
-      if ! { printf '%s\n' "$workspace" > "$conf/default-workspace.new" &&
-        mv -f "$conf/default-workspace.new" "$conf/default-workspace"; } 2>/dev/null; then
-        rm -f "$conf/default-workspace.new"
-        say "Não foi possível gravar $(tilde "$conf/default-workspace"), então nenhuma pasta usa este token ainda."
-        return 1
-      fi
-      if [ "$scope" = first ]; then
-        say "O workspace $workspace vale em todas as pastas deste computador."
-      else
-        say "O workspace $workspace passa a valer em todas as pastas deste computador, menos nas ligadas a outro workspace em $(tilde "$conf/projects")."
-      fi
-      if [ -z "$default" ] && [ -e "$conf/token" ]; then
-        say "O token em $(tilde "$conf/token") deixa de ser lido."
-      fi ;;
-    folder)
-      if ! map_folder 2>/dev/null; then
-        rm -f "$conf/projects.new"
-        say "Não foi possível ligar esta pasta ao workspace em $(tilde "$conf/projects"), então nenhuma pasta usa este token ainda."
-        return 1
-      fi
-      say "O workspace $workspace vale só em $(tilde "$here") e nas pastas dentro dela." ;;
-  esac
+  store_token "$name" "$days" || return 1
+  secret=
 
   if [ "$client" = codex ]; then
     [ -n "$renew" ] || codex_config

@@ -19,13 +19,21 @@ The plugin carries four things:
 
 ## Install with one command
 
-In Unio, open Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>), generate a token, and paste the command the page shows into a terminal of your own, outside Claude Code:
+In a terminal of your own, outside Claude Code, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh
+```
+
+It installs the plugin, then prints a link to Unio and a code, and opens your browser when it can. Sign in, check that the page shows the same code, pick the workspace and approve. The token goes from Unio straight into `~/.config/unio/workspaces/<workspace>/token`: it never appears on screen, in a clipboard, in the chat or in the shell history. Over SSH, open the link on any device. `--browser` asks for this flow explicitly, for example with `--renew`.
+
+Or, in Unio, open Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>), generate a token, and paste the command the page shows:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_…
 ```
 
-The page fills in `--workspace`, the workspace the token belongs to. `--client codex` sets up Codex instead of Claude Code, and `--renew` only replaces the token, installing nothing. The installer:
+The page fills in `--workspace`, the workspace the token belongs to. `--client codex` sets up Codex instead of Claude Code, and `--renew` only replaces the token, installing nothing. With `--workspace`, the installer:
 
 1. checks that `claude` is Claude Code 2.1.292 or later;
 2. installs the plugin from this marketplace, unless it is installed already;
@@ -55,7 +63,9 @@ In a session that is already open, run `/reload-plugins`. On a computer without 
 
 ## Connect
 
-[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It sends you to Configurações > Pessoal > Agente de código for a new token, and when the folder already has a workspace, it prints the installer's command with `--renew` for it, to run in another terminal, outside Claude Code. Otherwise, run the command the page shows.
+[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It prints `sh <plugin folder>/scripts/connect.sh browser`, to run in another terminal, outside Claude Code, from your project's folder. That command asks Unio for a token and waits up to 10 minutes while you approve the request in the browser: check that the page shows the code your terminal shows, pick the workspace and approve. Approve only a request you just started; a link or code someone sends you would connect their computer as you. The token is saved as the installer saves it. If this computer already uses another workspace, it asks whether the new one covers only this folder or the whole computer.
+
+`/unio:connect` also sends you to Configurações > Pessoal > Agente de código for a token to paste, and when the folder already has a workspace, it prints the installer's command with `--renew` for it. Otherwise, run the command the page shows.
 
 Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Pessoal > Agente de código and generate a new one.
 
@@ -112,7 +122,7 @@ When a version is below the minimum Unio accepts, every Unio tool but `get_me` r
 
 | Command | What it does |
 | --- | --- |
-| `/unio:connect` | Shows where the token comes from and the terminal command that stores it. |
+| `/unio:connect` | Shows the terminal command that gets a token you approve in the browser, and the page-and-installer alternative. |
 | `/unio:doctor` | Checks the plugin, Claude Code, the token, Unio's answer, updates, Codex, and leftovers of a setup made by hand, and says how to fix each problem. It never shows the token. |
 | `/unio:update` | Installs the newest release now. |
 | `/unio:help` | What the plugin does, its commands and ready prompts, and what this release changed. |

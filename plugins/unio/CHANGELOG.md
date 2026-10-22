@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- Conecte sem copiar token: /unio:connect mostra um comando que pede a conexão ao Unio. Você confere o código, escolhe o workspace e aprova no navegador, e o token vai direto para este computador.
+- O instalador faz o mesmo quando você o roda sem --workspace, ou com --browser.
+
 ## 1.1.0
 
 - Um comando só instala o plugin e guarda o token: copie-o da página Configurações > Pessoal > Agente de código, no Unio.
