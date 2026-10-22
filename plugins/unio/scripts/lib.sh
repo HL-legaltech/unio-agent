@@ -1,5 +1,5 @@
-# Sourced by the plugin's scripts. POSIX sh only: they run under dash, bash,
-# macOS sh and Git Bash, with curl, sed, awk, tr, grep and find.
+# Sourced by the plugin's scripts. POSIX sh and utilities, plus curl, mktemp
+# and date +%s: they run under dash, bash, macOS sh and Git Bash.
 
 # Byte semantics for every pattern and length below; output is unaffected.
 LC_ALL=C

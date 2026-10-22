@@ -81,8 +81,10 @@ No AI attribution. Stage named paths only.
 
 ## Traps
 
-- Scripts are POSIX `sh`: they run under dash, bash, macOS `sh` and Git Bash,
-  with `curl`, `sed`, `awk`, `tr`, `grep` and `find` as the only tools.
+- The plugin's scripts are POSIX `sh`: they run under dash, bash, macOS `sh`
+  and Git Bash. They call POSIX utilities, plus `curl`, `mktemp` and
+  `date +%s`, which every supported system has. Check any other tool on
+  macOS and Git Bash before a script depends on it.
 - A token never reaches a process's argv. It leaves a script only through the
   `printf` builtin, and `curl` reads it from stdin with `-K -`.
 - A script that a command skill injects with `` !`…` `` must exit 0, or Claude
