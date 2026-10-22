@@ -79,6 +79,11 @@ unio_workspace() {
     best=
     tab=$(printf '\t')
     while IFS=$tab read -r path key || [ -n "$path" ]; do
+      # A line saved on Windows ends in CR, which would fail unio_is_org and
+      # drop the mapping without a word, sending another workspace's token.
+      key=${key#"${key%%[![:space:]]*}"}
+      key=${key%"${key##*[![:space:]]}"}
+      path=${path%"${path##*[![:space:]]}"}
       while case $path in ?*/) true ;; *) false ;; esac; do path=${path%/}; done
       if [ -z "$path" ] || ! unio_is_org "$key"; then continue; fi
       case $1/ in

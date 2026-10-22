@@ -160,6 +160,9 @@ out=$(headers "$work/ab")
 lacks "$out" Authorization; check "a sibling folder with the same prefix does not match"
 out=$(headers "$work/b")
 lacks "$out" Authorization; check "the longest match wins, and its missing token is never replaced by another"
+printf '%s/ \torg_A \r\n' "$work/a" > "$conf/projects"
+out=$(headers "$work/a/sub")
+has "$out" "Bearer $other"; check "a projects line saved on Windows, with stray spaces, still maps its folder"
 printf 'org_A\n' > "$conf/default-workspace"
 out=$(headers "$tmp/elsewhere")
 has "$out" "Bearer $other"; check "default-workspace applies outside mapped folders"
