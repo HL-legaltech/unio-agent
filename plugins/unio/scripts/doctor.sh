@@ -138,7 +138,7 @@ if [ -d "$HOME/.codex" ]; then
   else
     line info "codex skill: não instalada (veja a seção Codex do README)"
   fi
-  clone=$HOME/.local/share/unio-agent/plugins/unio
+  clone=$HOME/.local/share/unio/agent/plugins/unio
   [ -d "$clone" ] && line info "codex clone: unio $(unio_version "$clone") em $(unio_tilde "$clone")"
   codex_config=$HOME/.codex/config.toml
   if grep -q 'http_headers_helper.*mcp-headers\.sh' "$codex_config" 2>/dev/null; then

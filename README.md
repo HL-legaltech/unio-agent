@@ -86,7 +86,7 @@ Without auto-update, a notice at the start of a session tells you once when a re
   ```
 
   Then run `/reload-plugins` in each open session. New sessions load the new version on their own.
-- **In Codex:** run `git -C ~/.local/share/unio-agent pull --ff-only`, then start a new Codex session.
+- **In Codex:** run `git -C ~/.local/share/unio/agent pull --ff-only`, then start a new Codex session.
 
 When a version is below the minimum Unio accepts, every Unio tool but `get_me` refuses with `agent_client_outdated` until you update.
 
@@ -129,9 +129,9 @@ Codex uses the same skill, the same header helper and the same token file, from 
 1. Clone it, and link the skill where Codex looks for skills:
 
    ```sh
-   git clone https://github.com/HL-legaltech/unio-agent.git ~/.local/share/unio-agent
+   git clone https://github.com/HL-legaltech/unio-agent.git ~/.local/share/unio/agent
    mkdir -p ~/.agents/skills
-   ln -s ~/.local/share/unio-agent/plugins/unio/skills/unio ~/.agents/skills/unio
+   ln -s ~/.local/share/unio/agent/plugins/unio/skills/unio ~/.agents/skills/unio
    ```
 
 2. Add the server to `~/.codex/config.toml`. Remove any `[mcp_servers.unio]` block already there first. Codex splits the helper line into words but does not run it through a shell, so it would not expand `~` or `$HOME`; this command writes your real home folder into it:
@@ -141,7 +141,7 @@ Codex uses the same skill, the same header helper and the same token file, from 
 
    [mcp_servers.unio]
    url = "https://api.unio.so/v1/mcp"
-   http_headers_helper = "sh '$HOME/.local/share/unio-agent/plugins/unio/scripts/mcp-headers.sh' codex"
+   http_headers_helper = "sh '$HOME/.local/share/unio/agent/plugins/unio/scripts/mcp-headers.sh' codex"
    EOF
    ```
 
@@ -150,13 +150,13 @@ Codex uses the same skill, the same header helper and the same token file, from 
 3. Store the token, in a terminal:
 
    ```sh
-   sh ~/.local/share/unio-agent/plugins/unio/scripts/connect.sh
+   sh ~/.local/share/unio/agent/plugins/unio/scripts/connect.sh
    ```
 
 4. Check the setup:
 
    ```sh
-   sh ~/.local/share/unio-agent/plugins/unio/scripts/doctor.sh codex
+   sh ~/.local/share/unio/agent/plugins/unio/scripts/doctor.sh codex
    ```
 
 If Codex read the token from an exported variable before (`bearer_token_env_var`), remove that export from your shell profile once Codex reaches Unio through the helper. To update, see [Update now](#update).
@@ -194,7 +194,7 @@ claude plugin uninstall unio@unio
 claude plugin marketplace remove unio
 ```
 
-For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio-agent`. Deleting `~/.config/unio/token` does not revoke the token: revoke it in Unio, under Configurações > Sistema > Agentes.
+For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting `~/.config/unio/token` does not revoke the token: revoke it in Unio, under Configurações > Sistema > Agentes.
 
 ## Security
 

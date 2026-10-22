@@ -41,7 +41,7 @@ is what Codex and other clients do instead.
   - `current`, `unknown`, or no `skill` block: say nothing.
 
   <how> is, **Claude Code:** `/unio:update`, then `/reload-plugins`;
-  **Elsewhere:** `git -C ~/.local/share/unio-agent pull --ff-only`, then a
+  **Elsewhere:** `git -C ~/.local/share/unio/agent pull --ff-only`, then a
   new session. Asked whether the skill is up to date, answer from
   `skill.status`; without one, say Unio cannot tell and that this is version
   1.0.
@@ -391,7 +391,7 @@ pending updates once it is back. Never block the work on the tracker.
   workspace admin who is a developer issues a new one in Unio, under
   Configurações > Sistema > Agentes (Gerar token). **Claude Code:**
   `/unio:connect` shows how to store it. **Elsewhere:** the person runs
-  `sh ~/.local/share/unio-agent/plugins/unio/scripts/connect.sh` in a
+  `sh ~/.local/share/unio/agent/plugins/unio/scripts/connect.sh` in a
   terminal of their own.
 - **`agents_disabled`:** a workspace admin must turn agent access on.
 - **`agent_client_outdated`:** this skill is below Unio's minimum; give the
