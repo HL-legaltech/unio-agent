@@ -431,7 +431,9 @@ has "$report" "^bad core token: falta" && has "$report" "/unio:connect"; check "
 installer=$(CDPATH='' cd -- "$here/.." && pwd -P)/install.sh
 has_text() { printf '%s' "$1" | grep -qF -e "$2"; }
 last_line() { printf '%s\n' "$1" | tail -n 1; }
-claude_calls() { cat "$tmp/claude-argv.log" 2>/dev/null | wc -l | tr -d ' '; }
+claude_calls() {
+  if [ -f "$tmp/claude-argv.log" ]; then wc -l < "$tmp/claude-argv.log" | tr -d ' '; else echo 0; fi
+}
 home() {
   HOME=$tmp/homes/$1
   conf=$HOME/.config/unio
