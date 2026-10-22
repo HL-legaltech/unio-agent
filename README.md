@@ -1,3 +1,207 @@
 # Unio agent
 
 The Unio plugin for Claude Code, and the same skill and connection for Codex: it lets a coding agent track its work in [Unio](https://unio.so) as the workspace's agent, through Unio's MCP server at `https://api.unio.so/v1/mcp`.
+
+The plugin carries four things:
+
+- **The Unio skill**, the protocol the agent follows: which sessions to track, how to shape a task, when to comment, how to follow a pull request until it is live, and when to plan a project.
+- **The Unio MCP server**, connected with the token stored on your computer. The plugin sends its version with every connection, so Unio can tell you when to update.
+- **A notice when a session starts**, when Unio is not connected, the token was refused or expires soon, or a new release is out.
+- **Four commands:** `/unio:connect`, `/unio:doctor`, `/unio:update` and `/unio:help`.
+
+## What you need
+
+- A Unio workspace with agents turned on, and a token for it. Today a workspace administrator with the developer role issues tokens in Unio, under Configurações > Sistema > Agentes > Gerar token (<https://unio.so/app/settings/agents>).
+- Claude Code 2.1.292 or later (`claude --version`), or Codex.
+- `sh` and `curl`: Linux, macOS, WSL, or Windows with Git Bash.
+
+## Install in Claude Code
+
+```sh
+claude plugin marketplace add HL-legaltech/unio-agent
+claude plugin install unio@unio
+```
+
+Or in one command:
+
+```sh
+claude plugin install unio --marketplace HL-legaltech/unio-agent
+```
+
+In a session that is already open, run `/reload-plugins`. On a computer without a GitHub SSH key, set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` in your shell profile first, so adding and updating the marketplace use HTTPS.
+
+## Connect
+
+Run `/unio:connect` in Claude Code. It says where the token comes from and prints one command to run in another terminal, outside Claude Code. That command:
+
+1. reads the token at a hidden prompt, so it never appears on screen, in the chat or in the shell history;
+2. checks its shape (`unio_` followed by 46 letters and digits);
+3. asks Unio whether it accepts the token, and tells a network failure apart from a refused token;
+4. only then saves it to `~/.config/unio/token`, readable by you alone.
+
+Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Sistema > Agentes and issue a new one.
+
+The same command takes the token from a pipe instead, for example from a password manager.
+
+### Allow Unio's tools
+
+Claude Code asks before each call to an MCP tool. To let the agent use Unio without asking each time, add this rule to `permissions.allow` in `~/.claude/settings.json`:
+
+```json
+"mcp__plugin_unio_unio__*"
+```
+
+## Turn on auto-update
+
+Claude Code does not update plugins from this marketplace until you turn it on: in Claude Code, open `/plugin`, go to Marketplaces, choose `unio` and select Enable auto-update. From then on, Claude Code installs each release in the background and shows `Plugin updated: unio · Run /reload-plugins to apply`. The first session on a new version says what changed.
+
+An administrator can turn it on for everyone, and install the plugin with it, in Claude Code's managed settings:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "unio": {
+      "source": { "source": "github", "repo": "HL-legaltech/unio-agent" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": { "unio@unio": true }
+}
+```
+
+Where managed settings restrict marketplaces with `strictKnownMarketplaces`, add `{ "source": "github", "repo": "HL-legaltech/unio-agent" }` to that list too.
+
+<a id="update"></a>
+
+## Update now
+
+Without auto-update, a notice at the start of a session tells you once when a release is out, and the agent tells you when Unio reports your version behind. To update:
+
+- **In Claude Code:** run `/unio:update`, then `/reload-plugins`.
+- **From a shell:**
+
+  ```sh
+  claude plugin marketplace update unio
+  claude plugin update unio@unio
+  ```
+
+  Then run `/reload-plugins` in each open session. New sessions load the new version on their own.
+- **In Codex:** run `git -C ~/.local/share/unio-agent pull --ff-only`, then start a new Codex session.
+
+When a version is below the minimum Unio accepts, every Unio tool but `get_me` refuses with `agent_client_outdated` until you update.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/unio:connect` | Shows where the token comes from and the terminal command that stores it. |
+| `/unio:doctor` | Checks the plugin, Claude Code, the token, Unio's answer, updates, Codex, and leftovers of a setup made by hand, and says how to fix each problem. It never shows the token. |
+| `/unio:update` | Installs the newest release now. |
+| `/unio:help` | What the plugin does, its commands and ready prompts, and what this release changed. |
+
+## Ready prompts
+
+Type them as ordinary messages, in either language; the skill recognizes them.
+
+| Intent | English | Português |
+| --- | --- | --- |
+| Track a task | Track this in Unio: \<link or key\> | Acompanhe isto no Unio: \<link ou chave\> |
+| New task | Create a Unio task for this work | Crie uma tarefa no Unio para este trabalho |
+| Follow-up | File a follow-up in Unio for \<topic\> | Registre um desdobramento no Unio sobre \<assunto\> |
+| Project | Plan this as a Unio project | Planeje isto como um projeto no Unio |
+| Needs | Put what \<KEY\> needs from \<name\> at the top | Coloque no topo o que \<chave\> precisa de \<nome\> |
+| Update | Post a Unio project update for \<project\>: \<health\> | Publique uma atualização do projeto \<projeto\> no Unio: \<saúde\> |
+| Opt out | Don't track this session in Unio | Não acompanhe esta sessão no Unio |
+| Version | Is my Unio skill up to date? | Minha skill do Unio está atualizada? |
+
+## Where things live
+
+- **Token:** `~/.config/unio/token`, mode 600. Claude Code, Codex and the commands all read this one file.
+- **Another workspace for some folders:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each (the longest match wins; the id starts with `org_` and is the `ws=` value of a Unio link), and that workspace's token is `~/.config/unio/workspaces/<workspace id>/token`. `~/.config/unio/default-workspace` names the workspace for every other folder.
+- **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
+
+<a id="codex"></a>
+
+## Codex
+
+Codex uses the same skill, the same header helper and the same token file, from a clone of this repository.
+
+1. Clone it, and link the skill where Codex looks for skills:
+
+   ```sh
+   git clone https://github.com/HL-legaltech/unio-agent.git ~/.local/share/unio-agent
+   mkdir -p ~/.agents/skills
+   ln -s ~/.local/share/unio-agent/plugins/unio/skills/unio ~/.agents/skills/unio
+   ```
+
+2. Add the server to `~/.codex/config.toml`. Remove any `[mcp_servers.unio]` block already there first. Codex splits the helper line into words but does not run it through a shell, so it would not expand `~` or `$HOME`; this command writes your real home folder into it:
+
+   ```sh
+   cat >> ~/.codex/config.toml <<EOF
+
+   [mcp_servers.unio]
+   url = "https://api.unio.so/v1/mcp"
+   http_headers_helper = "sh '$HOME/.local/share/unio-agent/plugins/unio/scripts/mcp-headers.sh' codex"
+   EOF
+   ```
+
+   Codex runs the helper on every connection to Unio. It reads the token file itself and sends `X-Unio-Client: codex/<version>`, so the token never sits in an environment variable that every program you start inherits.
+
+3. Store the token, in a terminal:
+
+   ```sh
+   sh ~/.local/share/unio-agent/plugins/unio/scripts/connect.sh
+   ```
+
+4. Check the setup:
+
+   ```sh
+   sh ~/.local/share/unio-agent/plugins/unio/scripts/doctor.sh codex
+   ```
+
+If Codex read the token from an exported variable before (`bearer_token_env_var`), remove that export from your shell profile once Codex reaches Unio through the helper. To update, see [Update now](#update).
+
+## Move a setup made by hand
+
+If you wired Unio into Claude Code by hand, with a skill in `~/.claude/skills/unio`, a `unio` MCP server in your user configuration, or permission rules and hooks that name `mcp__unio__` tools, move to the plugin in this order. Each step leaves exactly one connection to Unio.
+
+1. **Install the plugin** as above. While your own server entry exists, Claude Code treats the plugin's server, which has the same URL, as a duplicate and keeps using yours.
+2. **Retire your skill,** so only the plugin's loads:
+
+   ```sh
+   mkdir -p ~/.local/share/unio
+   mv ~/.claude/skills/unio ~/.local/share/unio/retired-skill
+   ```
+
+3. **Save your server entry, then remove it.** The saved file can hold a token, so it is written readable by you alone. Do not use `claude mcp get unio` for this: it prints the entry's headers, token included.
+
+   ```sh
+   (umask 077 && jq '.mcpServers.unio' ~/.claude.json > ~/.local/share/unio/retired-mcp.json)
+   claude mcp remove unio -s user
+   ```
+
+   From the next session on, the plugin's server connects with the same token file.
+4. **Rename your rules.** The plugin's tools are `mcp__plugin_unio_unio__<tool>`, not `mcp__unio__<tool>`. In `~/.claude/settings.json`, copy each `mcp__unio__` permission rule to the same rule with `mcp__plugin_unio_unio__`, and widen each hook matcher `mcp__unio__.*` to `mcp__(plugin_unio_)?unio__.*`, once the scripts those hooks run accept both tool names.
+5. **Keep headless runners on their own setup.** A runner that passes its own MCP configuration keeps `--strict-mcp-config`, which keeps the plugin's server out, and adds `"enabledPlugins": {"unio@unio": false}` to the settings it passes with `--settings`, which also keeps the plugin's skill out.
+6. **Turn on auto-update** as above, then run `/unio:doctor`: it shows no `migration` lines, and `/mcp` lists `plugin:unio:unio`.
+
+To go back: `claude plugin uninstall unio@unio`, move `~/.local/share/unio/retired-skill` back to `~/.claude/skills/unio`, and run `claude mcp add-json unio --scope user "$(cat ~/.local/share/unio/retired-mcp.json)"`. If the saved entry holds a token in a fixed `Authorization` header, issue a new token instead of restoring that one.
+
+## Uninstall
+
+```sh
+claude plugin uninstall unio@unio
+claude plugin marketplace remove unio
+```
+
+For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio-agent`. Deleting `~/.config/unio/token` does not revoke the token: revoke it in Unio, under Configurações > Sistema > Agentes.
+
+## Security
+
+The token stays in `~/.config/unio/` with mode 600 and goes only to `https://api.unio.so`. The scripts never print it, never put it on a command line, and never copy it anywhere else. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+Every change is a pull request; see [AGENTS.md](AGENTS.md) for the release rules and the checks to run.
+
+Copyright HL-legaltech. All rights reserved.
