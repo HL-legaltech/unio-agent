@@ -541,6 +541,11 @@ before=$(calls)
 out=$(install_in "$tmp/repo" --workspace org_test --renew)
 code=$?
 [ "$code" -eq 1 ] && has_text "$out" "Isso não é um token do Unio" && [ "$(calls)" -eq "$before" ] && [ "$(token_of org_test)" = "$good" ]; check "the installer refuses a malformed token without sending it"
+[ "$(cat "$tmp/answers.echo")" = on ]; check "the terminal echoes again after the hidden prompt"
+types '<interrupt>'
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+code=$?
+[ "$code" -eq 130 ] && [ "$(cat "$tmp/answers.echo")" = on ] && [ "$(token_of org_test)" = "$good" ]; check "Ctrl-C at the hidden prompt turns echo back on and saves nothing"
 api "$closed"
 types "$other"
 out=$(install_in "$tmp/repo" --workspace org_test --renew)

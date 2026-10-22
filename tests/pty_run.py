@@ -5,8 +5,13 @@ its own (a pseudo-terminal), which is its stdout, its stderr and /dev/tty.
 Answers are typed as a person would type them: each one only after its prompt
 shows, in order. The terminal echoes what is typed unless the script turned
 echo off, so a hidden prompt that is not hidden shows its answer in the
-transcript. Prints everything the terminal showed and exits with the
-command's status (124 when it ran past the timeout).
+transcript. The reply <interrupt> presses Ctrl-C half a second after its
+prompt shows, as a person would: pressed at once, it can reach bash before
+its read starts, and bash then runs the trap only when the read returns.
+
+Prints everything the terminal showed, writes "on" or "off" to
+<answers>.echo for whether the terminal echoes once the command is gone, and
+exits with the command's status (124 when it ran past the timeout).
 
 Usage:
   pty_run.py <script> <answers> -- <command>...
@@ -23,6 +28,7 @@ import select
 import signal
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -79,7 +85,12 @@ def with_tty(script, answers_file, command):
             at = shown.find(answers[0][0].encode(), searched)
             if at >= 0:
                 searched = at + len(answers[0][0].encode())
-                os.write(master, answers.pop(0)[1].encode() + b"\n")
+                reply = answers.pop(0)[1]
+                if reply == "<interrupt>":
+                    time.sleep(0.5)
+                    os.write(master, b"\x03")
+                else:
+                    os.write(master, reply.encode() + b"\n")
         if status is None:
             done, raw = os.waitpid(pid, os.WNOHANG)
             if done:
@@ -91,6 +102,14 @@ def with_tty(script, answers_file, command):
                 os.waitpid(pid, 0)
                 status = 124
             break
+    # Linux keeps the terminal's settings readable from this side after the
+    # command is gone, so a script that leaves echo off is caught here.
+    try:
+        echo = "on" if termios.tcgetattr(master)[3] & termios.ECHO else "off"
+    except termios.error:
+        echo = "unknown"
+    with open(answers_file + ".echo", "w", encoding="utf-8") as state:
+        state.write(echo)
     os.close(master)
     sys.stdout.write(shown.decode("utf-8", "replace").replace("\r\n", "\n"))
     sys.exit(status if status >= 0 else 128 - status)
