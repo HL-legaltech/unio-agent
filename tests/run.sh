@@ -334,9 +334,11 @@ user=$(hook "$out" user)
 model=$(hook "$out" model)
 has "$user" "abaixo da versão mínima que o Unio aceita (1.2)" && has "$model" "below the minimum"; check "below the minimum, the person and Claude are told to update"
 cp "$tmp/my plugins/unio/.claude-plugin/plugin.json" "$tmp/plugin.json"
-sed 's/"version": *"[^"]*"/"version": "1.2.0"/' "$tmp/plugin.json" > "$tmp/my plugins/unio/.claude-plugin/plugin.json"
+# A release above this one and above the served minimum, whatever this is.
+later=$((${version%%.*} + 1)).0.0
+sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$later\"/" "$tmp/plugin.json" > "$tmp/my plugins/unio/.claude-plugin/plugin.json"
 user=$(hook "$("$shell" "$tmp/my plugins/unio/scripts/session-start.sh" notice)" user)
-has "$user" "atualizado para 1.2.0" && lacks "$user" "abaixo da versão mínima"; check "after an update, the old version's verdict is not repeated"
+has "$user" "atualizado para $later" && lacks "$user" "abaixo da versão mínima"; check "after an update, the old version's verdict is not repeated"
 printf '%s' "$version" > "$CLAUDE_PLUGIN_DATA/seen-version"
 cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
 expire status-default
