@@ -104,6 +104,9 @@ served=$(printf 'header = "Authorization: Bearer %s"\n' "$good" | "$real_curl" -
 fixture=$(tr -d '\n' < "$here/fixtures/skill_block.json")
 fixture=${fixture#?}
 printf '%s' "$served" | grep -qF -e "${fixture%?}" && lacks "$served" '": '; check "the fake API serves the fixture's text, compact as the backend's JSON"
+out=$("$shell" "$here/check_versions.sh" refs/heads/no-such-base 2>&1)
+code=$?
+[ "$code" -eq 1 ] && has "$out" "no-such-base does not exist" && lacks "$out" "Versions agree"; check "the version gate fails on a base ref that does not exist"
 shaped=$(printf '%s\n' "$good" "$other" "$refused" "$off" | grep -cx 'unio_[0-9A-Za-z]\{46\}')
 [ "$shaped" -eq 4 ]; check "the fake tokens have the real shape"
 

@@ -63,11 +63,23 @@ if [ "$first" != "$version" ]; then
   problem "$changelog: the first section is \"$first\"; add \"## $version\" above it"
 fi
 
-if [ -n "${1:-}" ] && ! git diff --quiet "$1"...HEAD -- plugins/unio; then
-  # A base without the plugin is the first release.
-  old=$(git show "$1:$manifest" 2>/dev/null | version_of)
-  if [ -n "$old" ] && ! newer "$version" "$old"; then
-    problem "plugins/unio changed since $1, so $manifest's version must rise above $old (it is $version)"
+if [ -n "${1:-}" ]; then
+  # git diff exits 128 on a ref it cannot resolve, which reads as "changed"
+  # and then as the first release below: a typo would pass the gate.
+  if ! git rev-parse --verify -q "$1^{commit}" >/dev/null; then
+    problem "the base ref $1 does not exist here; fetch it first (CI checks out with fetch-depth: 0)"
+  else
+    git diff --quiet "$1"...HEAD -- plugins/unio
+    case $? in
+      0) ;;
+      1)
+        # A base without the plugin is the first release.
+        old=$(git show "$1:$manifest" 2>/dev/null | version_of)
+        if [ -n "$old" ] && ! newer "$version" "$old"; then
+          problem "plugins/unio changed since $1, so $manifest's version must rise above $old (it is $version)"
+        fi ;;
+      *) problem "could not compare plugins/unio with $1" ;;
+    esac
   fi
 fi
 
