@@ -49,7 +49,9 @@ fi
 
 workspace=$(unio_workspace "$project")
 file=$(unio_token_file "$project")
-if [ -n "$workspace" ]; then
+if [ -n "$workspace" ] && [ "$workspace" = "$(unio_workspace '')" ]; then
+  why="o token do workspace $workspace, o padrão deste computador"
+elif [ -n "$workspace" ]; then
   why="o token do workspace $workspace, ligado a esta pasta"
 else
   why="o token padrão deste computador"

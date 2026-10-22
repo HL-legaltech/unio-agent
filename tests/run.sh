@@ -526,6 +526,7 @@ has_text "$out" "Cole o token do Unio: " && [ "$(token_of org_test)" = "$good" ]
 [ "$(calls)" -eq $((before + 1)) ] && [ "$(last_client)" = "-" ]; check "the installer checks the token once, without the client header the page reads as the coding agent"
 [ -z "$(find "$conf" -name '*.new')" ]; check "the installer leaves no temporary file"
 has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the header helper sends the installed token from any folder"
+has "$(doctor)" "^ok core token: ~/.config/unio/workspaces/org_test/token (o token do workspace org_test, o padrão deste computador)"; check "doctor calls the installer's first workspace the computer's default"
 before=$(claude_calls)
 types "$other"
 out=$(install_in "$tmp/repo3" --workspace org_test)
@@ -570,6 +571,7 @@ has_text "$out" "Este computador já usa o Unio com outro workspace. Onde usar o
 printf '%s\torg_Second\n%s\torg_Second\n' "$tmp/repo2" "$tmp/linked-repo2" | cmp -s - "$conf/projects" &&
   has_text "$out" "O workspace org_Second vale só em $tmp/repo2 e nas pastas dentro dela."; check "answered 1, it maps this folder, by its real path and by the link it was reached through"
 has "$(headers "$tmp/repo2")" "Bearer $second" && has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's"
+has "$(CLAUDE_PROJECT_DIR=$tmp/repo2 doctor)" "^ok core token: .*(o token do workspace org_Second, ligado a esta pasta)"; check "doctor says a mapped folder's workspace is tied to the folder"
 types "$second" x ''
 out=$(install_in "$tmp/repo3" --workspace org_Second)
 [ "$(printf '%s\n' "$out" | grep -c 'Escolha 1 ou 2')" -eq 2 ] && grep -q "^$tmp/repo3	org_Second\$" "$conf/projects" &&
