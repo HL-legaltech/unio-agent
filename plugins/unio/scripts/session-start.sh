@@ -92,9 +92,21 @@ notice() {
   say() { user="$user${user:+$nl}$1"; }
   tell() { model="$model${model:+ }$1"; }
 
+  # The person learns which token a notice is about by its local id, never
+  # by a name from the server: the status file keeps none.
+  if [ -n "$workspace" ]; then
+    whose="do workspace $workspace"
+    where="no workspace $workspace"
+  else
+    whose="deste computador"
+    where="neste workspace"
+  fi
+
   if [ -z "$token" ]; then
     if [ -e "$file" ]; then
       say "O arquivo $(unio_tilde "$file") não contém um token do Unio válido: rode /unio:connect. Nunca cole o token no chat."
+    elif [ -n "$workspace" ]; then
+      say "Falta o token do Unio do workspace $workspace, que esta pasta usa ($(unio_tilde "$file")): rode /unio:connect. Nunca cole o token no chat."
     else
       say "O Unio não está conectado neste computador: rode /unio:connect. Nunca cole o token no chat."
     fi
@@ -102,15 +114,15 @@ notice() {
   elif fresh; then
     case $(field http) in
       401)
-        say "O Unio recusou o token deste computador na última verificação (revogado, vencido, ou de quem perdeu o acesso): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
+        say "O Unio recusou o token $whose na última verificação (revogado, vencido, ou de quem perdeu o acesso): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
         tell "Unio refused this computer's token at the last check, so the Unio tools will fail until the user runs /unio:connect." ;;
       403)
-        say "Os agentes do Unio estão desligados neste workspace: um administrador pode ligá-los em Configurações > Sistema > Agentes."
+        say "Os agentes do Unio estão desligados $where: um administrador pode ligá-los em Configurações > Sistema > Agentes."
         tell "Unio agents are switched off in this workspace, so the Unio tools will fail." ;;
       200)
         days=$(field days)
         if [ -n "$days" ] && [ "$days" -le 7 ]; then
-          say "Seu token do Unio $(unio_expires_in "$days"): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
+          say "O token do Unio $whose $(unio_expires_in "$days"): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
         fi
         case $(field status) in
           unsupported)

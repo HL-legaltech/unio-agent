@@ -243,7 +243,7 @@ out=$(notice)
 user=$(hook "$out" user)
 model=$(hook "$out" model)
 is_json "$out"; check "the notice is JSON after a check"
-has "$user" "vence em 5 dias"; check "the notice warns the token expires within 7 days"
+has "$user" "O token do Unio deste computador vence em 5 dias"; check "the notice warns the token expires within 7 days, naming the computer's token"
 has "$user" "Saiu a versão 1.1.0" && has "$user" "/unio:update"; check "the notice announces a newer release"
 [ -z "$model" ]; check "update news is for the person only"
 user=$(hook "$(notice)" user)
@@ -289,14 +289,19 @@ out=$(CLAUDE_PROJECT_DIR=$work/r notice)
 user=$(hook "$out" user)
 model=$(hook "$out" model)
 grep -qx http=401 "$CLAUDE_PLUGIN_DATA/status-org_R" && grep -qx http=200 "$status"; check "each workspace keeps its own status"
-has "$user" "recusou o token" && has "$model" "refused"; check "a refused token is reported to the person and to Claude"
+has "$user" "recusou o token do workspace org_R" && has "$model" "refused"; check "a refused token is reported to the person, naming its workspace, and to Claude"
+lacks "$model" "org_R"; check "Claude's context gets fixed text, without the workspace"
 printf '%s' "$good" > "$conf/workspaces/org_R/token"
 expire status-org_R
 user=$(hook "$(CLAUDE_PROJECT_DIR=$work/r notice)" user)
 lacks "$user" "recusou"; check "a new token silences the old refusal"
 CLAUDE_PROJECT_DIR=$work/o refresh
 out=$(CLAUDE_PROJECT_DIR=$work/o notice)
-has "$(hook "$out" user)" "desligados" && has "$(hook "$out" model)" "switched off"; check "agents switched off are reported"
+has "$(hook "$out" user)" "desligados no workspace org_O" && has "$(hook "$out" model)" "switched off"; check "agents switched off are reported, naming the workspace"
+mkdir -p "$work/m"
+printf '%s\torg_M\n' "$work/m" >> "$conf/projects"
+user=$(hook "$(CLAUDE_PROJECT_DIR=$work/m notice)" user)
+has "$user" "Falta o token do Unio do workspace org_M, que esta pasta usa (~/.config/unio/workspaces/org_M/token)"; check "a folder's missing workspace token is named"
 rm -rf "$conf/projects" "$conf/workspaces"
 
 mkdir -p "$HOME/.claude/skills/unio"
@@ -349,7 +354,7 @@ has "$report" "^warn core api: token aceito, mas vence hoje;"; check "doctor say
 expire status-default
 refresh
 user=$(hook "$(notice)" user)
-has "$user" "Seu token do Unio vence hoje:"; check "the notice says a token expires today"
+has "$user" "O token do Unio deste computador vence hoje:"; check "the notice says a token expires today"
 cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
 printf '%s' "$refused" > "$conf/token"
 report=$(doctor)
