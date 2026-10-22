@@ -100,6 +100,10 @@ expire() { touch -t 202001010000 "$CLAUDE_PLUGIN_DATA/$1"; }
 echo "Shell: $shell; plugin $version; fake API on port $port"
 
 python3 -I "$here/check_fixture.py"; check "the contract fixture is a flat skill block"
+served=$(printf 'header = "Authorization: Bearer %s"\n' "$good" | "$real_curl" -s -K - "http://127.0.0.1:$port/v1/agents/me")
+fixture=$(tr -d '\n' < "$here/fixtures/skill_block.json")
+fixture=${fixture#?}
+printf '%s' "$served" | grep -qF -e "${fixture%?}" && lacks "$served" '": '; check "the fake API serves the fixture's text, compact as the backend's JSON"
 shaped=$(printf '%s\n' "$good" "$other" "$refused" "$off" | grep -cx 'unio_[0-9A-Za-z]\{46\}')
 [ "$shaped" -eq 4 ]; check "the fake tokens have the real shape"
 

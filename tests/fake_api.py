@@ -5,6 +5,8 @@ whose skill block is read, on every request, from the file given on the
 command line (a copy of tests/fixtures/skill_block.json, the contract the
 backend tests too); the refused token gets 401 and the switched-off one 403.
 Each request's X-Unio-Client header, or "-", is appended to the log file.
+Bodies are compact JSON, as the backend sends them, so the scripts' sed
+patterns are tested against no spaces around colons and commas.
 
 Usage: fake_api.py <port> <log> <skill block file> <refused> <off> <good>...
 """
@@ -26,7 +28,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def answer(self, status, body):
-        data = json.dumps(body, ensure_ascii=False).encode()
+        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
