@@ -2,12 +2,12 @@
 name: unio
 description: Track engineering work in Unio, the team's task tracker, through the `unio` MCP tools, acting as the workspace's agent. Use in the top-level session at the start of substantive work (the user pastes a Unio task link or a key such as ABC-12, or asks to build, fix, investigate, migrate or ship something that will become a commit or pull request), whenever the work changes phase (plan settled, pull request opened, review round, merged, deployed, blocked), when a new topic deserves its own task, when work is larger than one task and should be planned as a project with milestones, and whenever the user mentions Unio, a task (tarefa), a ticket, a card, a project (projeto) or a milestone (marco).
 metadata:
-  version: "1.0"
+  version: "1.1"
 ---
 
 # Track the work in Unio
 
-This is version 1.0 of the Unio skill.
+This is version 1.1 of the Unio skill.
 
 Every substantive session belongs to one Unio task, and that task reads at
 any moment like a precise record: what the work is, where it stands, what
@@ -44,7 +44,7 @@ is what Codex and other clients do instead.
   **Elsewhere:** `git -C ~/.local/share/unio/agent pull --ff-only`, then a
   new session. Asked whether the skill is up to date, answer from
   `skill.status`; without one, say Unio cannot tell and that this is version
-  1.0.
+  1.1.
 
 ## 1. When a session is tracked
 
@@ -387,15 +387,14 @@ If the tools are missing or answer 401 or 403, say once in the chat that
 Unio is not connected and what the error means, keep working, and post the
 pending updates once it is back. Never block the work on the tracker.
 
-- **401:** the token expired, was revoked, or its issuer lost access. A
-  workspace admin who is a developer issues a new one in Unio, under
-  Configurações > Sistema > Agentes (Gerar token). **Claude Code:**
-  `/unio:connect` shows how to store it. **Elsewhere:** the person runs
-  `sh ~/.local/share/unio/agent/plugins/unio/scripts/connect.sh` in a
-  terminal of their own.
+- **401:** the token expired, was revoked, or its owner lost access. The
+  person generates a new one in Unio, under Configurações > Pessoal > Agente
+  de código, and runs the command that page shows in a terminal of their
+  own. **Claude Code:** `/unio:connect` shows the steps.
 - **`agents_disabled`:** a workspace admin must turn agent access on.
 - **`agent_client_outdated`:** this skill is below Unio's minimum; give the
   update steps of section 0.
 
 Never ask for a token in the chat. If one appears there, tell the user to
-revoke it in Unio and issue a new one, because the transcript now holds it.
+revoke it in Configurações > Pessoal > Agente de código and generate a new
+one, because the transcript now holds it.

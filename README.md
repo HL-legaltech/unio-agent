@@ -11,7 +11,7 @@ The plugin carries four things:
 
 ## What you need
 
-- A Unio workspace with agents turned on, and a token for it. Today a workspace administrator with the developer role issues tokens in Unio, under Configurações > Sistema > Agentes > Gerar token (<https://unio.so/app/settings/agents>).
+- A Unio workspace with agents turned on, where you have the developer role. You generate your own token in Unio, under Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>).
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
 - `sh` and `curl`: Linux, macOS, WSL, or Windows with Git Bash.
 
@@ -55,16 +55,11 @@ In a session that is already open, run `/reload-plugins`. On a computer without 
 
 ## Connect
 
-Run `/unio:connect` in Claude Code. It says where the token comes from and prints one command to run in another terminal, outside Claude Code. That command:
+[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It sends you to Configurações > Pessoal > Agente de código for a new token, and when the folder already has a workspace, it prints the installer's command with `--renew` for it, to run in another terminal, outside Claude Code. Otherwise, run the command the page shows.
 
-1. reads the token at a hidden prompt, so it never appears on screen, in the chat or in the shell history;
-2. checks its shape (`unio_` followed by 46 letters and digits);
-3. asks Unio whether it accepts the token, and tells a network failure apart from a refused token;
-4. only then saves it to `~/.config/unio/token`, readable by you alone.
+Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Pessoal > Agente de código and generate a new one.
 
-Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Sistema > Agentes and issue a new one.
-
-The same command takes the token from a pipe instead, for example from a password manager.
+For a setup made by hand, `/unio:connect` also prints `sh <plugin folder>/scripts/connect.sh` when the folder has no workspace yet. That command makes the same checks as the installer and saves the token to `~/.config/unio/token`. It also takes the token from a pipe, for example from a password manager.
 
 ### Allow Unio's tools
 
@@ -218,7 +213,7 @@ claude plugin uninstall unio@unio
 claude plugin marketplace remove unio
 ```
 
-For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting `~/.config/unio/token` does not revoke the token: revoke it in Unio, under Configurações > Sistema > Agentes.
+For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
 
 ## Security
 

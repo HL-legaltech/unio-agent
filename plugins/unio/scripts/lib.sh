@@ -112,6 +112,12 @@ unio_token_file() {
   fi
 }
 
+# The installer's command that replaces workspace $1's token and installs
+# nothing, as the Agente de código page shows it for a renewal.
+unio_renew_command() {
+  printf 'curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace %s --renew' "$1"
+}
+
 unio_expires_in() {
   case $1 in
     0) printf 'vence hoje' ;;

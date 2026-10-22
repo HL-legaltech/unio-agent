@@ -15,7 +15,7 @@ allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh" claude-code)
 
 Summarize the report for the user, in Portuguese: one line saying whether Unio works on this computer, then each `bad` line and each `warn` line, most important first, each with its fix as the report gives it. Leave out `ok` and `info` lines unless the user asks for them.
 
-- `core` lines decide whether Unio works. A token or api line is fixed with `/unio:connect` (after a new token from Configurações > Sistema > Agentes); a version line with `/unio:update`, then `/reload-plugins`.
+- `core` lines decide whether Unio works. A token or api line is fixed with `/unio:connect`, which shows how to get a new token from Configurações > Pessoal > Agente de código; a version line with `/unio:update`, then `/reload-plugins`.
 - `migration` lines are leftovers from a setup made by hand. Offer to fix them, but each one changes files outside this project, so ask before you act, and do one at a time:
   - Move `~/.claude/skills/unio` to `~/.local/share/unio/retired-skill`; never delete it.
   - Save the user-scope server entry before removing it: with `umask 077`, write `jq '.mcpServers.unio' ~/.claude.json` to `~/.local/share/unio/retired-mcp.json`, then run `claude mcp remove unio -s user`. Never run `claude mcp get`, and never print the saved entry: it may hold a token.

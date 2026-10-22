@@ -225,7 +225,8 @@ rm -rf "$conf/workspaces"
 
 # The connect script.
 out=$("$shell" "$scripts/connect.sh" instructions)
-has "$out" "Configurações > Sistema > Agentes > Gerar token"; check "connect names where tokens come from"
+has "$out" "Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent)" &&
+  has "$out" "rode o comando que a página mostra"; check "connect sends a computer without a workspace to the Agente de código page"
 has_line "$out" "sh $scripts/connect.sh" && has "$out" "Nunca cole o token neste chat"; check "connect prints the command to run elsewhere"
 mkdir -p "$tmp/my plugins"
 cp -R "$plugin" "$tmp/my plugins/unio"
@@ -249,13 +250,15 @@ has "$out" "desligados" && [ ! -e "$conf/token" ]; check "connect reports agents
 mkdir -p "$tmp/mapped"
 printf '%s\torg_A\n' "$tmp/mapped" > "$conf/projects"
 out=$(CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions)
-has "$out" "outro workspace (~/.config/unio/workspaces/org_A/token)" && has "$out" "só para as pastas fora de ~/.config/unio/projects"; check "connect says which folders the token it saves serves"
+renew_a="curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_A --renew"
+has_line "$out" "$renew_a" && has "$out" "coding-agent?ws=org_A" && lacks "$out" "connect\.sh"; check "connect gives a folder with a workspace the installer's renewal for it, and no hand command"
 printf 'org_A\n' > "$conf/default-workspace"
 out=$("$shell" "$scripts/connect.sh" instructions)
-has "$out" "nenhuma pasta lê ~/.config/unio/token e o comando se recusa" && lacks "$out" "demais pastas"; check "connect says no folder reads the computer's token while default-workspace exists"
+has_line "$out" "$renew_a" && lacks "$out" "connect\.sh"; check "connect gives the default workspace's renewal, and no hand command, while default-workspace exists"
 before=$(calls)
 out=$(connect "$good")
-has "$out" "default-workspace escolhe o workspace org_A" && [ ! -e "$conf/token" ] && [ "$(calls)" -eq "$before" ]; check "connect saves no token that no folder would read"
+has "$out" "default-workspace escolhe o workspace org_A" && has_line "$out" "$renew_a" && [ ! -e "$conf/token" ] &&
+  [ "$(calls)" -eq "$before" ]; check "connect saves no token that no folder would read, and gives the installer's renewal"
 rm -f "$conf/default-workspace" "$conf/projects"
 out=$(connect "  $good  ")
 has "$out" "Token salvo" && [ "$(cat "$conf/token")" = "$good" ]; check "connect saves an accepted token"
@@ -289,14 +292,21 @@ grep -qx http=200 "$status" && grep -qx status=behind "$status" && grep -qx curr
 private "$status"; check "the status file is private"
 refresh
 [ "$(calls)" -eq $((before + 1)) ]; check "refresh asks at most every 6 hours"
+# The fixture's release is no newer than this plugin from 1.1.0 on, so the
+# notice is served the next major release.
+next=$((${version%%.*} + 1))
+serve "{\"current\":\"$next.0.0\",\"minimum\":\"1.0.0\",\"yours\":\"$version\",\"status\":\"behind\",\"updateUrl\":\"https://github.com/HL-legaltech/unio-agent#update\"}"
+expire status-default
+refresh
+before=$(calls)
 
 out=$(notice)
-[ "$(calls)" -eq $((before + 1)) ]; check "the notice reads local files only"
+[ "$(calls)" -eq "$before" ]; check "the notice reads local files only"
 user=$(hook "$out" user)
 model=$(hook "$out" model)
 is_json "$out"; check "the notice is JSON after a check"
 has "$user" "O token do Unio deste computador vence em 5 dias"; check "the notice warns the token expires within 7 days, naming the computer's token"
-has "$user" "Saiu a versão 1.1.0" && has "$user" "/unio:update"; check "the notice announces a newer release"
+has "$user" "Saiu a versão $next.0.0 " && has "$user" "/unio:update"; check "the notice announces a newer release"
 [ -z "$model" ]; check "update news is for the person only"
 user=$(hook "$(notice)" user)
 lacks "$user" "Saiu a versão"; check "a release is announced once"
@@ -311,11 +321,11 @@ has "$user" "atualizado para $version" && has_line "$user" "$first"; check "an u
 user=$(hook "$(notice)" user)
 lacks "$user" "atualizado para"; check "the update notice shows once per version"
 
-serve '{"current":"1.1","minimum":"1.0","yours":"1.0.0","status":"behind","updateUrl":"https://github.com/HL-legaltech/unio-agent#update"}'
+serve "{\"current\":\"$next.1\",\"minimum\":\"1.0\",\"yours\":\"$version\",\"status\":\"behind\",\"updateUrl\":\"https://github.com/HL-legaltech/unio-agent#update\"}"
 expire status-default
 refresh
 user=$(hook "$(notice)" user)
-grep -qx current=1.1 "$status" && grep -qx minimum=1.0 "$status" && has "$user" "Saiu a versão 1.1 "; check "two-part versions from the server are read"
+grep -qx "current=$next.1" "$status" && grep -qx minimum=1.0 "$status" && has "$user" "Saiu a versão $next.1 "; check "two-part versions from the server are read"
 serve '{"current":"1.2.0","minimum":"1.2","yours":"1.0.0","status":"unsupported","updateUrl":"https://github.com/HL-legaltech/unio-agent#update"}'
 expire status-default
 refresh

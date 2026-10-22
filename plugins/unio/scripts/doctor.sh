@@ -85,7 +85,7 @@ if [ -n "$token" ]; then
         ''|*[!0-9]*) line ok "core api: token aceito" ;;
         *)
           if [ "$days" -le 7 ]; then
-            line warn "core api: token aceito, mas $(unio_expires_in "$days"); gere outro em Configurações > Sistema > Agentes e rode /unio:connect"
+            line warn "core api: token aceito, mas $(unio_expires_in "$days"); gere outro em Configurações > Pessoal > Agente de código e rode /unio:connect"
           else
             line ok "core api: token aceito; $(unio_expires_in "$days")"
           fi ;;
@@ -101,7 +101,7 @@ if [ -n "$token" ]; then
         unsupported) line bad "core version: $version está abaixo do mínimo $minimum, e as ferramentas do Unio recusam chamadas; rode /unio:update" ;;
         *) line info "core version: o servidor não avaliou a versão $version" ;;
       esac ;;
-    401) line bad "core api: o Unio recusou o token (revogado, vencido, ou de quem perdeu o acesso); gere outro em Configurações > Sistema > Agentes e rode /unio:connect" ;;
+    401) line bad "core api: o Unio recusou o token (revogado, vencido, ou de quem perdeu o acesso); gere outro em Configurações > Pessoal > Agente de código e rode /unio:connect" ;;
     403) line bad "core api: os agentes estão desligados neste workspace; um administrador os liga em Configurações > Sistema > Agentes" ;;
     000) line bad "core api: sem resposta de $(unio_api)" ;;
     *) line bad "core api: HTTP $http de $(unio_api)/agents/me" ;;
