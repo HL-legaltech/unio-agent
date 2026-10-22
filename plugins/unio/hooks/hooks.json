@@ -1,0 +1,25 @@
+{
+  "description": "Unio: connection, token, update and migration notices when a session starts",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh", "notice"],
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh", "refresh"],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
