@@ -23,6 +23,12 @@ unio_api() {
   printf '%s/v1' "$origin"
 }
 
+# A path as people read it, with ~ for the home folder.
+unio_tilde() {
+  # shellcheck disable=SC2088 # the tilde is printed, never expanded
+  case $1 in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac
+}
+
 unio_root() {
   CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P
 }

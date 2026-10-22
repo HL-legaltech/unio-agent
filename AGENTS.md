@@ -38,8 +38,9 @@ from the default branch, and Codex clones pull it.
   version is never reused or lowered.
 - Never set `version` in `marketplace.json`: `plugin.json` wins and the two
   would disagree.
-- The CHANGELOG's first section is what a person sees after an update. Write it
-  for them, in a few lines, in English.
+- The CHANGELOG's first section is what a person sees after an update, inside
+  a Portuguese notice. Write each section for them, in a few lines of
+  Brazilian Portuguese.
 
 ## Commits
 
