@@ -82,9 +82,9 @@ if [ -n "$token" ]; then
         ''|*[!0-9]*) line ok "core api: token aceito" ;;
         *)
           if [ "$days" -le 7 ]; then
-            line warn "core api: token aceito, mas vence em $days dias; gere outro em Configurações > Sistema > Agentes e rode /unio:connect"
+            line warn "core api: token aceito, mas $(unio_expires_in "$days"); gere outro em Configurações > Sistema > Agentes e rode /unio:connect"
           else
-            line ok "core api: token aceito; vence em $days dias"
+            line ok "core api: token aceito; $(unio_expires_in "$days")"
           fi ;;
       esac
       status=$(unio_json_field "$json" skill status)

@@ -109,13 +109,9 @@ notice() {
         tell "Unio agents are switched off in this workspace, so the Unio tools will fail." ;;
       200)
         days=$(field days)
-        case $days in
-          '') ;;
-          0) say "Seu token do Unio vence hoje: gere outro em Configurações > Sistema > Agentes e rode /unio:connect." ;;
-          1) say "Seu token do Unio vence em 1 dia: gere outro em Configurações > Sistema > Agentes e rode /unio:connect." ;;
-          *) [ "$days" -le 7 ] &&
-               say "Seu token do Unio vence em $days dias: gere outro em Configurações > Sistema > Agentes e rode /unio:connect." ;;
-        esac
+        if [ -n "$days" ] && [ "$days" -le 7 ]; then
+          say "Seu token do Unio $(unio_expires_in "$days"): gere outro em Configurações > Sistema > Agentes e rode /unio:connect."
+        fi
         case $(field status) in
           unsupported)
             minimum=$(field minimum)

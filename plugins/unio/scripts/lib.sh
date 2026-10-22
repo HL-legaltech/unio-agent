@@ -112,6 +112,14 @@ unio_token_file() {
   fi
 }
 
+unio_expires_in() {
+  case $1 in
+    0) printf 'vence hoje' ;;
+    1) printf 'vence em 1 dia' ;;
+    *) printf 'vence em %s dias' "$1" ;;
+  esac
+}
+
 # unio_ followed by 46 base62 characters, as the server mints them.
 unio_is_token() {
   case $1 in unio_*) ;; *) return 1 ;; esac

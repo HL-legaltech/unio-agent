@@ -1,9 +1,10 @@
 """A stand-in for the Unio API route the plugin's scripts call, for tests/run.sh.
 
-GET /v1/agents/me answers by bearer token: the good tokens get an agent
-whose skill block is read, on every request, from the file given on the
-command line (a copy of tests/fixtures/skill_block.json, the contract the
-backend tests too); the refused token gets 401 and the switched-off one 403.
+GET /v1/agents/me answers by bearer token: the refused token gets 401, the
+switched-off one 403, and the good tokens an agent. Its skill block, and
+its token's days left when the file sets "expiresInDays" (5 otherwise),
+are read on every request from the file given on the command line: a copy
+of tests/fixtures/skill_block.json, the contract the backend tests too.
 Each request's X-Unio-Client header, or "-", is appended to the log file.
 Bodies are compact JSON, as the backend sends them, so the scripts' sed
 patterns are tested against no spaces around colons and commas.
@@ -46,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         if token not in GOOD:
             return self.answer(401, {"error": "Token de agente inválido.", "code": "invalid_agent_token"})
         with open(SKILL_BLOCK) as block:
-            skill = json.load(block)["skill"]
+            served = json.load(block)
         return self.answer(200, {"data": {
             "agent": {"id": 7, "clerkId": "user_agent", "name": AGENT, "avatarUrl": None,
                       "voice": {"tone": "direct", "notes": None}},
@@ -55,8 +56,9 @@ class Handler(BaseHTTPRequestHandler):
             "teams": [{"id": 1, "name": "Team", "identifier": "ABC"}],
             "issuer": {"id": 3, "clerkId": "user_issuer", "name": "IssuerNameMarker"},
             "token": {"id": 9, "name": "Laptop", "prefix": token[:12],
-                      "expiresAt": "2026-10-27T00:00:00.000Z", "expiresInDays": 5},
-            "skill": skill,
+                      "expiresAt": "2026-10-27T00:00:00.000Z",
+                      "expiresInDays": served.get("expiresInDays", 5)},
+            "skill": served["skill"],
         }})
 
 

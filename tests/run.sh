@@ -94,6 +94,8 @@ refresh() { "$shell" "$scripts/session-start.sh" refresh; }
 connect() { printf '%s\n' "$1" | "$shell" "$scripts/connect.sh"; }
 doctor() { "$shell" "$scripts/doctor.sh" claude-code; }
 serve() { printf '{"skill":%s}\n' "$1" > "$tmp/skill_block.json"; }
+# Serves the fixture with the token's days left set to $1.
+days_left() { sed "s/}\$/,\"expiresInDays\":$1}/" "$here/fixtures/skill_block.json" > "$tmp/skill_block.json"; }
 # Ages a status file, so the next refresh asks the API again.
 expire() { touch -t 202001010000 "$CLAUDE_PLUGIN_DATA/$1"; }
 
@@ -308,6 +310,19 @@ has "$report" "^warn core token: .*chmod 600"; check "doctor flags a token file 
 has "$report" "^warn migration user-skill" && has "$report" "^warn migration user-mcp" &&
   has "$report" "^warn migration static-token"; check "doctor reports the migration leftovers"
 lacks "$report" "unio_[A-Za-z0-9]" && lacks "$report" Marker; check "doctor never prints a token or a name the server returned"
+days_left 1
+out=$(connect "$good")
+has "$out" "Ele vence em 1 dia\."; check "connect says a token's last day in the singular"
+report=$(doctor)
+has "$report" "^warn core api: token aceito, mas vence em 1 dia;"; check "doctor says a token's last day in the singular"
+days_left 0
+report=$(doctor)
+has "$report" "^warn core api: token aceito, mas vence hoje;"; check "doctor says a token expires today"
+expire status-default
+refresh
+user=$(hook "$(notice)" user)
+has "$user" "Seu token do Unio vence hoje:"; check "the notice says a token expires today"
+cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
 printf '%s' "$refused" > "$conf/token"
 report=$(doctor)
 has "$report" "^bad core api: o Unio recusou o token"; check "doctor reports a refused token"

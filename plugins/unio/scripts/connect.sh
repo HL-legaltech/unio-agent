@@ -117,7 +117,7 @@ connect() {
   days=$(unio_json_field "$json" token expiresInDays)
   printf 'Token salvo em %s' "$(unio_tilde "$UNIO_CONF/token")"
   [ -z "$workspace" ] || printf ', para o workspace %s' "$workspace"
-  case $days in ''|*[!0-9]*) printf '.\n' ;; *) printf '. Ele vence em %s dias.\n' "$days" ;; esac
+  case $days in ''|*[!0-9]*) printf '.\n' ;; *) printf '. Ele %s.\n' "$(unio_expires_in "$days")" ;; esac
   echo "No Claude Code, rode /mcp, escolha plugin:unio:unio e depois Reconnect (ou rode /reload-plugins). Em seguida, /unio:doctor confirma a conexão."
 }
 
