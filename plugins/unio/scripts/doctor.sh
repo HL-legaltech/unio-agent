@@ -27,8 +27,10 @@ line() { printf '%s %s\n' "$1" "$2"; }
 
 line info "core plugin: unio $version em $(unio_tilde "$root")"
 installed=
+# unio_root is a physical path, and ~/.claude is often a link (dotfiles).
+cfg_physical=$(CDPATH='' cd -P -- "$cfg" 2>/dev/null && pwd -P)
 case $root in
-  "$cfg"/plugins/cache/*) installed=1 ;;
+  "$cfg"/plugins/cache/*|"${cfg_physical:-$cfg}"/plugins/cache/*) installed=1 ;;
   *) [ "$kind" = codex ] || line info "core plugin: carregado de uma pasta (--plugin-dir), então /unio:update e a atualização automática não se aplicam" ;;
 esac
 

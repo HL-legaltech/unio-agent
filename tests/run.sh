@@ -310,6 +310,12 @@ has "$report" "^warn core token: .*chmod 600"; check "doctor flags a token file 
 has "$report" "^warn migration user-skill" && has "$report" "^warn migration user-mcp" &&
   has "$report" "^warn migration static-token"; check "doctor reports the migration leftovers"
 lacks "$report" "unio_[A-Za-z0-9]" && lacks "$report" Marker; check "doctor never prints a token or a name the server returned"
+has "$report" "^info core plugin: carregado de uma pasta (--plugin-dir)" && lacks "$report" "core updates:"; check "doctor tells a plugin loaded from a folder"
+mkdir -p "$tmp/dotfiles/claude/plugins/cache/unio/unio"
+cp -R "$plugin" "$tmp/dotfiles/claude/plugins/cache/unio/unio/$version"
+ln -s "$tmp/dotfiles/claude" "$tmp/linked-claude"
+report=$(CLAUDE_CONFIG_DIR=$tmp/linked-claude "$shell" "$tmp/linked-claude/plugins/cache/unio/unio/$version/scripts/doctor.sh" claude-code)
+lacks "$report" "plugin-dir" && has "$report" "core updates:"; check "doctor knows an installed plugin under a linked config folder"
 days_left 1
 out=$(connect "$good")
 has "$out" "Ele vence em 1 dia\."; check "connect says a token's last day in the singular"
