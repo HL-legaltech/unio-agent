@@ -23,6 +23,7 @@ quote() {
 instructions() {
   command="sh $(quote "$(unio_root)/scripts/connect.sh")"
   file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
+  default=$(unio_workspace '')
   cat <<EOF
 Para conectar este computador ao Unio:
 
@@ -35,9 +36,12 @@ $command
 
 Nunca cole o token neste chat.
 EOF
-  if [ "$file" != "$UNIO_CONF/token" ]; then
-    printf '\nEsta pasta usa o token de outro workspace (%s). O comando grava %s, que vale para as demais pastas.\n' \
-      "$(unio_tilde "$file")" "$(unio_tilde "$UNIO_CONF/token")"
+  if [ -n "$default" ]; then
+    printf '\nAtenção: %s escolhe o workspace %s para as pastas sem workspace próprio, então nenhuma pasta lê %s e o comando se recusa a gravá-lo. Apague esse arquivo antes de rodar o comando, ou troque o token desta pasta direto em %s.\n' \
+      "$(unio_tilde "$UNIO_CONF/default-workspace")" "$default" "$(unio_tilde "$UNIO_CONF/token")" "$(unio_tilde "$file")"
+  elif [ "$file" != "$UNIO_CONF/token" ]; then
+    printf '\nEsta pasta usa o token de outro workspace (%s). O comando grava %s, que vale só para as pastas fora de %s.\n' \
+      "$(unio_tilde "$file")" "$(unio_tilde "$UNIO_CONF/token")" "$(unio_tilde "$UNIO_CONF/projects")"
   elif [ -e "$file" ]; then
     printf '\nJá existe um token em %s; o comando o substitui.\n' "$(unio_tilde "$file")"
   fi
@@ -66,6 +70,11 @@ read_token() {
 connect() {
   if [ -n "${CLAUDECODE:-}" ]; then
     echo "Rode este comando em outro terminal, fora do Claude Code: aqui, o que você digita pode entrar na conversa."
+    return 1
+  fi
+  default=$(unio_workspace '')
+  if [ -n "$default" ]; then
+    echo "$(unio_tilde "$UNIO_CONF/default-workspace") escolhe o workspace $default para as pastas sem workspace próprio, então nenhuma pasta leria $(unio_tilde "$UNIO_CONF/token"). Apague esse arquivo e rode este comando de novo. Nada foi lido."
     return 1
   fi
   if [ -t 0 ] && ! { : </dev/tty; } 2>/dev/null; then

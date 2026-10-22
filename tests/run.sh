@@ -194,6 +194,17 @@ out=$(connect "$refused")
 has "$out" "recusou este token" && [ ! -e "$conf/token" ]; check "connect tells a refused token apart and saves nothing"
 out=$(connect "$off")
 has "$out" "desligados" && [ ! -e "$conf/token" ]; check "connect reports agents switched off and saves nothing"
+mkdir -p "$tmp/mapped"
+printf '%s\torg_A\n' "$tmp/mapped" > "$conf/projects"
+out=$(CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions)
+has "$out" "outro workspace (~/.config/unio/workspaces/org_A/token)" && has "$out" "só para as pastas fora de ~/.config/unio/projects"; check "connect says which folders the token it saves serves"
+printf 'org_A\n' > "$conf/default-workspace"
+out=$("$shell" "$scripts/connect.sh" instructions)
+has "$out" "nenhuma pasta lê ~/.config/unio/token e o comando se recusa" && lacks "$out" "demais pastas"; check "connect says no folder reads the computer's token while default-workspace exists"
+before=$(calls)
+out=$(connect "$good")
+has "$out" "default-workspace escolhe o workspace org_A" && [ ! -e "$conf/token" ] && [ "$(calls)" -eq "$before" ]; check "connect saves no token that no folder would read"
+rm -f "$conf/default-workspace" "$conf/projects"
 out=$(connect "  $good  ")
 has "$out" "Token salvo" && [ "$(cat "$conf/token")" = "$good" ]; check "connect saves an accepted token"
 private "$conf/token"; check "the saved token is private"

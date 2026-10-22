@@ -117,7 +117,7 @@ Type them as ordinary messages, in either language; the skill recognizes them.
 ## Where things live
 
 - **Token:** `~/.config/unio/token`, mode 600. Claude Code, Codex and the commands all read this one file.
-- **Another workspace for some folders:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each (the longest match wins; the id starts with `org_` and is the `ws=` value of a Unio link), and that workspace's token is `~/.config/unio/workspaces/<workspace id>/token`. `~/.config/unio/default-workspace` names the workspace for every other folder.
+- **Another workspace for some folders:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each (the longest match wins; the id starts with `org_` and is the `ws=` value of a Unio link), and that workspace's token is `~/.config/unio/workspaces/<workspace id>/token`. `~/.config/unio/default-workspace` names the workspace for every other folder; while it exists, no folder reads `~/.config/unio/token`, so the connect command refuses to save a token there.
 - **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
 
 <a id="codex"></a>
