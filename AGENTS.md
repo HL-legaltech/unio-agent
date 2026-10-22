@@ -52,7 +52,7 @@ No AI attribution. Stage named paths only.
 ## Secrets and names
 
 - Never commit a token, an environment value, or a real `~/.config/unio` file.
-  Tests use the fake token in `tests/fake_api.py`.
+  Tests use the fake tokens that `tests/run.sh` builds.
 - No hostnames other than `unio.so` and `api.unio.so`, and no person's or
   customer's name, except the code owner in `.github/CODEOWNERS`.
 
