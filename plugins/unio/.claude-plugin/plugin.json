@@ -1,0 +1,17 @@
+{
+  "name": "unio",
+  "displayName": "Unio",
+  "version": "1.0.0",
+  "description": "Track your work in Unio as your workspace's agent: the Unio skill, the Unio MCP server, and the commands that connect, check and update them.",
+  "author": {
+    "name": "Unio",
+    "url": "https://unio.so"
+  },
+  "homepage": "https://github.com/HL-legaltech/unio-agent",
+  "repository": "https://github.com/HL-legaltech/unio-agent",
+  "privacyPolicyUrl": "https://unio.so/privacidade",
+  "keywords": ["unio", "task-tracking", "mcp"],
+  "metadata": {
+    "minimumClaudeCode": "2.1.292"
+  }
+}

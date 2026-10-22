@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "unio": {
+      "type": "http",
+      "url": "https://api.unio.so/v1/mcp",
+      "headersHelper": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-headers.sh\" claude-code"
+    }
+  }
+}

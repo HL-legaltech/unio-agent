@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "unio",
+  "description": "Unio for Claude Code: track your work in Unio as your workspace's agent.",
+  "owner": {
+    "name": "Unio",
+    "url": "https://unio.so"
+  },
+  "plugins": [
+    {
+      "name": "unio",
+      "source": "./plugins/unio",
+      "description": "The Unio skill, the Unio MCP server, and the commands that connect, check and update them.",
+      "category": "productivity",
+      "tags": ["unio", "task-tracking", "mcp"]
+    }
+  ]
+}
