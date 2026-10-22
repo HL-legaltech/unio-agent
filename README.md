@@ -15,7 +15,30 @@ The plugin carries four things:
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
 - `sh` and `curl`: Linux, macOS, WSL, or Windows with Git Bash.
 
-## Install in Claude Code
+<a id="install"></a>
+
+## Install with one command
+
+In Unio, open Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>), generate a token, and paste the command the page shows into a terminal of your own, outside Claude Code:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_…
+```
+
+The page fills in `--workspace`, the workspace the token belongs to. `--client codex` sets up Codex instead of Claude Code, and `--renew` only replaces the token, installing nothing. The installer:
+
+1. checks that `claude` is Claude Code 2.1.292 or later;
+2. installs the plugin from this marketplace, unless it is installed already;
+3. turns on auto-update, when your settings hold the marketplace entry exactly as Claude Code wrote it, and otherwise says how;
+4. reads the token at a hidden prompt, so it never appears on screen, in the chat or in the shell history, and checks its shape (`unio_` followed by 46 letters and digits);
+5. asks Unio whether it accepts the token, and tells a network failure apart from a refused token and from another workspace's token;
+6. only then saves it to `~/.config/unio/workspaces/<workspace>/token`, readable by you alone.
+
+The first workspace on a computer serves every folder. For another one, it asks whether that workspace serves only the folder you ran it in (the default) or the whole computer, except the folders tied to another workspace. Each line it prints is in Portuguese, and the last one is `Conectado ao Unio.` when everything worked.
+
+To read the script before running it, open [install.sh](install.sh). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
+
+## Install in Claude Code by hand
 
 ```sh
 claude plugin marketplace add HL-legaltech/unio-agent
@@ -116,15 +139,16 @@ Type them as ordinary messages, in either language; the skill recognizes them.
 
 ## Where things live
 
-- **Token:** `~/.config/unio/token`, mode 600. Claude Code, Codex and the commands all read this one file.
-- **Another workspace for some folders:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each (the longest match wins; the id starts with `org_` and is the `ws=` value of a Unio link), and that workspace's token is `~/.config/unio/workspaces/<workspace id>/token`. `~/.config/unio/default-workspace` names the workspace for every other folder; while it exists, no folder reads `~/.config/unio/token`, so the connect command refuses to save a token there.
+- **Tokens:** `~/.config/unio/workspaces/<workspace id>/token`, mode 600, one per workspace. The id starts with `org_` and is the `ws=` value of a Unio link. Claude Code, Codex and the commands all read these files.
+- **Which workspace a folder uses:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each, and the longest match wins. Every other folder uses the workspace named in `~/.config/unio/default-workspace`. The installer writes both.
+- **A setup from before the installer:** `~/.config/unio/token`, read only while `default-workspace` does not exist. The hand-setup command (`connect.sh`) still saves a token there, and refuses to while `default-workspace` exists.
 - **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
 
 <a id="codex"></a>
 
 ## Codex
 
-Codex uses the same skill, the same header helper and the same token file, from a clone of this repository.
+Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. By hand:
 
 1. Clone it, and link the skill where Codex looks for skills:
 

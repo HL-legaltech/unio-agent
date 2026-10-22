@@ -1,7 +1,8 @@
 #!/bin/sh
-# Runs the plugin's scripts against tests/fake_api.py in a throwaway HOME: no
-# real token, config or API is touched, and nothing leaves the machine. The
-# scripts run under the shell that runs this file, so CI runs it twice:
+# Runs the plugin's scripts and install.sh against tests/fake_api.py in a
+# throwaway HOME: no real token, config or API is touched, and nothing leaves
+# the machine. The scripts run under the shell that runs this file, so CI
+# runs it twice:
 #   dash tests/run.sh
 #   bash tests/run.sh
 set -u
@@ -21,6 +22,7 @@ good=$(fake_token FakeTokenNotASecret)
 other=$(fake_token OtherFakeTokenNotASecret)
 refused=$(fake_token RevokedFakeTokenNotASecret)
 off=$(fake_token AgentsOffFakeTokenNotASecret)
+second=$(fake_token SecondWorkspaceFakeTokenNotASecret)
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/unio-tests.XXXXXX")
 server=
@@ -42,8 +44,58 @@ cat > "$tmp/bin/curl" <<EOF
 printf '%s\n' "\$*" >> "$tmp/curl-argv.log"
 exec "$real_curl" "\$@"
 EOF
-printf '#!/bin/sh\necho "2.1.308 (Claude Code)"\n' > "$tmp/bin/claude"
-chmod +x "$tmp/bin/curl" "$tmp/bin/claude"
+# The claude CLI, as far as the doctor and the installer call it. Its
+# arguments are logged too. install --marketplace writes settings.json the
+# way Claude Code 2.1.308 does, byte for byte.
+cat > "$tmp/bin/claude" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/claude-argv.log"
+cfg=\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}
+case "\$*" in
+  --version) printf '%s (Claude Code)\n' "\$(cat "$tmp/claude-version" 2>/dev/null || echo 2.1.308)" ;;
+  "plugin list --json")
+    if [ -e "\$cfg/fake-installed" ]; then
+      enabled=true
+      [ ! -e "\$cfg/fake-disabled" ] || enabled=false
+      printf '[\n  {\n    "id": "unio@unio",\n    "version": "1.0.0",\n    "scope": "user",\n    "enabled": %s,\n    "mcpServers": {\n      "unio": {\n        "type": "http"\n      }\n    }\n  }\n]\n' "\$enabled"
+    else
+      echo '[]'
+    fi ;;
+  "plugin install unio --marketplace HL-legaltech/unio-agent")
+    if [ -e "$tmp/claude-fails" ]; then echo "Failed to add marketplace: network unreachable" >&2; exit 1; fi
+    mkdir -p "\$cfg"
+    [ -e "\$cfg/settings.json" ] || cat > "\$cfg/settings.json" <<'JSON'
+{
+  "extraKnownMarketplaces": {
+    "unio": {
+      "source": {
+        "source": "github",
+        "repo": "HL-legaltech/unio-agent"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "unio@unio": true
+  }
+}
+JSON
+    touch "\$cfg/fake-installed"
+    echo "Successfully installed plugin: unio@unio (scope: user)" ;;
+  *) echo "unexpected claude call: \$*" >&2; exit 64 ;;
+esac
+EOF
+# git, only for the installer's Codex runs: a clone copies this plugin.
+mkdir -p "$tmp/git-bin"
+cat > "$tmp/git-bin/git" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/git-argv.log"
+case \$1 in
+  clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" ;;
+  -C) [ "\$3" = pull ] ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git"
 PATH=$tmp/bin:$PATH
 
 free_port() {
@@ -53,7 +105,7 @@ port=$(free_port)
 closed=$(free_port)
 cp "$here/fixtures/skill_block.json" "$tmp/skill_block.json"
 python3 -I "$here/fake_api.py" "$port" "$tmp/clients.log" "$tmp/skill_block.json" \
-  "$refused" "$off" "$good" "$other" 2>"$tmp/server.err" &
+  "$refused" "$off" "$good" "$other" "$second=org_Second" 2>"$tmp/server.err" &
 server=$!
 tries=0
 until "$real_curl" -s -o /dev/null "http://127.0.0.1:$port/"; do
@@ -109,8 +161,8 @@ printf '%s' "$served" | grep -qF -e "${fixture%?}" && lacks "$served" '": '; che
 out=$("$shell" "$here/check_versions.sh" refs/heads/no-such-base 2>&1)
 code=$?
 [ "$code" -eq 1 ] && has "$out" "no-such-base does not exist" && lacks "$out" "Versions agree"; check "the version gate fails on a base ref that does not exist"
-shaped=$(printf '%s\n' "$good" "$other" "$refused" "$off" | grep -cx 'unio_[0-9A-Za-z]\{46\}')
-[ "$shaped" -eq 4 ]; check "the fake tokens have the real shape"
+shaped=$(printf '%s\n' "$good" "$other" "$refused" "$off" "$second" | grep -cx 'unio_[0-9A-Za-z]\{46\}')
+[ "$shaped" -eq 5 ]; check "the fake tokens have the real shape"
 
 # The command skills. In the default permission mode, a !-injected command
 # runs only when an allowed-tools Bash rule matches it exactly.
@@ -363,7 +415,242 @@ rm -f "$conf/token"
 report=$(doctor)
 has "$report" "^bad core token: falta" && has "$report" "/unio:connect"; check "doctor sends a computer without a token to /unio:connect"
 
-! grep -q -e "$good" -e "$other" -e "$refused" -e "$off" "$tmp/curl-argv.log"; check "no token was ever on curl's command line"
+# The installer, run as `curl ... | sh -s -- ...` runs it: the script on
+# stdin, in a terminal of its own that types the answers (tests/pty_run.py).
+# Each scenario gets a home folder of its own.
+installer=$(CDPATH='' cd -- "$here/.." && pwd -P)/install.sh
+has_text() { printf '%s' "$1" | grep -qF -e "$2"; }
+last_line() { printf '%s\n' "$1" | tail -n 1; }
+claude_calls() { cat "$tmp/claude-argv.log" 2>/dev/null | wc -l | tr -d ' '; }
+home() {
+  HOME=$tmp/homes/$1
+  conf=$HOME/.config/unio
+  mkdir -p "$conf"
+  api "$port"
+}
+# What the person types: the token at its prompt, then each answer to the
+# workspace question.
+types() {
+  printf 'Cole o token do Unio: \t%s\n' "$1" > "$tmp/answers"
+  shift
+  for answer; do printf 'Escolha 1 ou 2 [1]: \t%s\n' "$answer" >> "$tmp/answers"; done
+}
+# Runs the installer from folder $1 with the arguments that follow.
+install_in() {
+  dir=$1
+  shift
+  (cd "$dir" && python3 -I "$here/pty_run.py" "$installer" "$tmp/answers" -- "$shell" -s -- "$@") > "$tmp/transcript"
+  result=$?
+  cat "$tmp/transcript" >> "$tmp/transcripts.log"
+  cat "$tmp/transcript"
+  return "$result"
+}
+token_of() { cat "$conf/workspaces/$1/token" 2>/dev/null; }
+helper_line="http_headers_helper = \"sh '$tmp/homes/codex/.local/share/unio/agent/plugins/unio/scripts/mcp-headers.sh' codex\""
+mkdir -p "$tmp/repo" "$tmp/repo2" "$tmp/repo3"
+ln -s "$tmp/repo2" "$tmp/linked-repo2"
+
+floor=$(sed -n 's/^floor=//p' "$installer")
+minimum=$(sed -n 's/.*"minimumClaudeCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin/.claude-plugin/plugin.json")
+[ -n "$floor" ] && [ "$floor" = "$minimum" ]; check "the installer's Claude Code floor is the plugin's minimumClaudeCode"
+
+home args
+types "$good"
+before=$(claude_calls)
+out=$(install_in "$tmp/repo")
+code=$?
+[ "$code" -eq 2 ] && has_text "$out" "Falta --workspace" && [ "$(claude_calls)" -eq "$before" ]; check "the installer needs --workspace and runs nothing without it"
+refused_all=1
+for key in org_ org_a-b 'org_../x' ORG_x 'org_a b' "org_x$(printf '\033')"; do
+  out=$(install_in "$tmp/repo" --workspace "$key")
+  has_text "$out" "não é um workspace do Unio" || refused_all=0
+done
+[ "$refused_all" -eq 1 ] && [ "$(claude_calls)" -eq "$before" ] && [ ! -e "$conf/workspaces" ]; check "the installer refuses a workspace key outside ^org_[A-Za-z0-9]+\$"
+out=$(install_in "$tmp/repo" --workspace org_test --client cursor)
+has_text "$out" "--client aceita claude-code ou codex"; check "the installer names the clients it knows"
+out=$(install_in "$tmp/repo" --workspace org_test --token "$good")
+has_text "$out" "Opção desconhecida: --token." && lacks "$out" "unio_"; check "the installer refuses an unknown option without repeating what follows it"
+out=$(CLAUDECODE=1 install_in "$tmp/repo" --workspace org_test)
+has_text "$out" "fora do Claude Code" && lacks "$out" "Cole o token" && [ "$(claude_calls)" -eq "$before" ]; check "the installer refuses to run inside Claude Code"
+out=$(cd "$tmp/repo" && python3 -I "$here/pty_run.py" --no-tty "$installer" -- "$shell" -s -- --workspace org_test 2>&1)
+has_text "$out" "precisa de um terminal" && [ "$(claude_calls)" -eq "$before" ]; check "without a terminal, the installer stops before installing anything"
+
+mkdir -p "$tmp/no-claude"
+ln -s "$tmp/bin/curl" "$tmp/no-claude/curl"
+if [ ! -e /usr/bin/claude ] && [ ! -e /bin/claude ]; then
+  out=$(PATH=$tmp/no-claude:/usr/bin:/bin install_in "$tmp/repo" --workspace org_test)
+  has_text "$out" "O comando claude não está no PATH. Instale o Claude Code $floor ou mais novo" && lacks "$out" "Cole o token"
+else
+  echo "(a claude command sits in /usr/bin or /bin)"
+  false
+fi; check "the installer stops when claude is not on PATH"
+printf '2.1.200' > "$tmp/claude-version"
+out=$(install_in "$tmp/repo" --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "O Claude Code 2.1.200 é anterior ao $floor" && lacks "$out" "Cole o token" &&
+  ! grep -q '^plugin install' "$tmp/claude-argv.log" 2>/dev/null; check "the installer stops below the Claude Code floor"
+rm -f "$tmp/claude-version"
+touch "$tmp/claude-fails"
+out=$(install_in "$tmp/repo" --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "Não foi possível instalar o plugin do Unio (Failed to add marketplace: network unreachable)" &&
+  lacks "$out" "Cole o token" && [ ! -e "$conf/workspaces" ]; check "a failed plugin install stops the installer with claude's reason"
+rm -f "$tmp/claude-fails"
+
+home fresh
+types "$good"
+before=$(calls)
+out=$(install_in "$tmp/repo" --workspace org_test)
+code=$?
+[ "$code" -eq 0 ] && [ "$(last_line "$out")" = "Conectado ao Unio." ]; check "a first install ends with Conectado ao Unio."
+has_text "$out" "Claude Code 2.1.308 encontrado." && has_text "$out" "Plugin do Unio instalado." &&
+  grep -qx 'plugin install unio --marketplace HL-legaltech/unio-agent' "$tmp/claude-argv.log"; check "the installer checks Claude Code and installs the plugin from the marketplace"
+python3 -I -c '
+import json, sys
+entry = json.load(open(sys.argv[1]))["extraKnownMarketplaces"]["unio"]
+sys.exit(0 if entry == {"source": {"source": "github", "repo": "HL-legaltech/unio-agent"}, "autoUpdate": True} else 1)' "$HOME/.claude/settings.json" &&
+  has_text "$out" "Atualização automática do plugin ligada, em ~/.claude/settings.json."; check "the installer turns on auto-update in the entry Claude Code wrote"
+has_text "$out" "Cole o token do Unio: " && [ "$(token_of org_test)" = "$good" ] && private "$conf/workspaces/org_test/token"; check "the token read at the hidden prompt is saved, private, in its workspace's folder"
+[ -n "$(find "$conf" "$conf/workspaces" "$conf/workspaces/org_test" -prune -perm 700 | sed -n 3p)" ]; check "the installer's folders are private"
+[ "$(cat "$conf/default-workspace")" = org_test ] && has_text "$out" "O workspace org_test vale em todas as pastas deste computador."; check "the first workspace becomes the computer's default"
+[ "$(calls)" -eq $((before + 1)) ] && [ "$(last_client)" = "-" ]; check "the installer checks the token once, without the client header the page reads as the coding agent"
+[ -z "$(find "$conf" -name '*.new')" ]; check "the installer leaves no temporary file"
+has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the header helper sends the installed token from any folder"
+before=$(claude_calls)
+types "$other"
+out=$(install_in "$tmp/repo3" --workspace org_test)
+[ "$(last_line "$out")" = "Conectado ao Unio." ] && has_text "$out" "O plugin do Unio já está instalado; a instalação foi pulada." &&
+  has_text "$out" "A atualização automática do plugin já está ligada." && [ "$(token_of org_test)" = "$other" ] &&
+  lacks "$out" "Escolha" && ! sed -n "$((before + 1)),\$p" "$tmp/claude-argv.log" | grep -q '^plugin install'; check "run again, the installer skips the install and only replaces the token"
+types "$good"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+[ "$(last_line "$out")" = "Conectado ao Unio." ] && [ "$(claude_calls)" -eq $((before + 2)) ] && [ "$(token_of org_test)" = "$good" ]; check "--renew calls no claude command and replaces the token"
+
+types unio_short
+before=$(calls)
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "Isso não é um token do Unio" && [ "$(calls)" -eq "$before" ] && [ "$(token_of org_test)" = "$good" ]; check "the installer refuses a malformed token without sending it"
+api "$closed"
+types "$other"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+has_text "$out" "O Unio não respondeu: confira a rede" && [ "$(token_of org_test)" = "$good" ]; check "the installer tells a network failure (000) apart and saves nothing"
+api "$port"
+types "$refused"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+has_line "$out" "O Unio recusou o token. Gere outro na página Agente de código e rode o comando de novo." && [ "$(token_of org_test)" = "$good" ]; check "the installer tells a refused token (401) apart and saves nothing"
+types "$off"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+has_text "$out" "desligados neste workspace" && [ "$(token_of org_test)" = "$good" ]; check "the installer reports agents switched off (403) and saves nothing"
+types "$second"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+has_text "$out" "Este token é do workspace org_Second, mas o comando é para o org_test. Nada foi salvo." &&
+  [ "$(token_of org_test)" = "$good" ] && [ ! -e "$conf/workspaces/org_Second" ]; check "the installer refuses another workspace's token and saves nothing"
+
+types "$second" 1
+out=$(install_in "$tmp/linked-repo2" --workspace org_Second)
+has_text "$out" "Este computador já usa o Unio com outro workspace. Onde usar o workspace org_Second?" &&
+  has_text "$out" "1. Só nesta pasta: $tmp/repo2" && [ "$(token_of org_Second)" = "$second" ] &&
+  [ "$(cat "$conf/default-workspace")" = org_test ]; check "a second workspace asks where it applies"
+printf '%s\torg_Second\n%s\torg_Second\n' "$tmp/repo2" "$tmp/linked-repo2" | cmp -s - "$conf/projects" &&
+  has_text "$out" "O workspace org_Second vale só em $tmp/repo2 e nas pastas dentro dela."; check "answered 1, it maps this folder, by its real path and by the link it was reached through"
+has "$(headers "$tmp/repo2")" "Bearer $second" && has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's"
+types "$second" x ''
+out=$(install_in "$tmp/repo3" --workspace org_Second)
+[ "$(printf '%s\n' "$out" | grep -c 'Escolha 1 ou 2')" -eq 2 ] && grep -q "^$tmp/repo3	org_Second\$" "$conf/projects" &&
+  grep -q "^$tmp/repo2	org_Second\$" "$conf/projects"; check "an unknown answer asks again, and Enter keeps the folder"
+types "$second"
+out=$(install_in "$tmp/elsewhere" --workspace org_Second --renew)
+lacks "$out" "Escolha" && [ "$(cat "$conf/default-workspace")" = org_test ] && [ "$(wc -l < "$conf/projects" | tr -d ' ')" -eq 3 ]; check "--renew of a workspace this computer knows changes no folder"
+types "$second" 2
+out=$(install_in "$tmp/elsewhere" --workspace org_Second)
+[ "$(cat "$conf/default-workspace")" = org_Second ] && has_text "$out" "passa a valer em todas as pastas deste computador" &&
+  has "$(headers "$tmp/elsewhere")" "Bearer $second"; check "answered 2, the second workspace becomes the computer's default"
+
+home legacy
+printf '%s\n' "$good" > "$conf/token"
+types "$other"
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+lacks "$out" "Escolha" && [ "$(cat "$conf/default-workspace")" = org_test ] &&
+  has_text "$out" "O token em ~/.config/unio/token deixa de ser lido."; check "a computer token of the same workspace is taken over without a question"
+home legacy-other
+printf '%s\n' "$second" > "$conf/token"
+types "$good" 1
+out=$(install_in "$tmp/repo" --workspace org_test --renew)
+has_text "$out" "Onde usar o workspace org_test?" && [ ! -e "$conf/default-workspace" ] && has "$(headers "$tmp/elsewhere")" "Bearer $second" &&
+  has "$(headers "$tmp/repo")" "Bearer $good"; check "a computer token of another workspace counts as a first workspace"
+
+home settings
+mkdir -p "$HOME/.claude"
+touch "$HOME/.claude/fake-installed"
+cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_unio_unio__*"
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "unio": {
+      "source": {
+        "source": "github",
+        "repo": "HL-legaltech/unio-agent"
+      }
+    },
+    "other": {
+      "source": {
+        "source": "github",
+        "repo": "example/other"
+      }
+    }
+  }
+}
+JSON
+types "$good"
+out=$(install_in "$tmp/repo" --workspace org_test)
+python3 -I -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+known = data["extraKnownMarketplaces"]
+ok = known["unio"]["autoUpdate"] is True and "autoUpdate" not in known["other"] and data["permissions"]["allow"] == ["mcp__plugin_unio_unio__*"]
+sys.exit(0 if ok else 1)' "$HOME/.claude/settings.json"; check "auto-update is turned on beside other settings and marketplaces"
+printf '{"extraKnownMarketplaces":{"unio":{"source":{"source":"github","repo":"HL-legaltech/unio-agent"}}}}\n' > "$HOME/.claude/settings.json"
+cp "$HOME/.claude/settings.json" "$tmp/settings.copy"
+touch "$HOME/.claude/fake-disabled"
+out=$(install_in "$tmp/repo" --workspace org_test)
+cmp -s "$HOME/.claude/settings.json" "$tmp/settings.copy" &&
+  has_text "$out" "Ligue a atualização automática do plugin: no Claude Code, /plugin > Marketplaces > unio > Enable auto-update."; check "settings in a shape Claude Code does not write are left alone, and the installer says how"
+has_text "$out" "claude plugin enable unio@unio"; check "the installer says when the plugin is installed but turned off"
+mv "$HOME/.claude/settings.json" "$tmp/linked-settings.json"
+ln -s "$tmp/linked-settings.json" "$HOME/.claude/settings.json"
+out=$(install_in "$tmp/repo" --workspace org_test)
+[ -L "$HOME/.claude/settings.json" ] && has_text "$out" "Ligue a atualização automática"; check "a linked settings file is never replaced"
+
+home codex
+mkdir -p "$HOME/.codex"
+before=$(claude_calls)
+types "$good"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
+[ "$(last_line "$out")" = "Conectado ao Unio." ] && [ "$(claude_calls)" -eq "$before" ] && [ "$(token_of org_test)" = "$good" ]; check "Codex: the installer calls no claude command and saves the token"
+grep -qx "clone --quiet https://github.com/HL-legaltech/unio-agent.git $HOME/.local/share/unio/agent" "$tmp/git-argv.log"; check "Codex: the installer clones the repository to ~/.local/share/unio/agent"
+[ "$(CDPATH='' cd -P -- "$HOME/.agents/skills/unio" && pwd -P)" = "$HOME/.local/share/unio/agent/plugins/unio/skills/unio" ]; check "Codex: the skill is linked into ~/.agents/skills/unio"
+has_line "$out" "$helper_line" && has_line "$out" "url = \"http://127.0.0.1:$port/v1/mcp\"" && has_line "$out" "[mcp_servers.unio]"; check "Codex: the config block names the real home folder"
+out=$(cd "$tmp/elsewhere" && "$shell" "$HOME/.local/share/unio/agent/plugins/unio/scripts/mcp-headers.sh" codex)
+has "$out" "Bearer $good" && has "$out" "codex/$version"; check "Codex: the helper the block names sends the token"
+printf '\n[mcp_servers.unio]\n%s\n' "$helper_line" >> "$HOME/.codex/config.toml"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
+grep -qx "\-C $HOME/.local/share/unio/agent pull --quiet --ff-only" "$tmp/git-argv.log" && has_text "$out" "A skill do Unio já está em ~/.agents/skills/unio." &&
+  has_text "$out" "O Codex já lê o token pelo helper do Unio" && lacks "$out" "Acrescente"; check "Codex, run again: the clone is pulled, the link and the config are kept"
+home codex-taken
+mkdir -p "$HOME/.local/share/unio/agent"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
+has_text "$out" "não é um clone do Unio" && lacks "$out" "Cole o token"; check "Codex: a folder in the clone's place stops the installer"
+
+! grep -q -e "$good" -e "$other" -e "$refused" -e "$off" -e "$second" "$tmp/claude-argv.log" "$tmp/git-argv.log" &&
+  ! grep -q 'unio_[A-Za-z0-9]\{20\}' "$tmp/transcripts.log"; check "no token was ever on claude's or git's command line, or on the installer's terminal"
+! grep -i -e 'cannot ' -e 'not found' -e 'no such file' -e 'syntax error' -e 'unexpected' -e 'permission denied' "$tmp/transcripts.log"; check "the installer's terminal shows no shell or command error"
+
+! grep -q -e "$good" -e "$other" -e "$refused" -e "$off" -e "$second" "$tmp/curl-argv.log"; check "no token was ever on curl's command line"
 
 echo "$((checks - fails)) of $checks checks passed under $shell"
 [ "$fails" -eq 0 ]

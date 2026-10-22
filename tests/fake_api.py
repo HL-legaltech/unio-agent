@@ -1,7 +1,8 @@
 """A stand-in for the Unio API route the plugin's scripts call, for tests/run.sh.
 
 GET /v1/agents/me answers by bearer token: the refused token gets 401, the
-switched-off one 403, and the good tokens an agent. Its skill block, and
+switched-off one 403, and the good tokens an agent in workspace org_test,
+or in the workspace named after "=" (<token>=org_X). Its skill block, and
 its token's days left when the file sets "expiresInDays" (5 otherwise),
 are read on every request from the file given on the command line: a copy
 of tests/fixtures/skill_block.json, the contract the backend tests too.
@@ -9,7 +10,7 @@ Each request's X-Unio-Client header, or "-", is appended to the log file.
 Bodies are compact JSON, as the backend sends them, so the scripts' sed
 patterns are tested against no spaces around colons and commas.
 
-Usage: fake_api.py <port> <log> <skill block file> <refused> <off> <good>...
+Usage: fake_api.py <port> <log> <skill block file> <refused> <off> <good>[=<org>]...
 """
 
 import json
@@ -17,7 +18,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT, LOG, SKILL_BLOCK, REFUSED, OFF = sys.argv[1:6]
-GOOD = set(sys.argv[6:])
+GOOD = dict((arg.split("=", 1) + ["org_test"])[:2] for arg in sys.argv[6:])
 
 # Names an administrator typed: the scripts must never repeat them to Claude.
 WORKSPACE = 'WorkspaceNameMarker "quoted"'
@@ -51,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.answer(200, {"data": {
             "agent": {"id": 7, "clerkId": "user_agent", "name": AGENT, "avatarUrl": None,
                       "voice": {"tone": "direct", "notes": None}},
-            "workspace": {"clerkId": "org_test", "name": WORKSPACE, "sigla": "WS",
+            "workspace": {"clerkId": GOOD[token], "name": WORKSPACE, "sigla": "WS",
                           "appUrl": "https://unio.so"},
             "teams": [{"id": 1, "name": "Team", "identifier": "ABC"}],
             "issuer": {"id": 3, "clerkId": "user_issuer", "name": "IssuerNameMarker"},
