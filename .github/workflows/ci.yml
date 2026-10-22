@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # GitHub-hosted only, never self-hosted: pull requests to a public
+    # repository can come from anyone's fork.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.308
+
+      - name: Validate the marketplace and the plugin
+        run: |
+          claude plugin validate --strict .
+          claude plugin validate --strict plugins/unio
+
+      - name: Lint every script as POSIX sh
+        run: |
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 shellcheck -s sh
+
+      - name: Check the contract fixture
+        run: python3 -I tests/check_fixture.py
+
+      - name: Run the scripts against a fake API under dash
+        run: dash tests/run.sh
+
+      - name: Run the scripts against a fake API under bash
+        run: bash tests/run.sh
+
+      - name: Check the version rules
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            sh tests/check_versions.sh "origin/$BASE_REF"
+          else
+            sh tests/check_versions.sh
+          fi

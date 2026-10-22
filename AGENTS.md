@@ -42,6 +42,29 @@ from the default branch, and Codex clones pull it.
   a Portuguese notice. Write each section for them, in a few lines of
   Brazilian Portuguese.
 
+## Checks
+
+CI (`.github/workflows/ci.yml`) runs these on every pull request. Run them
+before opening one:
+
+```sh
+claude plugin validate --strict .
+claude plugin validate --strict plugins/unio
+git ls-files -z '*.sh' | xargs -0 shellcheck -s sh
+python3 -I tests/check_fixture.py
+dash tests/run.sh
+bash tests/run.sh
+sh tests/check_versions.sh origin/main
+```
+
+- A change to a command or to the hook also needs a real run of each command
+  it touches, in the default permission mode, from a throwaway config folder
+  you are signed in to: `CLAUDE_CONFIG_DIR=<folder> claude -p --plugin-dir
+  plugins/unio "/unio:doctor"`. Only that run proves an injected script is
+  allowed to run.
+- `tests/fixtures/skill_block.json` is copied verbatim into the backend's
+  spec of `get_me`. Change it only together with that spec.
+
 ## Commits
 
 Conventional Commits, in English: `type(scope): subject`, imperative, lower
