@@ -62,6 +62,20 @@ class Text(unittest.TestCase):
         self.assertTrue(p.stdout.endswith(" ok"))
 
 
+class Trees(HomeCase):
+    def test_read_only_files_go(self):
+        # As git leaves its objects; on Windows only a chmod lets them go.
+        tree = self.tmp / "snapshot" / ".git" / "objects" / "ab"
+        tree.mkdir(parents=True)
+        (tree / "cdef").write_text("x", encoding="utf-8")
+        os.chmod(tree / "cdef", 0o444)
+        inbox.remove_tree(self.tmp / "snapshot")
+        self.assertFalse((self.tmp / "snapshot").exists())
+
+    def test_missing_tree(self):
+        inbox.remove_tree(self.tmp / "none")
+
+
 class ProcessGroups(unittest.TestCase):
     def test_kill_stops_the_session_and_what_it_started(self):
         child = ("import subprocess, sys, time\n"

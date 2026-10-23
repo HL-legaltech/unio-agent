@@ -109,6 +109,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -498,6 +499,22 @@ def replace_file(src, dst):
             if os.name != "nt" or attempt == 4:
                 raise
             time.sleep(0.1)
+
+
+def remove_tree(path):
+    """shutil.rmtree, errors ignored, that also takes read-only files: git
+    leaves its objects read-only, and Windows refuses to delete those."""
+    def writable(func, target, _error):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=writable)
 
 
 def write_atomic(path, text):
@@ -1399,7 +1416,7 @@ class Snapshots:
         stale = None
         try:
             if not (path / ".git").is_dir():
-                shutil.rmtree(path, ignore_errors=True)
+                remove_tree(path)
                 self._clone(name, path)
             elif not stamp.exists() or time.time() - stamp.stat().st_mtime >= REPO_REFRESH.total_seconds():
                 try:
@@ -1424,7 +1441,7 @@ class Snapshots:
     def _clone(self, name, path):
         self.state.repos_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         partial = path.with_name(f".{path.name}.partial")
-        shutil.rmtree(partial, ignore_errors=True)
+        remove_tree(partial)
         self._run([self.cfg.gh, "repo", "clone", name, str(partial), "--", "--filter=blob:none", "--quiet",
                    "--config", f"core.hooksPath={os.devnull}"], 600, "gh repo clone")
         self._checkout(partial)
