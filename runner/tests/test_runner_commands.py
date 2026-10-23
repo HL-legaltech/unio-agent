@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from inbox_support import inbox
 from runner_support import RUNNER, Sandbox, captured, load_runner
 
 ur = load_runner()
@@ -136,6 +137,25 @@ class Commands(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("Não havia serviço instalado para org_test.", out)
         self.assertIn("Não havia token do serviço salvo para org_test neste computador.", out)
+
+
+class EnvFile(unittest.TestCase):
+    """A profile's env file means the same to unio-runner as to unio-inbox."""
+
+    def test_reads_what_the_runner_reads(self):
+        box = Sandbox(self)
+        path = box.root / "env"
+        prof = ur.Profile("org_test", box.root, box.root, box.root / "runner-token")
+        for text in ('\ufeffUNIO_API_URL="http://127.0.0.1:1/v1"\nUNIO_RUNNER_AUTOUPDATE=\'off\'\n',
+                     "# local\n UNIO_RUNNER_AUTOUPDATE = false \nUNIO_API_URL=https://api.unio.so/v1\n",
+                     "UNIO_RUNNER_AUTOUPDATE=0\n", "UNIO_RUNNER_AUTOUPDATE=No\n", "UNIO_RUNNER_AUTOUPDATE=on\n", ""):
+            path.write_text(text, encoding="utf-8")
+            ours, theirs = ur.read_env_file(path), inbox.read_env_file(path)
+            for key in ("UNIO_API_URL", "UNIO_RUNNER_AUTOUPDATE"):
+                self.assertEqual(ours.get(key), theirs.get(key), text)
+            with box.inside():
+                off = ur.autoupdate(prof).startswith("desligada (UNIO_RUNNER_AUTOUPDATE=")
+            self.assertEqual(off, not inbox.autoupdate_on(theirs), text)
 
 
 # An empty file works everywhere; os.devnull is "nul" on Windows.

@@ -287,18 +287,21 @@ def profiles():
 
 
 def read_env_file(path):
-    """KEY=VALUE lines, # comments, as unio-inbox reads the profile's env."""
+    """KEY=VALUE lines, # comments, quotes around a whole value dropped: the
+    profile's env as unio-inbox reads it."""
     values = {}
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        text = Path(path).read_text(encoding="utf-8").lstrip("﻿")
     except OSError:
         return values
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
     return values
 
 
@@ -972,8 +975,9 @@ def running_version(prof):
 
 def autoupdate(prof):
     value = os.environ.get("UNIO_RUNNER_AUTOUPDATE") or read_env_file(prof.env_file).get("UNIO_RUNNER_AUTOUPDATE")
-    if (value or "").strip().lower() == "off":
-        return "desligada (UNIO_RUNNER_AUTOUPDATE=off)"
+    # The words unio-inbox's autoupdate_on() reads as off.
+    if (value or "").strip().lower() in ("off", "0", "false", "no"):
+        return "desligada (UNIO_RUNNER_AUTOUPDATE=%s)" % clean(value.strip(), 20)
     if not (CLONE / ".git").exists():
         return "desligada (%s não é um clone git)" % tilde(CLONE)
     return "ligada"
