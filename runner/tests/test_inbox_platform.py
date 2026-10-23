@@ -25,6 +25,49 @@ class PlatformName(unittest.TestCase):
             self.assertIsNone(inbox.desk_memory())
 
 
+# A typical small server: 4 GiB, 3 available, no swap at all.
+SMALL_MACHINE = "MemTotal:        4194304 kB\nMemFree:          524288 kB\nMemAvailable:    3145728 kB\n" \
+                "SwapTotal:             0 kB\nSwapFree:              0 kB\n"
+
+
+class MemoryFloors(HomeCase):
+    """The floors measured on the workstation the runner without --workspace
+    serves would hold a profile's answers on most other machines forever."""
+
+    def setUp(self):
+        super().setUp()
+        meminfo = self.tmp / "meminfo"
+        meminfo.write_text(SMALL_MACHINE, encoding="utf-8")
+        for patch in (mock.patch.object(inbox.sys, "platform", "linux"),
+                      mock.patch.object(inbox, "MEMINFO", str(meminfo)),
+                      mock.patch.object(inbox, "DESK_FILE", self.tmp / "no-desk.json")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_workstation_floors_stay_without_a_profile(self):
+        self.assertEqual(inbox.desk_memory(), "3.0 GiB free of 4 GiB")
+        self.assertIsNone(inbox.Config(dict(os.environ)).memory_floor)
+
+    def test_a_profile_has_no_floor_unless_its_env_sets_one(self):
+        cfg = inbox.Config(dict(os.environ), "org_test")
+        self.assertEqual((cfg.memory_floor, cfg.memory_error), (0, None))
+        self.assertIsNone(inbox.desk_memory(cfg.memory_floor))
+        cfg = inbox.Config(dict(os.environ, UNIO_INBOX_MEMORY_FLOOR_GIB="1.5"), "org_test")
+        self.assertEqual(cfg.memory_floor, 1.5)
+        self.assertIsNone(inbox.desk_memory(cfg.memory_floor))
+        self.assertEqual(inbox.desk_memory(3.5), "3.0 GiB free of 4 GiB")
+        cfg = inbox.Config(dict(os.environ, UNIO_INBOX_MEMORY_FLOOR_GIB="lots"), "org_test")
+        self.assertEqual(cfg.memory_floor, 0)
+        self.assertIn("UNIO_INBOX_MEMORY_FLOOR_GIB=lots", cfg.memory_error)
+
+    def test_a_profile_runner_never_pauses_for_the_workstation_floors(self):
+        runner = inbox.Runner(inbox.Config(dict(os.environ), "org_test"))
+        runner.state.ensure()
+        h = {}
+        self.assertFalse(runner.memory_pause(None, h, inbox.utcnow()))
+        self.assertNotIn("backoffReason", h)
+
+
 class RulePaths(unittest.TestCase):
     def test_posix(self):
         self.assertEqual(inbox.rule_path("/home/u/repos/a", windows=False), "//home/u/repos/a")

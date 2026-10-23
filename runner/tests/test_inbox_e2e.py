@@ -1,6 +1,7 @@
 """One --workspace --once run, end to end: the runner as main() starts it,
 a fake Unio API on 127.0.0.1, and a fake claude found on PATH that answers
 through the MCP server it is given."""
+import contextlib
 import json
 import os
 import shutil
@@ -50,6 +51,23 @@ class Once(HomeCase):
         # The memory guard reads this machine's /proc, which a test must not depend on.
         with mock.patch.object(inbox, "desk_memory", return_value=None):
             return inbox.main(["--workspace", "org_test", "--once"])
+
+    @contextlib.contextmanager
+    def small_machine(self):
+        """Linux with 4 GiB, 3 of them available, and no swap, as many small servers are."""
+        meminfo = self.tmp / "meminfo"
+        meminfo.write_text("MemTotal: 4194304 kB\nMemAvailable: 3145728 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+                           encoding="utf-8")
+        with mock.patch.object(inbox.sys, "platform", "linux"), mock.patch.object(inbox, "MEMINFO", str(meminfo)), \
+                mock.patch.object(inbox, "DESK_FILE", self.tmp / "no-desk.json"):
+            yield
+
+    def test_a_small_machine_without_swap(self):
+        # The workstation floors would hold every answer here.
+        with self.small_machine():
+            self.assertEqual(inbox.main(["--workspace", "org_test", "--once"]), 0)
+        self.assertEqual(len(self.fake.seen("POST", "/v1/agents/inbox/complete")), 1)
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/release"), [])
 
     def sessions(self):
         return [json.loads(line) for line in self.claude_log.read_text(encoding="utf-8").splitlines()]
@@ -155,6 +173,14 @@ class OnceWithoutProfile(Once):
         self.assertTrue((self.legacy / "runner-id").is_file())
         self.assertFalse((self.home / ".config" / "unio" / "runners").exists())
         self.assertFalse((self.home / ".local" / "state" / "unio" / "runners").exists())
+
+    def test_a_small_machine_without_swap(self):
+        # The floors measured on the workstation this setup serves still hold.
+        with self.small_machine():
+            self.assertEqual(inbox.main(["--once"]), 0)
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/claim"), [])
+        health = json.loads((self.state / "health.json").read_text(encoding="utf-8"))
+        self.assertEqual(health["backoffReason"], "memory_pressure")
 
     def test_the_local_responder_is_still_required(self):
         self.responder.unlink()

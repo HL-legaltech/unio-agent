@@ -21,7 +21,8 @@ all); or released without spending an attempt when the machine is the problem.
 Low memory is one, on Linux: under 4 GiB available, under 1 GiB of free swap
 with under 8 GiB available, or a critical reading from unio-desk (its
 desk.json, under 90 s old) holds answers for 5 minutes and skips the reviews
-then due.
+then due. A profile instead holds only under UNIO_INBOX_MEMORY_FLOOR_GIB
+available, when set, or on a critical desk.json.
 
 Every prompt names the agent's writing language (GET /agents/me), and what the
 runner posts itself comes in that language, English or Brazilian Portuguese.
@@ -89,6 +90,8 @@ and UNIO_INBOX_GH (the executables; default: claude and gh on PATH).
 UNIO_INBOX_WEB (off, search or on; default off): search lets an inbox run use web
 search, on also lets it read the pages it finds.
 UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
+UNIO_INBOX_MEMORY_FLOOR_GIB (a profile on Linux; default none): GiB of memory
+available below which answers wait.
 UNIO_REVIEW (off, observe or on; default off), UNIO_REVIEW_WINDOW (06:30-09:00),
 UNIO_REVIEW_TZ (America/Sao_Paulo) and UNIO_REVIEW_MODEL (default: the inbox's).
 UNIO_NEEDS (off, observe or on; default off), UNIO_NEEDS_INTERVAL (15 min between
@@ -594,7 +597,8 @@ MEMINFO = "/proc/meminfo"
 # unio-desk's "tight" floor, in GiB. 4 GiB is one surge from the OOM line (six next
 # dev servers grew 0.55-0.83 GB each in 25 min). Past 1 GiB of free swap the kernel
 # evicts executable pages (the 2026-08-07 stall), which bites only under 8 GiB
-# available: swap 84 % full beside 12-16 GiB available was harmless.
+# available: swap 84 % full beside 12-16 GiB available was harmless. Measured on the
+# one workstation the runner without --workspace serves, so a profile never uses them.
 AVAIL_FLOOR_GIB = 4
 SWAP_FLOOR_GIB = 1
 SWAP_GATE_GIB = 8
@@ -602,9 +606,11 @@ SWAP_GATE_GIB = 8
 DESK_FRESH = 90
 
 
-def desk_memory():
+def desk_memory(floor=None):
     """Why no session may start now, or None. Reads /proc itself, so it holds
     with no governor alive; desk.json only adds unio-desk's critical levels.
+    `floor` is None for the workstation floors above, or a profile's own
+    floor in GiB available (Config.memory_floor), where 0 never holds.
     Linux only: other systems have no /proc/meminfo, and no floor was
     measured on them, so nothing holds there (serve() logs it once)."""
     if not sys.platform.startswith("linux"):
@@ -616,7 +622,10 @@ def desk_memory():
         detail = f"{avail:.1f} GiB free of {mi['MemTotal'] / 2**20:.0f} GiB"
     except (OSError, ValueError, KeyError, IndexError):
         return None  # unreadable: never hold, as ready() does
-    if avail < AVAIL_FLOOR_GIB or (swap_free < SWAP_FLOOR_GIB and avail < SWAP_GATE_GIB):
+    if floor is not None:
+        if avail < floor:
+            return detail
+    elif avail < AVAIL_FLOOR_GIB or (swap_free < SWAP_FLOOR_GIB and avail < SWAP_GATE_GIB):
         return detail
     try:
         if time.time() - DESK_FILE.stat().st_mtime < DESK_FRESH and \
@@ -852,6 +861,11 @@ class Config:
         self.max_budget_usd = float(self.max_budget)
         self.daily_budget = max(0.0, float(env.get("UNIO_INBOX_DAILY_BUDGET_USD") or 15))
         self.hourly_sessions = max(1, int(env.get("UNIO_INBOX_HOURLY_SESSIONS") or 20))
+        # A profile runs on any computer, often a small one without swap, where the
+        # workstation floors would hold every answer: it waits for memory only
+        # below a floor its env sets. None keeps the workstation floors.
+        self.memory_floor, self.memory_error = (
+            env_number(env, "UNIO_INBOX_MEMORY_FLOOR_GIB", 0, 0, 1024) if workspace else (None, None))
         self.model = env.get("UNIO_INBOX_MODEL") or None
         web = (env.get("UNIO_INBOX_WEB") or "off").strip().lower()
         self.web = web if web in WEB_TOOLS else "off"
@@ -2965,7 +2979,7 @@ class Runner:
 
         try:
             # Asked again after the claim: the snapshot refresh before it can take minutes.
-            low = desk_memory()
+            low = desk_memory(self.cfg.memory_floor)
             if low:
                 now = utcnow()
                 s, v = Session(), Verdict("release", reason="memory_pressure", error=low, detail=low,
@@ -3149,7 +3163,7 @@ class Runner:
         return bool(over)
 
     def memory_pause(self, api, h, now):
-        low = desk_memory()
+        low = desk_memory(self.cfg.memory_floor)
         if low:
             self.pause(h, "memory_pressure", low, now + MEMORY_PAUSE, api, low)
         return bool(low)
@@ -3229,6 +3243,11 @@ class Runner:
         if not sys.platform.startswith("linux"):
             self.state.log("memory_guard_off", detail=f"no /proc/meminfo on {platform_name()}: answers never wait "
                                                       "for memory here")
+        elif self.cfg.memory_floor:
+            self.state.log("memory_guard", floorGiB=self.cfg.memory_floor)
+        elif self.cfg.workspace:
+            self.state.log("memory_guard_off", error=self.cfg.memory_error,
+                           detail="no UNIO_INBOX_MEMORY_FLOOR_GIB set: answers wait for no memory floor")
         if self.cfg.zone_note:
             self.state.log("zone_fallback", detail=self.cfg.zone_note)
         self.presence.start()
