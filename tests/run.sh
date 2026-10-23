@@ -255,20 +255,20 @@ has "$out" "Bearer $good"; check "an unknown folder on a computer without mapped
 
 # Folder forms: Claude Code says C:/x on Windows where Git Bash's pwd -P,
 # which the installer writes, says /c/x; Windows and macOS ignore case.
-forms=$(
-  # shellcheck source=../plugins/unio/scripts/lib.sh
-  . "$scripts/lib.sh"
-  printf 'org_B\n' > "$UNIO_CONF/default-workspace"
+# shellcheck disable=SC2016 # the script's own expansions, in its shell
+forms=$("$shell" -c '
+  . "$1"
+  printf "org_B\n" > "$UNIO_CONF/default-workspace"
   UNIO_OS=windows
-  printf '%s|' "$(unio_dir_key 'C:\Users\Ana\Repo\')" "$(unio_dir_key 'c:/Users/ana/repo')" "$(unio_dir_key /c/Users/Ana/Repo)"
-  printf '/c/Users/Ana/Repo\torg_A\n' > "$UNIO_CONF/projects"
-  printf '%s|' "$(unio_workspace 'C:/Users/ANA/repo/sub')" "$(unio_workspace 'C:\Users\Ana\Repository')"
+  printf "%s|" "$(unio_dir_key "C:\\Users\\Ana\\Repo\\")" "$(unio_dir_key c:/Users/ana/repo)" "$(unio_dir_key /c/Users/Ana/Repo)"
+  printf "/c/Users/Ana/Repo\torg_A\n" > "$UNIO_CONF/projects"
+  printf "%s|" "$(unio_workspace C:/Users/ANA/repo/sub)" "$(unio_workspace "C:\\Users\\Ana\\Repository")"
   UNIO_OS=macos
-  printf '/Users/Ana/Repo\torg_A\n' > "$UNIO_CONF/projects"
-  printf '%s|' "$(unio_workspace /Users/ana/REPO)"
+  printf "/Users/Ana/Repo\torg_A\n" > "$UNIO_CONF/projects"
+  printf "%s|" "$(unio_workspace /Users/ana/REPO)"
   UNIO_OS=linux
-  printf '%s|' "$(unio_workspace /Users/ana/REPO)"
-)
+  printf "%s|" "$(unio_workspace /Users/ana/REPO)"
+' sh "$scripts/lib.sh")
 [ "$forms" = "/c/users/ana/repo|/c/users/ana/repo|/c/users/ana/repo|org_A|org_B|org_A|org_B|" ]; check "Windows folder forms and case-insensitive systems map one folder (got $forms)"
 rm -f "$conf/default-workspace" "$conf/projects" "$conf/token"
 rm -rf "$conf/workspaces"
