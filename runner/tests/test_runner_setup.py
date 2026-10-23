@@ -317,6 +317,31 @@ class SetupWithService(Base):
         self.assertIn("no service manager here", out)
 
 
+class TaskEndToEnd(Base):
+    """The Windows task's stop path on every system: the fake Task Scheduler
+    runs the real unio-inbox, which stops on its stop file and releases what
+    it holds, so /End, which would kill it, is never needed."""
+
+    def test_restart_and_stop_let_the_runner_finish(self):
+        self.assertEqual(self.setup("--repos-json", str(self.repos))[0], 0)
+        with self.box.inside():
+            prof = ur.profile("org_test")
+            svc = ur.Tasks(user="PC\\someone")
+            with captured():
+                svc.install("org_test", prof, sys.executable, self.box.inbox, "")
+                self.assertEqual(svc.state("org_test"), "running")
+                svc.restart("org_test")
+                self.assertEqual(svc.state("org_test"), "running")
+                svc.stop("org_test")
+                self.assertEqual(svc.state("org_test"), "stopped")
+        events = self.box.logged(prof.log_file)
+        self.assertEqual([e["event"] for e in events if e["event"] in ("start", "stop")],
+                         ["start", "stop", "start", "stop"])
+        self.assertEqual([e.get("by") for e in events if e["event"] == "stop"], ["stop_file", "stop_file"])
+        self.assertNotIn("/End", [argv[1] for argv in self.box.logged(self.box.service_log) if argv[0] == "schtasks"])
+        self.assertFalse((prof.state / ur.STOP_FILE).exists())
+
+
 @unittest.skipUnless(ur.service_kind() is not None, "no service manager unio-runner knows on this system")
 class ServiceEndToEnd(Base):
     """Setup and every command after it, with this system's own service

@@ -170,7 +170,10 @@ FAKE_SERVICE_STATE holds each workspace's state (running, ready: installed
 and not running, stopped or disabled) and the pid of the runner it started.
 Starting a service starts the real unio-inbox FAKE_SERVICE_INBOX names, in
 the background as the service would, and waits for its start line; ending
-one stops that process. `cleanup` ends every runner still running."""
+one stops that process. A task's state, as Task Scheduler's, is whether
+that process still runs, which it may stop on its own (its stop file), and
+/Run while it runs starts no second one (IgnoreNew). `cleanup` ends every
+runner still running."""
 import json
 import os
 import re
@@ -253,6 +256,19 @@ def ours(pid):
 
 
 def alive(pid):
+    if pid is None:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) would end the process on Windows.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT: still running
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except OSError:
@@ -281,7 +297,7 @@ def start(org):
 def end(org):
     pid = pids.pop(org, None)
     save()
-    if pid is None:
+    if not alive(pid):
         return
     log = log_file(org)
     mark = size(log)
@@ -370,14 +386,16 @@ if tool == "schtasks":
     if verb == "/run":
         if state[org] == "disabled":
             finish(1, "ERROR: The task is disabled.")
-        start(org)
-        finish()
+        if not alive(pids.get(org)):
+            start(org)
+        finish(0, "SUCCESS: Attempted to run the scheduled task.")
     if verb == "/end":
         end(org)
         state[org] = "ready" if state[org] == "running" else state[org]
         save()
         finish()
     if verb == "/change":
+        # Neither starts nor stops the runner, as in Task Scheduler.
         state[org] = "disabled" if "/DISABLE" in args else "ready"
         save()
         finish()
@@ -389,7 +407,9 @@ if tool == "schtasks":
     if verb == "/query":
         finish()
 if tool == "powershell":
-    finish(0, str({"running": 4, "ready": 3, "disabled": 1}.get(state.get(org), -1)))
+    if org not in state:
+        finish(0, "-1")
+    finish(0, "4" if alive(pids.get(org)) else "1" if state[org] == "disabled" else "3")
 print("unexpected %s call: %s" % (tool, " ".join(args)), file=sys.stderr)
 sys.exit(64)
 '''

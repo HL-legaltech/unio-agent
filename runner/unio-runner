@@ -60,6 +60,9 @@ START_WAIT = 60
 # 2 s apart, and 8 s to mark its presence ended. Twice that, for a slow
 # resolver or a loaded machine.
 STOP_WAIT = 120
+# unio-inbox's STOP_FILE (a test keeps the two equal): written in a profile's
+# state folder, it stops that runner as SIGTERM does.
+STOP_FILE = "stop"
 STATE_WORDS = {
     "running": "ligado",
     "stopped": "parado",
@@ -847,9 +850,12 @@ class Launchd:
 class Tasks:
     kind = "schtasks"
 
-    def __init__(self, run_command=None, user=None):
+    def __init__(self, run_command=None, user=None, profile_of=None, clock=time.monotonic, sleep=time.sleep):
         self.run = run_command or run
         self.user = user
+        self.profile_of = profile_of or profile
+        self.clock = clock
+        self.sleep = sleep
 
     def name(self, org):
         return task_name(org)
@@ -875,15 +881,45 @@ class Tasks:
     def stop(self, org):
         # The time trigger repeats every minute, so only a disabled task stays stopped.
         must(self.run(["schtasks", "/Change", "/TN", task_name(org), "/DISABLE"]), "desativar %s" % task_name(org))
-        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        self.end(org)
 
     def restart(self, org):
-        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        self.end(org)
         must(self.run(["schtasks", "/Run", "/TN", task_name(org)]), "iniciar %s" % task_name(org))
 
     def remove(self, org, last):
-        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        # Disabled first, so no trigger starts it again before it is deleted.
+        self.run(["schtasks", "/Change", "/TN", task_name(org), "/DISABLE"])
+        self.end(org)
         self.run(["schtasks", "/Delete", "/TN", task_name(org), "/F"])
+
+    def end(self, org):
+        """Stops the runner as SIGTERM does elsewhere, so it ends its session,
+        releases its item and marks its presence ended: /End kills pythonw.exe
+        outright, and the session it started lives on outside the task. Asks
+        through the stop file, and uses /End only when the runner has not
+        stopped within STOP_WAIT or its state cannot be read. Returns once the
+        task has left Running, since a /Run before that is dropped."""
+        state = self.state(org)
+        if state == "running":
+            write_atomic(self.profile_of(org).state / STOP_FILE, b"")
+            if self.wait_stopped(org, 5):
+                return
+            say("Esperando o serviço de %s terminar o que está fazendo (até %d s)." % (org, STOP_WAIT))
+            if self.wait_stopped(org, STOP_WAIT - 5):
+                return
+        elif state != "unknown":
+            return
+        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        self.wait_stopped(org, 15)
+
+    def wait_stopped(self, org, seconds):
+        deadline = self.clock() + seconds
+        while self.state(org) == "running":
+            if self.clock() >= deadline:
+                return False
+            self.sleep(1)
+        return True
 
     def state(self, org):
         # The state as a number: schtasks prints it in the system's language.

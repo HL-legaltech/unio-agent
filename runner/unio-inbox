@@ -727,6 +727,11 @@ def apply_env_file(path, environ=os.environ):
 # exit status that asks the service manager to start the runner again (EX_TEMPFAIL).
 UPDATE_EVERY = timedelta(hours=6)
 RESTART_EXIT = 75
+# A file in a profile's state folder that stops its runner as SIGTERM does. On
+# Windows nothing can send the windowless pythonw.exe a signal it can catch, and
+# Task Scheduler's /End kills it with its item still claimed, so unio-runner
+# writes this instead. The runner looks every second.
+STOP_FILE = "stop"
 # The clone this file runs from: runner/unio-inbox is two levels below its root.
 CLONE_ROOT = Path(__file__).resolve().parent.parent
 SEMVER = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?$")
@@ -3239,6 +3244,8 @@ class Runner:
         """Poll until stopped. Returns the exit status: 0, or RESTART_EXIT once
         `updater` brought newer code into the clone."""
         self.state.ensure()
+        # Before the start line, which unio-runner waits for before it may ask a stop.
+        asked, watched = self.watch_stop_file() if self.cfg.workspace else (None, None)
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
                        reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode,
                        workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None,
@@ -3274,8 +3281,38 @@ class Runner:
         with file_lock(self.state.lock_file) as held:
             if held:
                 self.save(self.state.health())
-        self.state.log("stop", pid=os.getpid(), exit=RESTART_EXIT if moved else None)
+        if watched:
+            watched.set()
+        self.state.log("stop", pid=os.getpid(), exit=RESTART_EXIT if moved else None,
+                       by="stop_file" if asked and asked.is_set() else None)
         return RESTART_EXIT if moved else 0
+
+    def watch_stop_file(self):
+        """Sets `stopping` once STOP_FILE appears. Returns two events: `asked`,
+        which the watch sets when the file stopped the runner, and `done`, which
+        ends the watch. A file there before this process started asked a stop
+        already done."""
+        path = self.state.dir / STOP_FILE
+        asked, done = threading.Event(), threading.Event()
+
+        def remove():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            return True
+
+        def watch():
+            while not done.wait(1) and not stopping.is_set():
+                if path.exists() and remove():
+                    asked.set()
+                    stopping.set()
+
+        remove()
+        threading.Thread(target=watch, daemon=True).start()
+        return asked, done
 
     def update(self, updater):
         """An update check under the poll lock, so no --once run of this

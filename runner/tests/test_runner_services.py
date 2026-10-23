@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from runner_support import Recorder, load_runner
+from runner_support import Recorder, captured, load_runner
 
 ur = load_runner()
 TASK = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
@@ -318,18 +318,89 @@ class TaskCommands(Base):
         self.assertEqual(rec.calls, [["schtasks", "/Create", "/TN", self.NAME, "/XML", str(xml), "/F"],
                                      ["schtasks", "/Run", "/TN", self.NAME]])
 
-    def test_start_stop_restart_remove(self):
-        rec = Recorder()
-        svc = ur.Tasks(run_command=rec, user="PC\\someone")
+    def tasks(self, stops=True, readable=True):
+        """Tasks against a scripted Task Scheduler and a clock that sleeping moves:
+        the runner stops on its stop file (stops=True) or never does, and /End
+        kills it."""
+        self.running, self.now, self.calls = True, 0.0, []
+
+        def run(argv, env=None, timeout=None):
+            argv = [str(a) for a in argv]
+            self.calls.append(argv)
+            if argv[0] == "powershell":
+                return (0, "4\r\n" if self.running else "3\r\n", "") if readable else (1, "", "")
+            if argv[:2] == ["schtasks", "/End"]:
+                self.running = False
+            if argv[:2] == ["schtasks", "/Run"]:
+                self.running = True
+            return 0, "", ""
+
+        def sleep(seconds):
+            self.now += seconds
+            stop = self.prof.state / ur.STOP_FILE
+            if stops and stop.exists():
+                stop.unlink()
+                self.running = False
+
+        return ur.Tasks(run_command=run, user="PC\\someone", profile_of=lambda org: self.prof,
+                        clock=lambda: self.now, sleep=sleep)
+
+    def schtasks(self):
+        return [argv[1:] for argv in self.calls if argv[0] == "schtasks"]
+
+    def test_start(self):
+        svc = self.tasks()
         svc.start("org_x")
-        svc.stop("org_x")
+        self.assertEqual(self.schtasks(), [["/Change", "/TN", self.NAME, "/ENABLE"], ["/Run", "/TN", self.NAME]])
+
+    def test_restart_lets_the_runner_finish_first(self):
+        svc = self.tasks()
+        with captured():
+            svc.restart("org_x")
+        # Asked through the stop file, never killed, and run again once it had stopped.
+        self.assertEqual(self.schtasks(), [["/Run", "/TN", self.NAME]])
+        self.assertFalse((self.prof.state / ur.STOP_FILE).exists())
+        self.assertTrue(self.running)
+
+    def test_stop_disables_then_asks(self):
+        svc = self.tasks()
+        with captured():
+            svc.stop("org_x")
+        self.assertEqual(self.schtasks(), [["/Change", "/TN", self.NAME, "/DISABLE"]])
+        self.assertFalse(self.running)
+
+    def test_remove_disables_asks_then_deletes(self):
+        svc = self.tasks()
+        with captured():
+            svc.remove("org_x", last=True)
+        self.assertEqual(self.schtasks(), [["/Change", "/TN", self.NAME, "/DISABLE"],
+                                           ["/Delete", "/TN", self.NAME, "/F"]])
+
+    def test_end_kills_only_a_runner_that_does_not_stop(self):
+        svc = self.tasks(stops=False)
+        with captured() as out:
+            svc.restart("org_x")
+        self.assertEqual(self.schtasks(), [["/End", "/TN", self.NAME], ["/Run", "/TN", self.NAME]])
+        self.assertGreaterEqual(self.now, ur.STOP_WAIT)
+        self.assertIn("Esperando o serviço de org_x terminar o que está fazendo (até 120 s).", out.getvalue())
+
+    def test_nothing_to_stop(self):
+        svc = self.tasks()
+        self.running = False
         svc.restart("org_x")
-        svc.remove("org_x", last=True)
-        self.assertEqual(rec.calls, [
-            ["schtasks", "/Change", "/TN", self.NAME, "/ENABLE"], ["schtasks", "/Run", "/TN", self.NAME],
-            ["schtasks", "/Change", "/TN", self.NAME, "/DISABLE"], ["schtasks", "/End", "/TN", self.NAME],
-            ["schtasks", "/End", "/TN", self.NAME], ["schtasks", "/Run", "/TN", self.NAME],
-            ["schtasks", "/End", "/TN", self.NAME], ["schtasks", "/Delete", "/TN", self.NAME, "/F"]])
+        self.assertEqual(self.schtasks(), [["/Run", "/TN", self.NAME]])
+        self.assertFalse((self.prof.state / ur.STOP_FILE).exists())
+
+    def test_an_unreadable_state_ends_the_task(self):
+        svc = self.tasks(readable=False)
+        svc.stop("org_x")
+        calls = [argv[0] for argv in self.schtasks()]
+        self.assertEqual(calls[:3], ["/Change", "/Query", "/End"])
+        self.assertFalse((self.prof.state / ur.STOP_FILE).exists())
+
+    def test_the_stop_file_is_the_one_the_runner_watches(self):
+        from inbox_support import inbox
+        self.assertEqual(ur.STOP_FILE, inbox.STOP_FILE)
 
     def test_state_reads_the_number_not_the_localized_word(self):
         svc = ur.Tasks(run_command=Recorder())
