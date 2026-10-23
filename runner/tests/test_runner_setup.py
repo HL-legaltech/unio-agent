@@ -406,7 +406,10 @@ class ServiceEndToEnd(Base):
         self.assertEqual(self.box.runner(["stop", "--workspace", "org_test"])[0], 0)
         self.assertIn("org_test: parado", self.box.runner(["status", "--workspace", "org_test"])[1])
         self.assertEqual(self.box.runner(["start", "--workspace", "org_test"])[0], 0)
-        self.assertIn("org_test: ligado", self.box.runner(["status", "--workspace", "org_test"])[1])
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual([(w["workspace"], w["state"], w["version"]) for w in json.loads(out)["workspaces"]],
+                         [("org_test", "running", VERSION)])
         # The only workspace on this computer needs no --workspace.
         code, out = self.box.runner(["restart"])
         self.assertEqual(code, 0, out)

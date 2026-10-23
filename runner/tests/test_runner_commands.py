@@ -22,6 +22,7 @@ class Arguments(unittest.TestCase):
                          ("setup", {"--workspace": "org_x", "--yes": True, "--api": "https://a.example/v1"}))
         self.assertEqual(ur.parse_args(["update"]), ("update", {}))
         self.assertEqual(ur.parse_args(["status"]), ("status", {}))
+        self.assertEqual(ur.parse_args(["status", "--json"]), ("status", {"--json": True}))
         # --workspace is no longer the parser's to require: one profile stands for it.
         self.assertEqual(ur.parse_args(["start"]), ("start", {}))
         for argv in ([], ["-h"], ["--help"], ["help"], ["logs", "--help"]):
@@ -170,6 +171,27 @@ class Commands(unittest.TestCase):
             code, out = self.box.runner([command])
             self.assertEqual(code, 2, out)
             self.assertIn("mais de um workspace: org_one, org_two. Diga qual com --workspace.", out)
+
+    def test_status_json(self):
+        self.make_profile(lines=[{"at": "2026-10-23T11:00:00Z", "event": "start", "version": "2.0.0"},
+                                 {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}],
+                          env="UNIO_RUNNER_AUTOUPDATE=off\n")
+        self.make_profile("org_gone", token=False)
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual(code, 0, out)
+        # Without an env file, a runner updates itself when its clone is a git clone.
+        in_clone = (ur.CLONE / ".git").exists()
+        self.assertEqual(json.loads(out), {"workspaces": [
+            {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
+             "lastLog": None},
+            {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
+             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}}]})
+        code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
+        self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
+
+    def test_status_json_without_profiles(self):
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual((code, json.loads(out)), (0, {"workspaces": []}))
 
 
 class EnvFile(unittest.TestCase):

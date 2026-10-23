@@ -5,7 +5,7 @@ service per workspace, and manages it afterwards. People run it as
 
     unio runner setup [--workspace org_<id>] [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
-    unio runner status [--workspace org_<id>]
+    unio runner status [--workspace org_<id>] [--json]
     unio runner start|stop|restart|logs|uninstall [--workspace org_<id>]
     unio runner update
 
@@ -90,8 +90,9 @@ Comandos:
     --repos-json ARQUIVO      Usa os repositórios deste arquivo, sem perguntar.
     --no-service              Prepara o perfil sem instalar o serviço.
     --yes                     Aceita a resposta padrão de cada pergunta.
-  status                      Estado, versão, última linha do registro e
-                              atualização automática de cada serviço.
+  status [--json]             Estado, versão, última linha do registro e
+                              atualização automática de cada serviço; com
+                              --json, o mesmo em JSON.
   start                       Liga o serviço.
   stop                        Para o serviço até o próximo start.
   restart                     Reinicia o serviço.
@@ -112,7 +113,7 @@ status sem ele mostra todos.
 OPTIONS = {
     "setup": {"--workspace": True, "--api": True, "--token-stdin": False, "--repos-json": True,
               "--no-service": False, "--yes": False},
-    "status": {"--workspace": True},
+    "status": {"--workspace": True, "--json": False},
     "start": {"--workspace": True},
     "stop": {"--workspace": True},
     "restart": {"--workspace": True},
@@ -1231,19 +1232,25 @@ def setup(opts):
 
 def status(opts):
     orgs = [workspace_of(opts)] if "--workspace" in opts else profiles()
-    if not orgs:
-        say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
-            "página %s, no Unio." % AGENTS_PAGE)
-        return 0
-    svc = service()
+    svc = service() if orgs else None
+    rows = []
     for org in orgs:
         prof = profile(org)
-        state = svc.state(org) if svc else "unknown"
         entries = read_entries(prof.log_file, 1)
-        say("%s: %s" % (org, STATE_WORDS[state]))
-        say("  versão: %s" % (running_version(prof) or "ainda não começou"))
+        rows.append((prof, {"workspace": org, "state": svc.state(org) if svc else "unknown",
+                            "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
+                            "token": prof.token.exists(), "lastLog": entries[-1] if entries else None}))
+    if opts.get("--json"):
+        say(json.dumps({"workspaces": [row for _, row in rows]}))
+        return 0
+    if not rows:
+        say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
+            "página %s, no Unio." % AGENTS_PAGE)
+    for prof, row in rows:
+        say("%s: %s" % (row["workspace"], STATE_WORDS[row["state"]]))
+        say("  versão: %s" % (row["version"] or "ainda não começou"))
         say("  atualização automática: %s" % autoupdate(prof))
-        say("  última linha do registro: %s" % (format_entry(entries[-1]) if entries else "nenhuma"))
+        say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
     return 0
 
 
