@@ -12,6 +12,8 @@ service per workspace, and manages it afterwards. People run it as
     unio runner update
 
 --workspace may be left out when this computer has one workspace's token.
+It exits 0 when done, 1 on a problem and 2 on a usage error, and without a
+terminal it asks nothing: what a question would settle must come as an option.
 
 unio-inbox owns where a workspace's profile lives (--print-paths) and whether
 it works (--check): this file asks it and never re-derives either, so the two
@@ -91,7 +93,8 @@ Comandos:
     --token-stdin             Lê o token da entrada padrão em vez de perguntar.
     --repos-json ARQUIVO      Usa os repositórios deste arquivo, sem perguntar.
     --no-service              Prepara o perfil sem instalar o serviço.
-    --yes                     Aceita a resposta padrão de cada pergunta.
+    --yes                     Mantém o token e os repositórios já salvos, sem
+                              perguntar.
   status [--json]             Estado, versão, última linha do registro e
                               atualização automática de cada serviço; com
                               --json, o mesmo em JSON.
@@ -111,6 +114,11 @@ Comandos:
 Todo comando, menos update, aceita --workspace org_... para escolher o
 workspace. Ele pode ficar de fora quando este computador tem o token de um só;
 status sem ele mostra todos.
+
+Sem um terminal, nenhum comando pergunta nada: diz a opção que falta.
+
+Sai com 0 quando dá certo, 1 quando há um problema e 2 quando o comando ou
+uma opção estão errados.
 """
 
 # For each command, its options and whether each takes a value.
@@ -1120,6 +1128,18 @@ def only_workspace():
                "comando da página %s, no Unio." % AGENTS_PAGE, 2)
 
 
+def unasked(opts, saved_token):
+    """The options that answer the questions setup would ask, for a run with
+    no terminal to ask them on: each missing one in the person's words."""
+    missing = []
+    if not opts.get("--token-stdin") and not (saved_token and opts.get("--yes")):
+        missing.append("--yes, para manter o token salvo, ou --token-stdin, para trocá-lo" if saved_token else
+                       "--token-stdin, com o token na entrada padrão")
+    if not (opts.get("--repos-json") or opts.get("--yes")):
+        missing.append("--repos-json ARQUIVO, com os repositórios de cada time, ou --yes, para manter os salvos")
+    return missing
+
+
 def read_token(opts, prof, old):
     """The new token, or None to keep the one saved."""
     if opts.get("--token-stdin"):
@@ -1127,9 +1147,6 @@ def read_token(opts, prof, old):
     if old is not None and (opts.get("--yes") or not ask_yes_no(
             "Já existe um token do serviço para %s neste computador. Trocar por outro? [s/N] " % prof.org)):
         return None
-    if not stdin_is_tty():
-        raise Stop("Este comando precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin. "
-                   "Nada foi salvo.")
     try:
         return prompt_secret("Cole o token do serviço de respostas: ").strip()
     except EOFError:
@@ -1149,15 +1166,19 @@ def setup(opts):
     if not opts.get("--no-service") and kind is None:
         raise Stop("O unio runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
                    "o serviço rodando num terminal: %s" % foreground_command(org))
-
-    check_computer()
     env = child_env(api)
     prof = profile(org, env)
+    old = read_bytes(prof.token)
+    missing = unasked(opts, old is not None)
+    if missing and not stdin_is_tty():
+        raise Stop("\n".join(["Sem um terminal, setup não pergunta nada. Rode de novo com:"]
+                             + ["  " + text for text in missing] + ["Nada foi salvo."]), 2)
+
+    check_computer()
     private_dir(prof.config)
     # The runner's log and health name items and errors: for this user alone.
     private_dir(prof.state)
 
-    old = read_bytes(prof.token)
     secret = read_token(opts, prof, old)
     if secret is not None and not TOKEN.match(secret):
         raise Stop("Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo.")

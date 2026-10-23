@@ -197,8 +197,25 @@ class SetupWithoutService(Base):
 
     def test_without_a_terminal_and_without_token_stdin(self):
         code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--yes"])
-        self.assertEqual(code, 1, out)
-        self.assertIn("precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin", out)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines(), ["Sem um terminal, setup não pergunta nada. Rode de novo com:",
+                                            "  --token-stdin, com o token na entrada padrão", "Nada foi salvo."])
+        # It stops before anything runs or is written.
+        self.assertEqual(self.box.logged(self.box.claude_log), [])
+        self.assertFalse(self.config.exists())
+
+    def test_without_a_terminal_every_question_names_its_option(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service"])
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines()[1:3], [
+            "  --token-stdin, com o token na entrada padrão",
+            "  --repos-json ARQUIVO, com os repositórios de cada time, ou --yes, para manter os salvos"])
+        self.assertEqual(self.setup("--repos-json", str(self.repos))[0], 0)
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--repos-json",
+                                     str(self.repos)])
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines()[1], "  --yes, para manter o token salvo, ou --token-stdin, para trocá-lo")
+        self.assertEqual(self.token(), RUNNER)
 
 
 class Questions(Base):
