@@ -27,6 +27,8 @@ exit /b 2
 rem Everything after the first word, quoted as it was typed. A bare unio
 rem runner shows the runner's help, as unio help runner does.
 set "unio_args=%*"
+rem An argument holding "&", "|" or "^" would break cmd's parsing of
+rem these lines; workspace ids and flags never hold one.
 set "unio_args=%unio_args:*runner=%"
 if not defined unio_args set "unio_args= --help"
 
