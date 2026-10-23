@@ -90,6 +90,12 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       CLAUDE_CODE_VERSION: "2.1.309"
     steps:
+      # Git for Windows' default: checkouts get CRLF line ends unless
+      # .gitattributes says otherwise, and sh cannot run a CRLF script.
+      - name: Check out with Git for Windows' line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf true
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
