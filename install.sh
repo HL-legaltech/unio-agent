@@ -24,6 +24,11 @@ umask 077
 
 conf=$HOME/.config/unio
 marketplace=HL-legaltech/unio-agent
+case $(uname -s 2>/dev/null) in
+  Darwin) os=macos ;;
+  MINGW*|MSYS*|CYGWIN*) os=windows ;;
+  *) os=linux ;;
+esac
 # plugin.json's minimumClaudeCode: the first release with install --marketplace.
 floor=2.1.292
 clone=$HOME/.local/share/unio/agent
@@ -113,6 +118,28 @@ default_org() {
   if is_org "$key"; then printf '%s' "$key"; fi
 }
 
+# Folder $1 in the one form folders are compared in, as lib.sh's
+# unio_dir_key writes it.
+dir_key() {
+  d=$1
+  if [ "$os" = windows ]; then
+    case $d in
+      [A-Za-z]:*)
+        if command -v cygpath >/dev/null 2>&1; then
+          d=$(cygpath -u "$d" 2>/dev/null) || d=$1
+        else
+          drive=$(printf '%s' "${d%%:*}" | tr '[:upper:]' '[:lower:]')
+          d=/$drive$(printf '%s' "${d#??}" | tr '\134' /)
+        fi ;;
+    esac
+  fi
+  while case $d in ?*/) true ;; *) false ;; esac; do d=${d%/}; done
+  case $os in
+    windows|macos) d=$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]') ;;
+  esac
+  printf '%s' "$d"
+}
+
 # Each line of ~/.config/unio/projects that lib.sh would use, as
 # "<folder><TAB><org>", trimmed as lib.sh trims it.
 project_lines() {
@@ -132,11 +159,13 @@ project_lines() {
 workspace_of() {
   org=
   best=
+  want=$(dir_key "$1")
   tab=$(printf '\t')
   lines=$(project_lines)
   while IFS=$tab read -r path key; do
     [ -n "$path" ] || continue
-    case $1/ in
+    path=$(dir_key "$path")
+    case $want/ in
       "$path"/*) if [ "${#path}" -gt "${#best}" ]; then best=$path; org=$key; fi ;;
     esac
   done <<EOF

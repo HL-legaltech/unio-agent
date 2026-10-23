@@ -7,6 +7,14 @@ export LC_ALL
 
 UNIO_CONF=$HOME/.config/unio
 
+# linux (WSL included), macos, or windows: Git Bash, MSYS2 or Cygwin, where
+# Claude Code runs the plugin's scripts on Windows.
+case $(uname -s 2>/dev/null) in
+  Darwin) UNIO_OS=macos ;;
+  MINGW*|MSYS*|CYGWIN*) UNIO_OS=windows ;;
+  *) UNIO_OS=linux ;;
+esac
+
 # The API is pinned to api.unio.so. Only ~/.config/unio/api-url moves it (a
 # test or staging API), never an environment variable: any program a session
 # starts can set one, and the token would follow it.
@@ -69,6 +77,30 @@ unio_is_org() {
   case ${1#org_} in *[!A-Za-z0-9]*) return 1 ;; esac
 }
 
+# Folder $1 in the one form folders are compared in. Claude Code names a
+# Windows folder C:/x, a person may type C:\x, and Git Bash's pwd -P, which
+# the installer writes to ~/.config/unio/projects, says /c/x. Windows and
+# macOS ignore case, so there the form is lower case.
+unio_dir_key() {
+  d=$1
+  if [ "$UNIO_OS" = windows ]; then
+    case $d in
+      [A-Za-z]:*)
+        if command -v cygpath >/dev/null 2>&1; then
+          d=$(cygpath -u "$d" 2>/dev/null) || d=$1
+        else
+          drive=$(printf '%s' "${d%%:*}" | tr '[:upper:]' '[:lower:]')
+          d=/$drive$(printf '%s' "${d#??}" | tr '\134' /)
+        fi ;;
+    esac
+  fi
+  while case $d in ?*/) true ;; *) false ;; esac; do d=${d%/}; done
+  case $UNIO_OS in
+    windows|macos) d=$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]') ;;
+  esac
+  printf '%s' "$d"
+}
+
 # The workspace a folder works in: the longest folder in
 # ~/.config/unio/projects ("<folder><TAB><org id>" per line) that holds it,
 # else the one in ~/.config/unio/default-workspace. Prints nothing when
@@ -77,6 +109,7 @@ unio_workspace() {
   org=
   if [ -n "$1" ] && [ -r "$UNIO_CONF/projects" ]; then
     best=
+    want=$(unio_dir_key "$1")
     tab=$(printf '\t')
     while IFS=$tab read -r path key || [ -n "$path" ]; do
       # A line saved on Windows ends in CR, which would fail unio_is_org and
@@ -84,9 +117,10 @@ unio_workspace() {
       key=${key#"${key%%[![:space:]]*}"}
       key=${key%"${key##*[![:space:]]}"}
       path=${path%"${path##*[![:space:]]}"}
-      while case $path in ?*/) true ;; *) false ;; esac; do path=${path%/}; done
       if [ -z "$path" ] || ! unio_is_org "$key"; then continue; fi
-      case $1/ in
+      path=$(unio_dir_key "$path")
+      [ -n "$path" ] || continue
+      case $want/ in
         "$path"/*)
           if [ "${#path}" -gt "${#best}" ]; then
             best=$path
