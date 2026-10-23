@@ -25,9 +25,11 @@ exit /b 2
 
 :runner
 if not exist "%unio_root%\runner\unio-runner" goto :no_runner
+rem Only a run that exits 0 proves an interpreter: the python.exe Windows
+rem ships is a Microsoft Store alias that opens the Store.
 set "unio_python="
-where py >nul 2>nul && set "unio_python=py -3"
-if not defined unio_python where python >nul 2>nul && set "unio_python=python"
+py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
+if not defined unio_python python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
 if not defined unio_python goto :no_python
 rem Everything after the first word, quoted as it was typed.
 set "unio_args=%*"

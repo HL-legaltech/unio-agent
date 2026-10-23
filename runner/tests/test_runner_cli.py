@@ -97,6 +97,21 @@ class PosixCommand(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("O comando python3 não está no PATH.", err)
 
+    def test_runner_with_a_python3_that_does_not_run(self):
+        # As macOS's /usr/bin/python3 without the Command Line Tools, a stub that offers to install them.
+        stub = self.box.root / "stub"
+        stub.mkdir()
+        (stub / "python3").write_text('#!/bin/sh\nprintf "%%s\\n" "$1" >> "%s"\n'
+                                      'echo "xcode-select: note: No developer tools were found." >&2\nexit 1\n'
+                                      % (stub / "calls"), encoding="utf-8")
+        (stub / "python3").chmod(0o755)
+        code, out, err = self.unio("runner", "status", PATH=str(stub))
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "O serviço de respostas precisa do Python 3.9 ou mais novo. Instale um Python mais "
+                              "novo e rode este comando de novo.\n")
+        # It was only asked for its version, never handed the runner.
+        self.assertEqual((stub / "calls").read_text(encoding="utf-8"), "-c\n")
+
     def test_through_links_on_path(self):
         # As install.sh links it into ~/.local/bin, and a second, relative link on the way.
         first, second = self.box.root / "first", self.box.root / "second"
@@ -153,6 +168,17 @@ class WindowsCommand(unittest.TestCase):
                                  PATH=str(BIN) + os.pathsep + self.box.env()["PATH"])
         self.assertEqual(code, 1, out)
         self.assertIn("Rode primeiro: unio runner setup --workspace org_test", out)
+
+    def test_runner_without_a_python_that_runs(self):
+        # The Microsoft Store's python.exe alias opens the Store instead of running Python.
+        stub = self.box.root / "stub"
+        stub.mkdir()
+        (stub / "python.cmd").write_bytes(b'@echo off\r\n>>"%~dp0calls" echo(%~1\r\nexit /b 9009\r\n')
+        system = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")
+        code, out, err = self.unio("runner", "status", PATH=str(stub) + os.pathsep + system)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Falta o Python 3.9 ou mais novo", err)
+        self.assertEqual((stub / "calls").read_text(encoding="utf-8").split(), ["-c"])
 
 
 class Hints(unittest.TestCase):
