@@ -97,8 +97,10 @@ Comandos:
                               Mostra as últimas linhas do registro.
   uninstall --workspace org_...
                               Remove o serviço e o token deste computador.
-  update                      Atualiza o clone com git pull --ff-only e
-                              reinicia os serviços ligados.
+  update                      Atualiza o clone com git pull --ff-only. Um
+                              serviço com atualização automática passa
+                              sozinho para a versão nova entre uma resposta e
+                              outra; os demais ligados são reiniciados.
 """
 
 # For each command, its options and whether each takes a value.
@@ -1040,14 +1042,26 @@ def running_version(prof):
     return None
 
 
-def autoupdate(prof):
+def autoupdate_off(prof):
+    """Why the profile's runner does not update itself, or None when it does."""
     value = os.environ.get("UNIO_RUNNER_AUTOUPDATE") or read_env_file(prof.env_file).get("UNIO_RUNNER_AUTOUPDATE")
     # The words unio-inbox's autoupdate_on() reads as off.
     if (value or "").strip().lower() in ("off", "0", "false", "no"):
-        return "desligada (UNIO_RUNNER_AUTOUPDATE=%s)" % clean(value.strip(), 20)
+        return "UNIO_RUNNER_AUTOUPDATE=%s" % clean(value.strip(), 20)
     if not (CLONE / ".git").exists():
-        return "desligada (%s não é um clone git)" % tilde(CLONE)
-    return "ligada"
+        return "%s não é um clone git" % tilde(CLONE)
+    return None
+
+
+def autoupdate(prof):
+    why = autoupdate_off(prof)
+    return "desligada (%s)" % why if why else "ligada"
+
+
+def version_key(text):
+    """(major, minor, patch) of "2.0.0", as unio-inbox compares versions, or None."""
+    found = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?$", str(text or "").strip())
+    return tuple(int(part or 0) for part in found.groups()) if found else None
 
 
 def workspace_of(opts):
@@ -1299,9 +1313,20 @@ def update(opts):
     else:
         say("Clone atualizado em %s: %s para %s." % (tilde(CLONE), version or before, clone_version() or after))
     svc = service()
+    version = clone_version()
     for org in profiles() if svc else []:
         state = svc.state(org)
-        if state in ("running", "failed"):
+        prof = profile(org)
+        if state == "running" and not autoupdate_off(prof):
+            # It moves to a newer runner/VERSION on its own between items; a
+            # restart now would cut off an answer under way.
+            running = running_version(prof)
+            if version_key(version) and version_key(running) and version_key(version) > version_key(running):
+                say("%s: passa sozinho para a versão %s quando terminar o que está fazendo." % (org, version))
+            else:
+                say("%s: segue ligado na versão %s. Para reiniciar agora: %s restart --workspace %s"
+                    % (org, running or "de antes", self_command(), org))
+        elif state in ("running", "failed"):
             try:
                 svc.restart(org)
                 say("%s: reiniciado." % org)

@@ -199,12 +199,19 @@ class Update(unittest.TestCase):
         git("commit", "--quiet", "-am", version, cwd=self.work)
         git("push", "--quiet", "origin", "HEAD:main", cwd=self.work)
 
-    def update(self, states):
+    def update(self, states, self_updating=()):
+        """`update` with these services; those in self_updating update themselves
+        and run 2.0.0, the others have UNIO_RUNNER_AUTOUPDATE=off."""
         svc = mock.Mock()
         svc.state.side_effect = lambda org: states[org]
         for org in states:
-            config, _, _ = self.box.paths(org)
+            config, state, _ = self.box.paths(org)
             config.mkdir(parents=True)
+            state.mkdir(parents=True)
+            (state / "log.jsonl").write_text(json.dumps({"event": "start", "version": "2.0.0"}) + "\n",
+                                             encoding="utf-8")
+            if org not in self_updating:
+                (config / "env").write_text("UNIO_RUNNER_AUTOUPDATE=off\n", encoding="utf-8")
         with self.box.inside(**GIT_ISOLATION), captured() as out, \
                 mock.patch.object(ur, "CLONE", self.clone), mock.patch.object(ur, "service", lambda kind=None: svc):
             code = ur.main(["update"])
@@ -218,6 +225,22 @@ class Update(unittest.TestCase):
         self.assertEqual((self.clone / "runner" / "VERSION").read_text(encoding="utf-8"), "2.0.1\n")
         self.assertEqual([c.args for c in svc.restart.call_args_list], [("org_a",), ("org_c",)])
         self.assertIn("org_b: parado, continua parado.", out)
+
+    def test_a_self_updating_service_is_not_cut_off(self):
+        # It restarts on its own between items once the clone holds a newer runner/VERSION.
+        self.publish("2.0.1")
+        code, out, svc = self.update({"org_a": "running", "org_b": "running", "org_c": "failed"},
+                                     self_updating=("org_a", "org_c"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual([c.args for c in svc.restart.call_args_list], [("org_b",), ("org_c",)])
+        self.assertIn("org_a: passa sozinho para a versão 2.0.1 quando terminar o que está fazendo.", out)
+
+    def test_a_self_updating_service_on_the_same_version(self):
+        code, out, svc = self.update({"org_a": "running"}, self_updating=("org_a",))
+        self.assertEqual(code, 0, out)
+        svc.restart.assert_not_called()
+        self.assertIn("org_a: segue ligado na versão 2.0.0. Para reiniciar agora:", out)
+        self.assertIn("restart --workspace org_a", out)
 
     def test_already_current(self):
         code, out, _ = self.update({})

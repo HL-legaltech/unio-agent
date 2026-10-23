@@ -48,7 +48,7 @@ Run `unio-runner` with the Python that installed it: `python3 ~/.local/share/uni
 | `start`, `stop`, `restart --workspace org_…` | Start, stop or restart the service. A stopped service stays stopped, across logins and restarts, until `start`. |
 | `logs --workspace org_… [--lines N] [--follow]` | The last lines of the service's log. |
 | `uninstall --workspace org_…` | Stops and removes the service and deletes the token from this computer. The token stays valid in Unio until you revoke it on the Agentes page. |
-| `update` | Pulls the clone (`git pull --ff-only`) and restarts each service that was running. |
+| `update` | Pulls the clone (`git pull --ff-only`). A running service that updates itself moves to a newer version on its own once it finishes what it is doing, so no answer is cut off; a service with auto-update off, or one that failed, is restarted. |
 
 ## Where things live
 
@@ -72,7 +72,7 @@ The definitions come from the templates in [`services/`](services), and setup wr
 
 ## Updates
 
-The service keeps its clone up to date: at start and every 6 hours, between answers, it fetches `main` and, when `runner/VERSION` there is newer and the clone has no local changes, fast-forwards and exits so the service manager starts the new version. `UNIO_RUNNER_AUTOUPDATE=off`, in the environment or the settings folder's `env`, turns that off; `unio-runner update` then updates by hand.
+The service keeps its clone up to date: at start and every 6 hours, between answers, it fetches `main` and, when `runner/VERSION` there is newer and the clone has no local changes, fast-forwards and exits so the service manager starts the new version. It does the same, between answers, as soon as the clone holds a newer version, after `unio-runner update` or another workspace's service moved it. `UNIO_RUNNER_AUTOUPDATE=off`, in the environment or the settings folder's `env`, turns that off; `unio-runner update` then updates by hand.
 
 ## Development
 
