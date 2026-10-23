@@ -426,6 +426,9 @@ class ServiceEndToEnd(Base):
             self.assertIn("api=%s" % self.api.url, line)
 
         code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("org_test: ligado", self.box.runner(["status"])[1])
+        code, out = self.box.runner(["uninstall", "--workspace", "org_test", "--yes"])
         self.assertEqual(code, 0, out)
         self.assertIn("Serviço de org_test removido.", out)
         self.assertIn("revogue-o em Configurações > Sistema > Agentes", out)

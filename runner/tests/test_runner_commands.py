@@ -27,6 +27,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ur.parse_args(["start"]), ("start", {}))
         self.assertEqual(ur.parse_args(["logs", "-n", "5", "-f"]), ("logs", {"--lines": "5", "--follow": True}))
         self.assertEqual(ur.parse_args(["logs", "-n=7"]), ("logs", {"--lines": "7"}))
+        self.assertEqual(ur.parse_args(["uninstall", "--yes"]), ("uninstall", {"--yes": True}))
         for argv in ([], ["-h"], ["--help"], ["help"], ["logs", "--help"]):
             self.assertEqual(ur.parse_args(argv)[0], "help", argv)
 
@@ -143,21 +144,59 @@ class Commands(unittest.TestCase):
         svc = mock.Mock()
         svc.state.return_value = "running"
         with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc):
-            self.assertEqual(ur.main(["uninstall", "--workspace", "org_test"]), 0)
+            self.assertEqual(ur.main(["uninstall", "--workspace", "org_test", "--yes"]), 0)
         svc.remove.assert_called_once_with("org_test", last=False)
         self.assertFalse(self.token_file.exists())
         self.assertTrue(self.box.paths("org_other")[2].exists())
         self.assertIn("Token apagado de", out.getvalue())
         # One token left: the command needs no --workspace now.
         with self.box.inside(), captured(), mock.patch.object(ur, "service", lambda kind=None: svc):
-            self.assertEqual(ur.main(["uninstall"]), 0)
+            self.assertEqual(ur.main(["uninstall", "--yes"]), 0)
         svc.remove.assert_called_with("org_other", last=True)
 
     def test_uninstall_without_anything_installed(self):
+        # Nothing to remove, nothing to confirm.
         code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
         self.assertEqual(code, 0, out)
         self.assertIn("Não havia serviço instalado para org_test.", out)
         self.assertIn("Não havia token do serviço salvo para org_test neste computador.", out)
+
+    def uninstall_asking(self, answer, tty=True):
+        svc = mock.Mock()
+        svc.state.return_value = "running"
+        asked = []
+
+        def prompt(text):
+            asked.append(text)
+            return answer
+
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc), \
+                mock.patch.object(ur, "prompt", prompt), mock.patch.object(ur, "stdin_is_tty", lambda: tty):
+            code = ur.main(["uninstall", "--workspace", "org_test"])
+        return code, out.getvalue(), asked, svc
+
+    def test_uninstall_asks_first(self):
+        self.make_profile()
+        code, out, asked, svc = self.uninstall_asking("")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(asked, ["Remover o serviço de respostas de org_test deste computador e apagar o token "
+                                 "dele? [s/N] "])
+        self.assertIn("Nada foi removido.", out)
+        svc.remove.assert_not_called()
+        self.assertTrue(self.token_file.exists())
+        code, out, _, svc = self.uninstall_asking("s")
+        self.assertEqual(code, 0, out)
+        svc.remove.assert_called_once()
+        self.assertFalse(self.token_file.exists())
+
+    def test_uninstall_without_a_terminal_needs_yes(self):
+        self.make_profile()
+        code, out, asked, svc = self.uninstall_asking("s", tty=False)
+        self.assertEqual(code, 2, out)
+        self.assertIn("rode de novo com --yes", out)
+        self.assertEqual(asked, [])
+        svc.remove.assert_not_called()
+        self.assertTrue(self.token_file.exists())
 
     def test_the_only_workspace_needs_no_flag(self):
         self.make_profile(lines=[{"at": "t1", "event": "poll", "listed": 1}])

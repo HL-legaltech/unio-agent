@@ -6,8 +6,9 @@ service per workspace, and manages it afterwards. People run it as
     unio runner setup [--workspace org_<id>] [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
     unio runner status [--workspace org_<id>] [--json]
-    unio runner start|stop|restart|uninstall [--workspace org_<id>]
+    unio runner start|stop|restart [--workspace org_<id>]
     unio runner logs [--workspace org_<id>] [-n N] [-f]
+    unio runner uninstall [--workspace org_<id>] [--yes]
     unio runner update
 
 --workspace may be left out when this computer has one workspace's token.
@@ -100,7 +101,8 @@ Comandos:
   logs [-n N] [-f]            Mostra as últimas N linhas do registro (40 sem
                               -n); com -f, segue mostrando as novas. Também
                               --lines N e --follow.
-  uninstall                   Remove o serviço e o token deste computador.
+  uninstall [--yes]           Remove o serviço e o token deste computador,
+                              depois de confirmar; --yes já confirma.
   update                      Atualiza o clone com git pull --ff-only. Um
                               serviço com atualização automática passa
                               sozinho para a versão nova entre uma resposta e
@@ -120,7 +122,7 @@ OPTIONS = {
     "stop": {"--workspace": True},
     "restart": {"--workspace": True},
     "logs": {"--workspace": True, "--lines": True, "--follow": False},
-    "uninstall": {"--workspace": True},
+    "uninstall": {"--workspace": True, "--yes": False},
     "update": {},
 }
 # Short forms, for the commands whose long form they stand for.
@@ -1321,7 +1323,15 @@ def uninstall(opts):
     org = workspace_of(opts)
     prof = profile(org)
     svc = service()
-    if svc and svc.state(org) != "absent":
+    installed = svc is not None and svc.state(org) != "absent"
+    if (installed or prof.token.exists()) and not opts.get("--yes"):
+        if not stdin_is_tty():
+            raise Stop("Sem um terminal, uninstall não pede confirmação: rode de novo com --yes para remover o "
+                       "serviço de %s." % org, 2)
+        if not ask_yes_no("Remover o serviço de respostas de %s deste computador e apagar o token dele? [s/N] "
+                          % org):
+            raise Stop("Nada foi removido.")
+    if installed:
         others = [o for o in profiles() if o != org and profile(o).token.exists()]
         svc.remove(org, last=not others)
         say("Serviço de %s removido." % org)
