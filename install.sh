@@ -20,9 +20,10 @@
 #                browser, where you also pick the workspace. The default
 #                without --workspace.
 #   --runner     Installs the answering service instead: clones this
-#                repository as --client codex does, then hands the terminal
-#                to runner/unio-runner setup, which asks for the service's
-#                token. Needs --workspace; macOS and Linux (Windows has
+#                repository as --client codex does, links ~/.local/bin/unio
+#                to the clone's bin/unio, then hands the terminal to
+#                `unio runner setup`, which asks for the service's token.
+#                Needs --workspace; macOS and Linux (Windows has
 #                install.ps1).
 #
 # It runs piped into sh, so it cannot source the plugin's lib.sh, and its stdin
@@ -366,6 +367,33 @@ install_runner() {
     say "O serviço de respostas precisa do Python 3.9 ou mais novo. Instale um Python mais novo e rode este comando de novo."
     return 1
   fi
+}
+
+# Links ~/.local/bin/unio to the clone's bin/unio, the command people type.
+# A unio already there that is not that link belongs to someone else and
+# stays as it is.
+link_command() {
+  target=$clone/bin/unio
+  dir=$HOME/.local/bin
+  link=$dir/unio
+  [ -f "$target" ] || return 0
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    say "O comando unio já está em $(tilde "$link")."
+  elif [ -e "$link" ] || [ -L "$link" ]; then
+    say "$(tilde "$link") já existe e não é o comando unio deste clone, então ficou como estava. O comando do Unio está em $(tilde "$target")."
+    return 0
+  elif mkdir -p "$dir" 2>/dev/null && ln -s "$target" "$link" 2>/dev/null; then
+    say "Comando unio ligado em $(tilde "$link")."
+  else
+    say "Não foi possível criar $(tilde "$link"). O comando do Unio está em $(tilde "$target")."
+    return 0
+  fi
+  case :$PATH: in
+    *:"$dir":*|*:"$dir"/:*) ;;
+    *)
+      # shellcheck disable=SC2016 # the line is printed for the person to copy
+      say 'A pasta ~/.local/bin não está no PATH deste terminal, então o comando unio ainda não funciona aqui. Acrescente a linha export PATH="$HOME/.local/bin:$PATH" ao arquivo de início do seu shell (~/.zshrc, ~/.bashrc ou ~/.profile) e abra outro terminal.' ;;
+  esac
 }
 
 # Codex runs the helper without a shell, so the block names the real home
@@ -734,6 +762,7 @@ main() {
         return 1 ;;
     esac
     install_runner || return 1
+    link_command
     set -- setup --workspace "$workspace"
     if [ -r "$conf/api-url" ]; then set -- "$@" --api "$(api)"; fi
     # The terminal, not this script, is setup's stdin: it reads the token at a
