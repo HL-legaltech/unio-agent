@@ -72,13 +72,13 @@ canceled task is never rechecked), UNIO_NEEDS_DAILY_RUNS (30 checks over any
 inbox's). Checks count toward UNIO_INBOX_DAILY_BUDGET_USD, as reviews do.
 """
 import argparse
-import fcntl
 import hashlib
 import json
 import math
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -91,9 +91,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 # The web app stops saying the agent only answers on tasks once a live presence
 # reports "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE): keep the two equal.
@@ -360,6 +366,110 @@ KIND_LINES = {
 stopping = threading.Event()
 
 
+def platform_name(platform=None):
+    """The system as the agent's page names it: linux, macos or windows."""
+    platform = platform or sys.platform
+    if platform.startswith("linux"):
+        return "linux"
+    return {"darwin": "macos", "win32": "windows", "cygwin": "windows"}.get(platform, platform)
+
+
+def quiet_flags():
+    """Popen options for a helper process. The Windows service runs under
+    pythonw.exe, without a console, so each console program it starts would
+    open a window of its own."""
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def group_flags():
+    """Popen options that give a session a process group of its own, so
+    stopping it stops whatever it started too."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
+def stop_group(proc, force=False):
+    """SIGTERM (or SIGKILL) to the session's process group. Windows has no
+    signal for a group: taskkill ends the whole tree at once."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, **quiet_flags())
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        # macOS answers EPERM for a group left with only its unreaped leader.
+        pass
+
+
+@contextmanager
+def file_lock(path):
+    """Whether this process holds the lock on `path`, kept until the block
+    ends: flock on POSIX, a lock on the file's first byte on Windows. Opened
+    to append, since Windows refuses to truncate a file another process locks."""
+    with open(path, "a", encoding="utf-8") as f:
+        if os.name != "nt":
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+            return
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+
+
+def replace_file(src, dst):
+    """os.replace, retried for a moment on Windows, where it fails while
+    another process (a status check) has `dst` open."""
+    for attempt in range(5):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or attempt == 4:
+                raise
+            time.sleep(0.1)
+
+
+def write_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    replace_file(tmp, path)
+
+
+def text_run(argv, **kwargs):
+    """subprocess.run for a helper whose output is text: UTF-8 on every
+    system, whatever the console's code page, and no console window."""
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          stdin=subprocess.DEVNULL, **quiet_flags(), **kwargs)
+
+
+def rule_path(path, windows=None):
+    """An absolute path as a permission rule names it: '//' and the path.
+    Claude Code matches Windows paths in POSIX form, C:\\Users as /c/Users."""
+    if not (os.name == "nt" if windows is None else windows):
+        return "/" + str(path)
+    p = PureWindowsPath(path)
+    return "//" + "/".join([p.drive.rstrip(":").lower(), *p.parts[1:]])
+
+
 def utcnow():
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -425,9 +535,13 @@ DESK_FRESH = 90
 
 def desk_memory():
     """Why no session may start now, or None. Reads /proc itself, so it holds
-    with no governor alive; desk.json only adds unio-desk's critical levels."""
+    with no governor alive; desk.json only adds unio-desk's critical levels.
+    Linux only: other systems have no /proc/meminfo, and no floor was
+    measured on them, so nothing holds there (serve() logs it once)."""
+    if not sys.platform.startswith("linux"):
+        return None
     try:
-        with open(MEMINFO) as f:
+        with open(MEMINFO, encoding="utf-8") as f:
             mi = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
         avail, swap_free = mi["MemAvailable"] / 2**20, mi["SwapFree"] / 2**20
         detail = f"{avail:.1f} GiB free of {mi['MemTotal'] / 2**20:.0f} GiB"
@@ -437,7 +551,7 @@ def desk_memory():
         return detail
     try:
         if time.time() - DESK_FILE.stat().st_mtime < DESK_FRESH and \
-                json.loads(DESK_FILE.read_text()).get("level") in ("critical", "emergency"):
+                json.loads(DESK_FILE.read_text(encoding="utf-8")).get("level") in ("critical", "emergency"):
             return detail
     except (OSError, ValueError, AttributeError):
         pass
@@ -459,7 +573,10 @@ def claude_projects_dir(env=os.environ):
 def remove_project_dirs(cwd, prefix=False):
     """The directories Claude Code wrote for sessions in `cwd`, or with prefix=True
     for sessions anywhere under it. --no-session-persistence keeps the transcript
-    out, but a tool result too large for the context is still saved there."""
+    out, but a tool result too large for the context is still saved there.
+    Every session runs in a `work` folder the runner made, so under a prefix
+    only a name ending in -work (or in the hash a cut name ends in) is one of
+    the runner's: a slug is lossy, and another folder can share its start."""
     try:
         entries = list(claude_projects_dir().iterdir())
     except OSError:
@@ -467,7 +584,7 @@ def remove_project_dirs(cwd, prefix=False):
     for slug in project_slugs(cwd):
         for d in entries:
             if prefix:
-                match = d.name.startswith((slug + "-")[:200])
+                match = d.name.startswith((slug + "-")[:200]) and (len(d.name) > 200 or d.name.endswith("-work"))
             else:
                 match = d.name == slug if len(slug) <= 200 else d.name.startswith(slug[:200] + "-")
             if match and d.is_dir() and not d.is_symlink():
@@ -498,7 +615,8 @@ class Config:
         web = (env.get("UNIO_INBOX_WEB") or "off").strip().lower()
         self.web = web if web in WEB_TOOLS else "off"
         self.web_tools = WEB_TOOLS[self.web]
-        self.claude = env.get("UNIO_INBOX_CLAUDE") or shutil.which("claude") or str(home / ".local/bin/claude")
+        self.claude = env.get("UNIO_INBOX_CLAUDE") or shutil.which("claude") or \
+            str(home / ".local/bin" / ("claude.exe" if os.name == "nt" else "claude"))
         self.gh = env.get("UNIO_INBOX_GH") or shutil.which("gh") or "gh"
         self.git = shutil.which("git") or "git"
         self.reviewer = self.config_dir / "reviewer.md"
@@ -506,6 +624,13 @@ class Config:
         self.review_mode = mode if mode in REVIEW_MODES else "off"
         self.review_tz = env.get("UNIO_REVIEW_TZ") or "America/Sao_Paulo"
         self.review_zone = _zone(self.review_tz)
+        # Logged once at start: why the zones are the machine's own.
+        self.zone_note = None
+        if self.review_zone is None and _zone("UTC") is None:
+            # No zone database at all (Windows without the tzdata package, which
+            # ZoneInfo reads by itself when installed): the machine's zone stands in.
+            self.review_zone = datetime.now().astimezone().tzinfo
+            self.zone_note = f"no time zone database (pip install tzdata): {self.review_tz} is read as this machine's zone"
         self.review_window_text = env.get("UNIO_REVIEW_WINDOW") or "06:30-09:00"
         self.review_window = parse_window(self.review_window_text)
         self.review_model = env.get("UNIO_REVIEW_MODEL") or self.model
@@ -568,22 +693,20 @@ class Config:
 
     def token(self):
         try:
-            return self.token_file.read_text().strip() or None
+            return self.token_file.read_text(encoding="utf-8").strip() or None
         except OSError:
             return None
 
     def runner_id(self):
         """This install's presence id, so a restart updates the same row on the agent's page."""
         try:
-            return str(uuid.UUID(self.runner_id_file.read_text().strip()))
+            return str(uuid.UUID(self.runner_id_file.read_text(encoding="utf-8").strip()))
         except (OSError, ValueError):
             pass
         rid = str(uuid.uuid4())
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.runner_id_file.with_name("runner-id.tmp")
-            tmp.write_text(rid + "\n")
-            os.replace(tmp, self.runner_id_file)
+            write_atomic(self.runner_id_file, rid + "\n")
         except OSError:
             return None
         return rid
@@ -591,7 +714,7 @@ class Config:
     def repos_for(self, team_identifier):
         """The GitHub repositories (owner/name) mapped to a team."""
         try:
-            mapping = json.loads(self.repos_file.read_text())
+            mapping = json.loads(self.repos_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
         names = mapping.get(team_identifier or "") if isinstance(mapping, dict) else None
@@ -602,7 +725,7 @@ class Config:
     def all_repos(self):
         """Every repository repos.json names, lower-cased (GitHub ignores case) -> as written."""
         try:
-            mapping = json.loads(self.repos_file.read_text())
+            mapping = json.loads(self.repos_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         found = {}
@@ -924,7 +1047,7 @@ class State:
 
     def health(self):
         try:
-            data = json.loads(self.health_file.read_text())
+            data = json.loads(self.health_file.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
         except (OSError, ValueError):
             return {}
@@ -938,14 +1061,12 @@ class State:
         h["handled24h"] = len(h["handled"])
         h["failed24h"] = len(h["failed"])
         h["pid"] = os.getpid()
-        tmp = self.health_file.with_name("health.json.tmp")
-        tmp.write_text(json.dumps(h, indent=2) + "\n")
-        os.replace(tmp, self.health_file)
+        write_atomic(self.health_file, json.dumps(h, indent=2) + "\n")
 
     def reviews(self):
         """(data, problem): what reviews.json holds, or None with 'missing' or 'unreadable'."""
         try:
-            data = json.loads(self.reviews_file.read_text())
+            data = json.loads(self.reviews_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None, "missing"
         except (OSError, ValueError):
@@ -957,17 +1078,15 @@ class State:
 
     def save_reviews(self, data):
         """Only under the poll lock: a review's start is on disk before its session is."""
-        tmp = self.reviews_file.with_name("reviews.json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, self.reviews_file)
+        write_atomic(self.reviews_file, json.dumps(data, indent=2) + "\n")
 
     def set_aside_reviews(self):
-        os.replace(self.reviews_file, self.reviews_file.with_name("reviews.json.corrupt"))
+        replace_file(self.reviews_file, self.reviews_file.with_name("reviews.json.corrupt"))
 
     def needs(self):
         """(data, problem): what needs.json holds, or None with 'missing' or 'unreadable'."""
         try:
-            data = json.loads(self.needs_file.read_text())
+            data = json.loads(self.needs_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None, "missing"
         except (OSError, ValueError):
@@ -981,21 +1100,19 @@ class State:
 
     def save_needs(self, data):
         """Only under the poll lock: a check's start is on disk before its session is."""
-        tmp = self.needs_file.with_name("needs.json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-        os.replace(tmp, self.needs_file)
+        write_atomic(self.needs_file, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
     def set_aside_needs(self):
-        os.replace(self.needs_file, self.needs_file.with_name("needs.json.corrupt"))
+        replace_file(self.needs_file, self.needs_file.with_name("needs.json.corrupt"))
 
     def log(self, event, **fields):
         entry = {"at": iso(utcnow()), "event": event, **{k: v for k, v in fields.items() if v is not None}}
         try:
             if self.log_file.stat().st_size >= LOG_MAX_BYTES:
-                os.replace(self.log_file, self.log_file.with_name("log.jsonl.1"))
-        except FileNotFoundError:
-            pass
-        with open(self.log_file, "a") as f:
+                replace_file(self.log_file, self.log_file.with_name("log.jsonl.1"))
+        except OSError:
+            pass  # missing, or held open on Windows: this line goes on the current file
+        with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     @staticmethod
@@ -1075,7 +1192,7 @@ class Snapshots:
         partial = path.with_name(f".{path.name}.partial")
         shutil.rmtree(partial, ignore_errors=True)
         self._run([self.cfg.gh, "repo", "clone", name, str(partial), "--", "--filter=blob:none", "--quiet",
-                   "--config", "core.hooksPath=/dev/null"], 600, "gh repo clone")
+                   "--config", f"core.hooksPath={os.devnull}"], 600, "gh repo clone")
         self._checkout(partial)
         os.replace(partial, path)
 
@@ -1084,7 +1201,7 @@ class Snapshots:
         `gh auth setup-git`. A blob:none checkout fetches too: every blob a new
         commit needs comes from the private remote."""
         return ["-c", "credential.https://github.com.helper=",
-                "-c", f"credential.https://github.com.helper=!{self.cfg.gh} auth git-credential"]
+                "-c", f"credential.https://github.com.helper=!{shell_word(self.cfg.gh)} auth git-credential"]
 
     def _refresh(self, path):
         self._git(path, *self._network(), "fetch", "--prune", "--quiet", "origin", timeout=300)
@@ -1102,19 +1219,27 @@ class Snapshots:
 
     def _git(self, path, *args, timeout=60):
         label = "git " + next(a for a in args if not a.startswith("-") and "=" not in a)
-        return self._run([self.cfg.git, "-C", str(path), "-c", "core.hooksPath=/dev/null", *args], timeout, label)
+        return self._run([self.cfg.git, "-C", str(path), "-c", f"core.hooksPath={os.devnull}", *args], timeout, label)
 
     @staticmethod
     def _run(argv, timeout, label):
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
         try:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
-                               stdin=subprocess.DEVNULL)
+            p = text_run(argv, timeout=timeout, env=env)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise SnapshotError(f"{label}: {short(e, 200)}") from None
         if p.returncode != 0:
             raise SnapshotError(f"{label}: exit {p.returncode}: {short(p.stderr or p.stdout, 300)}")
         return p.stdout.strip()
+
+
+def shell_word(path, windows=None):
+    """A program's path as the shell git runs a credential helper with reads
+    it: quoted when it must be, and with forward slashes on Windows, where
+    that shell is Git's sh and gh lives under "Program Files"."""
+    if (os.name == "nt" if windows is None else windows):
+        return "'" + str(path).replace("\\", "/").replace("'", "'\\''") + "'"
+    return shlex.quote(str(path))
 
 
 def final_json(text):
@@ -1987,7 +2112,7 @@ class Runner:
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-            "--settings", HOOKS_OFF,
+            "--settings", self.settings_arg(),
             "--tools", ",".join(["Read", "Grep", "Glob", *self.cfg.web_tools]),
             "--allowedTools", ",".join(["mcp__unio__*", *self.cfg.web_tools]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
@@ -2000,7 +2125,7 @@ class Runner:
         for path in paths:
             args += ["--add-dir", path]
         if paths:
-            args += ["--disallowedTools"] + [f"Read(/{path}/**/{g})" for path in paths for g in SECRET_GLOBS]
+            args += ["--disallowedTools"] + [f"Read({rule_path(path)}/**/{g})" for path in paths for g in SECRET_GLOBS]
         return args
 
     def review_args(self, mcp_path):
@@ -2008,7 +2133,7 @@ class Runner:
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-            "--settings", HOOKS_OFF,
+            "--settings", self.settings_arg(),
             "--tools", "",
             "--allowedTools", ",".join(REVIEW_TOOLS),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
@@ -2025,7 +2150,7 @@ class Runner:
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-            "--settings", HOOKS_OFF,
+            "--settings", self.settings_arg(),
             "--tools", "",
             "--allowedTools", ",".join(NEEDS_TOOLS),
             "--disallowedTools", ",".join(UNIO_WRITE_TOOLS),
@@ -2037,13 +2162,22 @@ class Runner:
             args += ["--model", self.cfg.needs_model]
         return args
 
+    def settings_arg(self):
+        """--settings' value. On Windows a claude.cmd launcher (npm's) passes the
+        arguments through cmd.exe, which can mangle a JSON string's quotes, so
+        the same JSON goes in a file there."""
+        if os.name != "nt":
+            return HOOKS_OFF
+        path = self.state.dir / "settings.json"
+        path.write_text(HOOKS_OFF, encoding="utf-8")
+        return str(path)
+
     def ready(self):
         """Free checks before claiming anything, so a broken machine spends no attempts."""
         if not self.cfg.responder.is_file():
             return "responder_missing", f"{self.cfg.responder} does not exist"
         try:
-            p = subprocess.run([self.cfg.claude, "auth", "status", "--json"], capture_output=True, text=True,
-                               timeout=60, env=self.session_env(), stdin=subprocess.DEVNULL)
+            p = text_run([self.cfg.claude, "auth", "status", "--json"], timeout=60, env=self.session_env())
         except FileNotFoundError:
             return "claude_unavailable", f"{self.cfg.claude} not found"
         except (subprocess.TimeoutExpired, OSError) as e:
@@ -2092,17 +2226,11 @@ class Runner:
 
     @staticmethod
     def kill(proc, grace=5):
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        stop_group(proc)
         try:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            stop_group(proc, force=True)
             proc.wait()
 
     def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False):
@@ -2112,7 +2240,7 @@ class Runner:
         work = out.parent / "work"
         work.mkdir(parents=True, exist_ok=True)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "prompt.txt").write_text(prompt)
+        (out / "prompt.txt").write_text(prompt, encoding="utf-8")
         # The session cannot read this directory, and the file is gone once it ends.
         mcp_path = self.state.mcp_dir / f"{out.parent.name}.json"
         headers = {"Authorization": f"Bearer {self.cfg.token()}"}
@@ -2133,14 +2261,14 @@ class Runner:
             s = Session(required=required, builtin=BUILTIN_TOOLS | set(self.cfg.web_tools))
         config = {"mcpServers": {"unio": {"type": "http", "url": self.cfg.mcp_url, "headers": headers}}}
         fd = os.open(mcp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(config, f)
         try:
             with open(out / "transcript.jsonl", "wb") as transcript, open(out / "stderr.txt", "wb") as errfile:
                 try:
                     proc = subprocess.Popen(argv, cwd=work,
                                             env=self.session_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                            stderr=errfile, start_new_session=True)
+                                            stderr=errfile, **group_flags())
                 except OSError as e:
                     s.start_error = f"could not start {self.cfg.claude}: {e}"
                     return s
@@ -2235,10 +2363,7 @@ class Runner:
                                   + (f"; missing {', '.join(missing)}" if missing else ""))
         if s.bad_init:
             # Stop it before the first model turn; the wait loop reaps it.
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            stop_group(proc)
 
     def classify(self, s, now=None):
         v = self._classify(s, now or utcnow())
@@ -2736,10 +2861,8 @@ class Runner:
         """The poll's listed count, None when the inbox could not be read, or BUSY
         when another poll (the service, or a manual --once) holds the lock."""
         self.state.ensure()
-        with open(self.state.lock_file, "w") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+        with file_lock(self.state.lock_file) as held:
+            if not held:
                 return BUSY
             self.presence.start()
             self.state.sweep()
@@ -2759,6 +2882,11 @@ class Runner:
         self.state.ensure()
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
                        reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode)
+        if not sys.platform.startswith("linux"):
+            self.state.log("memory_guard_off", detail=f"no /proc/meminfo on {platform_name()}: answers never wait "
+                                                      "for memory here")
+        if self.cfg.zone_note:
+            self.state.log("zone_fallback", detail=self.cfg.zone_note)
         self.presence.start()
         while not stopping.is_set():
             try:
@@ -2770,12 +2898,9 @@ class Runner:
                 self.save(h)
             stopping.wait(self.cfg.interval)
         self.presence.close(ended=True)
-        with open(self.state.lock_file, "w") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with file_lock(self.state.lock_file) as held:
+            if held:
                 self.save(self.state.health())
-            except BlockingIOError:
-                pass
         self.state.log("stop", pid=os.getpid())
 
     def review_tick(self):
@@ -3520,8 +3645,7 @@ class Runner:
             return None
         env = {**os.environ, "GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0"}
         try:
-            p = subprocess.run([self.cfg.gh, *args], capture_output=True, text=True, timeout=min(GH_TIMEOUT, left),
-                               env=env, stdin=subprocess.DEVNULL)
+            p = text_run([self.cfg.gh, *args], timeout=min(GH_TIMEOUT, left), env=env)
         except subprocess.TimeoutExpired:
             ctx["ghDown"] = True
             return None
@@ -3895,9 +4019,11 @@ def main(argv=None):
             return runner.needs_dry_run()
         return 0 if runner.poll(dry_run=True) is not None else 1
     # A closed terminal (SIGHUP) or SIGQUIT would otherwise end the runner with
-    # its session still running in its own process group.
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
-        signal.signal(sig, lambda *_: stopping.set())
+    # its session still running in its own process group. Each system has
+    # only some of them (Windows: SIGTERM, SIGINT and its own SIGBREAK).
+    for name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: stopping.set())
     if args.once:
         listed = runner.locked_poll(once=True)
         if listed is BUSY:
