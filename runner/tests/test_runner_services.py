@@ -164,6 +164,14 @@ class TaskXml(unittest.TestCase):
         self.assertEqual(ur.task_user({"USERDOMAIN": "PC", "USERNAME": "someone"}), "PC\\someone")
         self.assertEqual(ur.task_user({"USERNAME": "someone"}), "someone")
 
+    def test_the_file_holds_the_bytes_as_rendered(self):
+        # A newline is b"\n\x00" in UTF-16: a b"\r" added before it shifts every later character.
+        data = self.render()[0].encode("utf-16")
+        with tempfile.TemporaryDirectory() as tmp:
+            xml = Path(tmp) / "task.xml"
+            ur.write_atomic(xml, data, mode=0o600)
+            self.assertEqual(xml.read_bytes(), data)
+
 
 class StopWait(unittest.TestCase):
     def test_outlasts_the_runners_shutdown(self):

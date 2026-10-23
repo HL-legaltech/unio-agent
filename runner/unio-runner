@@ -236,7 +236,9 @@ def write_atomic(path, data, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".new")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
+    # Without O_BINARY, Windows writes each b"\n" as b"\r\n", which breaks the task's UTF-16 XML.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(tmp), flags, 0o600 if mode is None else mode)
     try:
         os.write(fd, data)
     finally:
