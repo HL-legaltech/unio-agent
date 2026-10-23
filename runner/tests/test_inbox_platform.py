@@ -68,6 +68,24 @@ class MemoryFloors(HomeCase):
         self.assertNotIn("backoffReason", h)
 
 
+class Shutdown(HomeCase):
+    def test_no_reaction_once_stopping(self):
+        # Each one would add to a shutdown the service manager bounds.
+        runner = inbox.Runner(inbox.Config(dict(os.environ), "org_test"))
+        api = mock.Mock()
+        api.call.return_value = (200, {})
+        item = {"key": "comment:c-1", "subject": "task", "task": {"id": "t-1"},
+                "comment": {"id": "c-1", "author": {"kind": "user"}}}
+        inbox.stopping.set()
+        try:
+            runner.acknowledge(api, [item])
+        finally:
+            inbox.stopping.clear()
+        api.call.assert_not_called()
+        runner.acknowledge(api, [item])
+        self.assertEqual(api.call.call_count, 1)
+
+
 class RulePaths(unittest.TestCase):
     def test_posix(self):
         self.assertEqual(inbox.rule_path("/home/u/repos/a", windows=False), "//home/u/repos/a")

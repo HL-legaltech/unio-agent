@@ -53,6 +53,13 @@ REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DEFAULT_API = "https://api.unio.so/v1"
 AGENTS_PAGE = "Configurações > Sistema > Agentes"
 START_WAIT = 60
+# How long a stop may take before the runner is killed, its item then left
+# claimed for 15 minutes. Against an API that never answers, unio-inbox's
+# shutdown takes about 65 s at worst: a 20 s call already under way, 5 s for
+# the session to end and 10 s for its output, the release's three 5 s tries
+# 2 s apart, and 8 s to mark its presence ended. Twice that, for a slow
+# resolver or a loaded machine.
+STOP_WAIT = 120
 STATE_WORDS = {
     "running": "ligado",
     "stopped": "parado",
@@ -639,14 +646,14 @@ def render_systemd(python, inbox, path):
     plain(python, inbox, path)
     return template("unio-runner@.service").substitute(
         python=systemd_quote(python), inbox=systemd_quote(inbox),
-        path=systemd_quote("PATH=" + path, dollar=False))
+        path=systemd_quote("PATH=" + path, dollar=False), stop_wait=STOP_WAIT)
 
 
 def render_launchd(org, python, inbox, path, log):
     plain(org, python, inbox, path, log)
     return template("so.unio.runner.plist").substitute(
         label=xml_escape(launchd_label(org)), org=xml_escape(org), python=xml_escape(str(python)),
-        inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)))
+        inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)), stop_wait=STOP_WAIT)
 
 
 def render_task(org, pythonw, inbox, user, workdir, start):

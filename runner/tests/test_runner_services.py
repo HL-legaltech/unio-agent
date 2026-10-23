@@ -48,7 +48,7 @@ class SystemdUnit(unittest.TestCase):
         for line in ('ExecStart="/opt/py 3/bin/python3" "/home/someone/agent/runner/unio-inbox" --workspace %i',
                      "Restart=always", "RestartSec=10", 'Environment="PATH=/home/someone/.local/bin:/usr/bin:/bin"',
                      "Environment=PYTHONUTF8=1", "MemoryHigh=768M", "MemoryMax=1G", "KillMode=mixed",
-                     "TimeoutStopSec=60", "WantedBy=default.target", "Type=simple"):
+                     "TimeoutStopSec=120", "WantedBy=default.target", "Type=simple"):
             self.assertIn(line, lines(text))
         self.assertNotIn("${", text)
 
@@ -76,6 +76,7 @@ class LaunchdPlist(unittest.TestCase):
         self.assertIs(data["RunAtLoad"], True)
         self.assertIs(data["KeepAlive"], True)
         self.assertEqual(data["ThrottleInterval"], 10)
+        self.assertEqual(data["ExitTimeOut"], 120)
         self.assertEqual(data["EnvironmentVariables"]["PATH"], "/opt/homebrew/bin:/usr/bin:/bin")
         self.assertEqual(data["EnvironmentVariables"]["PYTHONUTF8"], "1")
         self.assertEqual(data["StandardOutPath"], "/Users/a b/state/service.log")
@@ -136,6 +137,15 @@ class TaskXml(unittest.TestCase):
     def test_user_comes_from_the_session(self):
         self.assertEqual(ur.task_user({"USERDOMAIN": "PC", "USERNAME": "someone"}), "PC\\someone")
         self.assertEqual(ur.task_user({"USERNAME": "someone"}), "someone")
+
+
+class StopWait(unittest.TestCase):
+    def test_outlasts_the_runners_shutdown(self):
+        # unio-inbox against an API that never answers: a 20 s call under way, the
+        # session's 5 s grace and 10 s for its output, the release's three 5 s
+        # tries 2 s apart, and the presence's 5 s join and 3 s write.
+        worst = 20 + 5 + 10 + (3 * 5 + 2 * 2) + (5 + 3)
+        self.assertGreaterEqual(ur.STOP_WAIT, worst + 30)
 
 
 class Interpreter(unittest.TestCase):

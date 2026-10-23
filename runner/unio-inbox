@@ -2821,6 +2821,9 @@ class Runner:
         within a poll. The agent's reaction is idempotent: if another machine claims
         the item, it adds the same one."""
         for item in items:
+            if stopping.is_set():
+                # Each reaction would add to the shutdown; the next start marks these.
+                break
             key = item.get("key")
             if key in self.acked or is_agent_comment(item) or not self.supported(item):
                 continue
