@@ -1410,6 +1410,10 @@ class SnapshotError(Exception):
     pass
 
 
+# Where a repository repos.json names lives, for a clone without gh.
+GITHUB = "https://github.com/"
+
+
 class Snapshots:
     """Read-only copies of each repository's default branch. Sessions never see a
     working checkout: its feature branch, uncommitted work and ignored files."""
@@ -1458,20 +1462,45 @@ class Snapshots:
         return snap
 
     def _clone(self, name, path):
+        """gh clones what its login may read; without gh, or when gh fails (not
+        installed, signed out), git clones it anonymously, which a public
+        repository allows."""
         self.state.repos_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         partial = path.with_name(f".{path.name}.partial")
         remove_tree(partial)
-        self._run([self.cfg.gh, "repo", "clone", name, str(partial), "--", "--filter=blob:none", "--quiet",
-                   "--config", f"core.hooksPath={os.devnull}"], 600, "gh repo clone")
+        options = ["--filter=blob:none", "--quiet", "--config", f"core.hooksPath={os.devnull}"]
+        refused = None
+        if self._has_gh():
+            try:
+                self._run([self.cfg.gh, "repo", "clone", name, str(partial), "--", *options], 600, "gh repo clone")
+            except SnapshotError as e:
+                refused = e
+                remove_tree(partial)
+        else:
+            refused = SnapshotError(f"gh repo clone: {self.cfg.gh} is not installed")
+        if refused:
+            try:
+                self._run([self.cfg.git, *self._network(), "clone", *options, f"{GITHUB}{name}.git", str(partial)],
+                          600, "git clone")
+            except SnapshotError as e:
+                remove_tree(partial)
+                raise SnapshotError(f"{refused}; {e}") from None
         self._checkout(partial)
         os.replace(partial, path)
+
+    def _has_gh(self):
+        return bool(shutil.which(self.cfg.gh)) or Path(self.cfg.gh).is_file()
 
     def _network(self):
         """The credential helper gh itself passes to git, so fetches work without
         `gh auth setup-git`. A blob:none checkout fetches too: every blob a new
-        commit needs comes from the private remote."""
-        return ["-c", "credential.https://github.com.helper=",
-                "-c", f"credential.https://github.com.helper=!{shell_word(self.cfg.gh)} auth git-credential"]
+        commit needs comes from the private remote. Without gh, no helper at
+        all: only a public repository is read, and no credential manager of the
+        machine's can open a window from the service."""
+        reset = ["-c", "credential.https://github.com.helper="]
+        if not self._has_gh():
+            return reset
+        return reset + ["-c", f"credential.https://github.com.helper=!{shell_word(self.cfg.gh)} auth git-credential"]
 
     def _refresh(self, path):
         self._git(path, *self._network(), "fetch", "--prune", "--quiet", "origin", timeout=300)
