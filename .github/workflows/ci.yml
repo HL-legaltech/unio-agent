@@ -138,6 +138,10 @@ jobs:
       - name: Run the runner's tests
         run: python -m unittest discover -s runner/tests -v
 
+      - name: Lint bin/unio as POSIX sh
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh bin/unio
+
       - name: Verify the systemd unit setup writes
         if: runner.os == 'Linux'
         run: |
@@ -179,3 +183,17 @@ jobs:
             Write-Host "${shell}: $out"
             if ($out -notmatch 'org_ seguido de letras') { throw "$shell did not run install.ps1" }
           }
+
+      - name: Run bin/unio.cmd from PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\bin\unio.cmd bogus
+          if ($LASTEXITCODE -ne 2) { throw "unio.cmd bogus exited $LASTEXITCODE" }
+          $help = & .\bin\unio.cmd help | Out-String
+          if ($LASTEXITCODE -or $help -notmatch '(?m)^  runner ') { throw "unio.cmd help: $help" }
+          $version = (& .\bin\unio.cmd --version | Out-String).Trim()
+          if ($version -ne (Get-Content -Raw runner\VERSION).Trim()) { throw "unio.cmd --version: $version" }
+          & .\bin\unio.cmd runner --help
+          if ($LASTEXITCODE) { throw "unio.cmd runner --help exited $LASTEXITCODE" }
+

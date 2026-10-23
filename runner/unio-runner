@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Sets up Unio's answering service (runner/unio-inbox) on this computer, one
-service per workspace, and manages it afterwards:
+service per workspace, and manages it afterwards. People run it as
+`unio runner`, through bin/unio:
 
-    unio-runner setup --workspace org_<id> [--api URL] [--token-stdin]
+    unio runner setup --workspace org_<id> [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
-    unio-runner status [--workspace org_<id>]
-    unio-runner start|stop|restart|logs|uninstall --workspace org_<id>
-    unio-runner update
+    unio runner status [--workspace org_<id>]
+    unio runner start|stop|restart|logs|uninstall --workspace org_<id>
+    unio runner update
 
 unio-inbox owns where a workspace's profile lives (--print-paths) and whether
 it works (--check): this file asks it and never re-derives either, so the two
@@ -71,7 +72,7 @@ STATE_WORDS = {
     "unknown": "estado desconhecido",
 }
 
-USAGE = """Uso: unio-runner <comando> [opções]
+USAGE = """Uso: unio runner <comando> [opções]
 
 Liga e cuida do serviço de respostas do Unio neste computador: o programa que
 responde às menções ao agente do workspace com o Claude Code daqui, por conta
@@ -163,9 +164,19 @@ def shown(path):
 
 
 def self_command():
+    """How a person runs this file: `unio runner`, or the clone's bin/unio by
+    its path while the unio on PATH is another one or none, as right after
+    install.sh when ~/.local/bin is not on PATH yet."""
+    found = shutil.which("unio")
+    try:
+        ours = bool(found) and os.path.samefile(str(Path(found).resolve().parent), str(CLONE / "bin"))
+    except OSError:
+        ours = False
+    if ours:
+        return "unio runner"
     if os.name == "nt":
-        return '& "%s" "%s"' % (sys.executable, Path(__file__).resolve())
-    return "python3 " + shown(Path(__file__).resolve())
+        return '& "%s" runner' % (CLONE / "bin" / "unio.cmd")
+    return shown(CLONE / "bin" / "unio") + " runner"
 
 
 def foreground_command(org):
@@ -1111,7 +1122,7 @@ def setup(opts):
     given_repos = load_repos_json(opts["--repos-json"]) if opts.get("--repos-json") else None
     kind = None if opts.get("--no-service") else service_kind()
     if not opts.get("--no-service") and kind is None:
-        raise Stop("O unio-runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
+        raise Stop("O unio runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
                    "o serviço rodando num terminal: %s" % foreground_command(org))
 
     check_computer()
@@ -1221,7 +1232,7 @@ def status(opts):
 def installed_service(org):
     svc = service()
     if svc is None:
-        raise Stop("O unio-runner não sabe cuidar de serviços neste sistema.")
+        raise Stop("O unio runner não sabe cuidar de serviços neste sistema.")
     if svc.state(org) == "absent":
         raise Stop("Não há serviço instalado para %s. Rode primeiro: %s setup --workspace %s"
                    % (org, self_command(), org))
@@ -1359,7 +1370,7 @@ def parse_args(argv):
         return "help", {}
     command = argv[0]
     if command not in OPTIONS:
-        raise Stop("Comando desconhecido: %s. Rode unio-runner --help para ver os comandos." % clean(command, 40), 2)
+        raise Stop("Comando desconhecido: %s. Rode unio runner help." % clean(command, 40), 2)
     allowed = OPTIONS[command]
     opts = {}
     rest = list(argv[1:])

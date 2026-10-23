@@ -1,5 +1,5 @@
 # Unio's answering service, one instance per workspace:
-# unio-runner@<workspace id>.service. Written by `unio-runner setup`, which
+# unio-runner@<workspace id>.service. Written by `unio runner setup`, which
 # fills in the interpreter, the runner and the PATH it ran with.
 [Unit]
 Description=Unio answering service for workspace %i

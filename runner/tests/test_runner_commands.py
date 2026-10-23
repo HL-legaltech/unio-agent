@@ -3,8 +3,8 @@ start/stop/restart, uninstall and update."""
 
 import json
 import os
+import re
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +26,7 @@ class Arguments(unittest.TestCase):
             self.assertEqual(ur.parse_args(argv)[0], "help", argv)
 
     def test_refusals_are_portuguese_and_exit_2(self):
-        for argv, text in ((["bogus"], "Comando desconhecido: bogus."),
+        for argv, text in ((["bogus"], "Comando desconhecido: bogus. Rode unio runner help."),
                            (["setup", "--workspace", "org_x", "--token", RUNNER], "Opção desconhecida para setup: --token."),
                            (["logs", "--workspace"], "Falta o valor de --workspace."),
                            (["start"], "Falta --workspace org_..., o workspace do serviço."),
@@ -42,9 +42,21 @@ class Arguments(unittest.TestCase):
         with captured() as out:
             self.assertEqual(ur.main(["--help"]), 0)
         text = out.getvalue()
-        self.assertTrue(text.startswith("Uso: unio-runner <comando> [opções]"))
+        self.assertTrue(text.startswith("Uso: unio runner <comando> [opções]"))
         for command in ("setup", "status", "start", "stop", "restart", "logs", "uninstall", "update"):
             self.assertIn("  " + command, text)
+        self.assertNotIn("unio-runner", text)
+
+    def test_people_are_told_unio_runner(self):
+        # unio-runner survives only as a name that is not a command: the
+        # systemd unit and its template, the task's template, the User-Agent.
+        source = ur.HERE.joinpath("unio-runner").read_text(encoding="utf-8")
+        named = [line.strip() for line in source.splitlines() if re.search(r"unio-runner(?![@-])", line)]
+        self.assertEqual(named, ['"Authorization": "Bearer " + token, "Accept": "application/json", '
+                                 '"User-Agent": "unio-runner"})'])
+        for template in ur.SERVICES.iterdir():
+            self.assertIsNone(re.search(r"unio-runner (setup|status|start|stop|restart|logs|uninstall|update)",
+                                        template.read_text(encoding="utf-8")), template.name)
 
     def test_api_addresses(self):
         self.assertEqual(ur.normalize_api("https://api.unio.so"), "https://api.unio.so/v1")
