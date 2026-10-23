@@ -45,6 +45,8 @@ if [ "$kind" = claude-code ]; then
   else
     line bad "core claude-code: $cc é anterior a $minimum; atualize o Claude Code"
   fi
+  command -v unio >/dev/null 2>&1 ||
+    line info "core command: o comando unio, que conecta e confere o Unio pelo terminal, não está no PATH; o instalador da página Agente de código o instala"
 fi
 
 workspace=$(unio_workspace "$project")
@@ -168,6 +170,10 @@ if [ -d "$HOME/.codex" ]; then
     line info "codex skill: não instalada (veja a seção Codex do README)"
   fi
   clone=$HOME/.local/share/unio/agent/plugins/unio
+  # Where install.sh clones on Windows when no clone is at the old place.
+  if [ "$UNIO_OS" = windows ] && [ ! -d "$clone" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+    clone=$(cygpath -u "$LOCALAPPDATA")/unio/agent/plugins/unio
+  fi
   [ -d "$clone" ] && line info "codex clone: unio $(unio_version "$clone") em $(unio_tilde "$clone")"
   codex_config=$HOME/.codex/config.toml
   if grep -q 'http_headers_helper.*mcp-headers\.sh' "$codex_config" 2>/dev/null; then

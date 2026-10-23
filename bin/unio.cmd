@@ -1,7 +1,8 @@
 @echo off
 rem unio on Windows, the twin of bin\unio: Unio's command on this computer.
-rem install.ps1 -Runner puts this folder on the user's Path; it runs from the
-rem clone it sits in.
+rem install.ps1 puts this folder on the user's Path; it runs from the clone
+rem it sits in. Every command but runner is bin\unio itself, run by Git for
+rem Windows' own sh.exe, so both systems print the same words.
 rem
 rem unio help prints the lines of bin\unio that start with "#:", the one
 rem table of commands. A command in that table needs its branch here too.
@@ -14,7 +15,13 @@ setlocal EnableExtensions DisableDelayedExpansion
 for %%r in ("%~dp0..") do set "unio_root=%%~fr"
 set "unio_cmd=%~1"
 if not defined unio_cmd goto :help
+if /i "%unio_cmd%"=="connect" goto :posix
+if /i "%unio_cmd%"=="status" goto :posix
+if /i "%unio_cmd%"=="doctor" goto :posix
+if /i "%unio_cmd%"=="update" goto :posix
+if /i "%unio_cmd%"=="disconnect" goto :posix
 if /i "%unio_cmd%"=="runner" goto :runner
+if /i "%unio_cmd%"=="help" if not "%~2"=="" if /i not "%~2"=="runner" goto :posix
 if /i "%unio_cmd%"=="help" goto :help
 if /i "%unio_cmd%"=="-h" goto :help
 if /i "%unio_cmd%"=="--help" goto :help
@@ -22,6 +29,16 @@ if /i "%unio_cmd%"=="--version" goto :version
 setlocal EnableDelayedExpansion
 >&2 echo Comando desconhecido: !unio_cmd:~0,40!. Rode unio help.
 exit /b 2
+
+:posix
+rem sh.exe sits in the bin folder beside git.exe's cmd folder. The script's
+rem path goes to sh with forward slashes, which bin\unio reads as its own.
+set "unio_sh="
+for /f "delims=" %%g in ('where git 2^>nul') do if not defined unio_sh if exist "%%~dpg..\bin\sh.exe" set "unio_sh=%%~dpg..\bin\sh.exe"
+if not defined unio_sh goto :no_git_bash
+set "unio_script=%unio_root:\=/%/bin/unio"
+"%unio_sh%" "%unio_script%" %*
+exit /b %errorlevel%
 
 :runner
 rem Everything after the first word, quoted as it was typed. A bare unio
@@ -71,6 +88,10 @@ exit /b 0
 :no_runner
 setlocal EnableDelayedExpansion
 >&2 echo Falta runner\unio-runner em !unio_root!. Atualize o clone e rode este comando de novo.
+exit /b 1
+
+:no_git_bash
+>&2 echo Falta o Git for Windows, que traz o sh em que este comando roda: instale com winget install --id Git.Git -e, abra outro terminal e rode este comando de novo.
 exit /b 1
 
 :no_python

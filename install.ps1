@@ -1,7 +1,18 @@
-# Installs Unio's answering service on Windows: the program that answers for
-# a workspace's agent from this computer, with its Claude Code. It is the
-# command the Agentes page in Unio shows, for Windows PowerShell 5.1 and
-# PowerShell 7:
+# Installs Unio on Windows, for Windows PowerShell 5.1 and PowerShell 7. It is
+# the command the Agente de codigo page in Unio shows, which installs the
+# Claude Code plugin (or, with -Client codex, sets Codex up) and connects the
+# computer to a workspace:
+#
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1))) [-Workspace org_<id>] [-Client claude-code|codex] [-Renew] [-Browser]
+#
+# Those flags mean what install.sh's do, and install.sh does the work: this
+# script checks Git for Windows and Claude Code, keeps the clone, puts the
+# unio command on the user's Path, then runs install.sh from the clone with
+# Git's own sh.exe, so the token and folder rules live in one script.
+#
+# With -Runner it installs Unio's answering service instead: the program that
+# answers for a workspace's agent from this computer, with its Claude Code.
+# It is the command the Agentes page shows:
 #
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1))) -Runner -Workspace org_<id>
 #
@@ -19,7 +30,10 @@
 
 param(
     [switch]$Runner,
-    [string]$Workspace
+    [string]$Workspace,
+    [string]$Client = 'claude-code',
+    [switch]$Renew,
+    [switch]$Browser
 )
 
 $Repository = 'HL-legaltech/unio-agent'
@@ -131,11 +145,89 @@ function Add-UserPath([string]$Folder) {
     return $true
 }
 
-function Install-Runner {
-    if (-not $Runner) {
-        Say 'Este instalador instala o servi\u00e7o de respostas do Unio no Windows. Rode o comando que a p\u00e1gina Agentes mostra, que termina em -Runner -Workspace org_...'
+# The sh.exe of Git for Windows, from git.exe's own folder: Git's cmd folder
+# is on the Path, its bin folder is not. $null without Git for Windows.
+function Find-GitSh {
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $git) { return $null }
+    $gitRoot = Split-Path -Parent (Split-Path -Parent $git.Source)
+    foreach ($relative in @('bin\sh.exe', 'usr\bin\sh.exe')) {
+        $candidate = Join-Path $gitRoot $relative
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+# Puts the clone's bin folder, home of unio.cmd, on the user's Path.
+function Set-UnioCommand([string]$Clone) {
+    $bin = Join-Path $Clone 'bin'
+    if (-not (Test-Path -LiteralPath (Join-Path $bin 'unio.cmd') -PathType Leaf)) { return }
+    try {
+        if (Add-UserPath $bin) {
+            Say 'Pasta {0} acrescentada ao Path do usu\u00e1rio. Abra um terminal novo para usar o comando unio; neste ele j\u00e1 funciona.' $bin
+        } else {
+            Say 'O comando unio j\u00e1 est\u00e1 no Path do usu\u00e1rio.'
+        }
+    } catch {
+        Say 'N\u00e3o foi poss\u00edvel acrescentar {0} ao Path do usu\u00e1rio ({1}). O comando do Unio est\u00e1 em {2}.' $bin, $_.Exception.Message, (Join-Path $bin 'unio.cmd')
+    }
+}
+
+# The plugin, or Codex, and a workspace's token, through install.sh.
+function Install-Plugin {
+    if ($Client -cne 'claude-code' -and $Client -cne 'codex') {
+        Say '-Client aceita claude-code ou codex.'
         return
     }
+    if ($Workspace -and $Workspace -cnotmatch '^org_[A-Za-z0-9]+$') {
+        Say 'O valor de -Workspace n\u00e3o \u00e9 um workspace do Unio (org_ seguido de letras e n\u00fameros). Copie de novo o comando da p\u00e1gina Agente de c\u00f3digo.'
+        return
+    }
+    if ($Renew -and -not $Workspace) {
+        Say '-Renew precisa de -Workspace org_...: copie o comando da p\u00e1gina Agente de c\u00f3digo.'
+        return
+    }
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        Say 'Este instalador \u00e9 para o Windows. No macOS e no Linux, rode o comando com install.sh que a p\u00e1gina Agente de c\u00f3digo mostra.'
+        return
+    }
+    if ($env:CLAUDECODE) {
+        Say 'Rode este comando em outro terminal, fora do Claude Code: aqui, o que voc\u00ea digita pode entrar na conversa.'
+        return
+    }
+    if (-not $env:LOCALAPPDATA) {
+        Say 'A vari\u00e1vel LOCALAPPDATA n\u00e3o est\u00e1 definida, ent\u00e3o n\u00e3o h\u00e1 onde instalar. Nada foi instalado.'
+        return
+    }
+    $sh = Find-GitSh
+    if (-not $sh) {
+        Say 'O Unio precisa do Git for Windows: o Claude Code instala plugins com o git, e os scripts do Unio rodam no Git Bash que ele traz. Instale com winget install --id Git.Git -e, abra outro terminal e rode este comando de novo.'
+        return
+    }
+    if ($Client -ceq 'claude-code' -and -not $Renew -and -not (Get-Command claude -ErrorAction SilentlyContinue)) {
+        Say 'O comando claude n\u00e3o est\u00e1 no PATH. Instale o Claude Code (irm https://claude.ai/install.ps1 | iex), abra outro terminal e rode este comando de novo.'
+        return
+    }
+    # install.sh keeps using a clone already where it cloned before, since a
+    # Codex config names its helper there, so the unio command must be that
+    # clone's. Git's sh takes HOME from USERPROFILE when HOME is not set.
+    $clone = Join-Path $env:LOCALAPPDATA 'unio\agent'
+    $profileDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+    if ($profileDir) {
+        $legacy = Join-Path $profileDir '.local\share\unio\agent'
+        if (Test-Path -LiteralPath (Join-Path $legacy '.git') -PathType Container) { $clone = $legacy }
+    }
+    if (-not (Get-Clone $clone)) { return }
+    Set-UnioCommand $clone
+    $arguments = @('--client', $Client)
+    if ($Workspace) { $arguments += @('--workspace', $Workspace) }
+    if ($Renew) { $arguments += '--renew' }
+    if ($Browser) { $arguments += '--browser' }
+    # Forward slashes: Git's sh reads C:/... as a path, and C:\... as escapes.
+    & $sh (($clone -replace '\\', '/') + '/install.sh') @arguments
+}
+
+function Install-Runner {
     if ($Workspace -cnotmatch '^org_[A-Za-z0-9]+$') {
         Say 'O valor de -Workspace n\u00e3o \u00e9 um workspace do Unio (org_ seguido de letras e n\u00fameros). Copie de novo o comando da p\u00e1gina Agentes.'
         return
@@ -172,20 +264,12 @@ function Install-Runner {
         Say 'O clone em {0} ainda n\u00e3o tem o servi\u00e7o de respostas. Rode este comando de novo em instantes.' $clone
         return
     }
-    $bin = Join-Path $clone 'bin'
-    if (Test-Path -LiteralPath (Join-Path $bin 'unio.cmd') -PathType Leaf) {
-        try {
-            if (Add-UserPath $bin) {
-                Say 'Pasta {0} acrescentada ao Path do usu\u00e1rio. Abra um terminal novo para usar o comando unio; neste ele j\u00e1 funciona.' $bin
-            } else {
-                Say 'O comando unio j\u00e1 est\u00e1 no Path do usu\u00e1rio.'
-            }
-        } catch {
-            Say 'N\u00e3o foi poss\u00edvel acrescentar {0} ao Path do usu\u00e1rio ({1}). O comando do Unio est\u00e1 em {2}.' $bin, $_.Exception.Message, (Join-Path $bin 'unio.cmd')
-        }
-    }
+    Set-UnioCommand $clone
     $rest = @($python | Select-Object -Skip 1)
     & $python[0] @rest $setup setup --workspace $Workspace
 }
 
-Install-Runner
+# Dot-sourced, it only defines its functions, as CI does to test them.
+if ($MyInvocation.InvocationName -ne '.') {
+    if ($Runner) { Install-Runner } else { Install-Plugin }
+}

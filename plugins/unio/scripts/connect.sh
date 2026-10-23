@@ -29,16 +29,22 @@ quote() {
 instructions() {
   workspace=$(unio_workspace "${CLAUDE_PROJECT_DIR:-$PWD}")
   file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
-  # The commands below are sh commands, which a Windows terminal runs only
-  # in Git Bash.
   terminal="outro terminal"
-  [ "$UNIO_OS" != windows ] || terminal="outro terminal do Git Bash"
+  if command -v unio >/dev/null 2>&1; then
+    command="unio connect"
+    renew="unio connect --token --workspace $workspace"
+  else
+    command="sh $(quote "$(unio_root)/scripts/connect.sh") browser"
+    renew=$(unio_renew_command "$workspace")
+    # Without the unio command, only Git Bash runs the sh line on Windows.
+    [ "$UNIO_OS" != windows ] || terminal="outro terminal do Git Bash"
+  fi
   cat <<EOF
 Para conectar este computador ao Unio:
 
 1. Em $terminal, fora do Claude Code, rode o comando abaixo na pasta do seu projeto:
 
-sh $(quote "$(unio_root)/scripts/connect.sh") browser
+$command
 
 2. Ele mostra um link e um código, e abre o navegador quando pode. Entre no Unio, confira que o código é o mesmo do terminal, escolha o workspace e aprove. O token vai do Unio direto para este computador, sem passar pela tela nem pela área de transferência. Sem navegador aqui, abra o link em qualquer aparelho.
 3. De volta aqui, rode /mcp, escolha plugin:unio:unio e depois Reconnect (ou rode /reload-plugins). Em seguida, /unio:doctor confirma a conexão.
@@ -51,7 +57,7 @@ EOF
     cat <<EOF
 Depois, em $terminal, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
 
-$(unio_renew_command "$workspace")
+$renew
 EOF
   else
     cat <<EOF

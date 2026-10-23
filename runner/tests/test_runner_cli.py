@@ -1,6 +1,7 @@
 """bin/unio and bin/unio.cmd, the one command people type: its help table,
 its dispatch to unio-runner, and the command unio-runner's hints name."""
 
+import json
 import os
 import re
 import shutil
@@ -14,6 +15,9 @@ ur = load_runner()
 BIN = RUNNER_DIR.parent / "bin"
 VERSION = (RUNNER_DIR / "VERSION").read_text(encoding="utf-8").strip()
 SH = shutil.which("sh")
+COMMANDS = ["connect", "status", "doctor", "update", "disconnect", "runner"]
+# The commands bin/unio runs itself; unio.cmd hands them to Git's sh.
+OWN = COMMANDS[:-1]
 
 
 def help_text():
@@ -39,7 +43,7 @@ class Table(unittest.TestCase):
     def test_the_table_lists_what_bin_unio_runs(self):
         arms = re.findall(r"^  ([^ ()]+)\)$", (BIN / "unio").read_text(encoding="utf-8"), re.M)
         words = [w for arm in arms for w in arm.split("|") if not w.startswith("-") and w not in ("help", "*")]
-        self.assertEqual(commands_in(help_text()), ["runner"])
+        self.assertEqual(commands_in(help_text()), COMMANDS)
         self.assertEqual(words, commands_in(help_text()))
 
     def test_the_table_lists_what_unio_cmd_runs(self):
@@ -60,10 +64,14 @@ class PosixCommand(unittest.TestCase):
         self.box = Sandbox(self)
 
     def unio(self, *args, command=None, **env):
-        """bin/unio through sh, or `command` as given; returns (code, stdout, stderr)."""
+        """bin/unio through sh, or `command` as given; returns (code, stdout, stderr).
+
+        In a session of its own, so a test run from a terminal leaves bin/unio
+        no /dev/tty to ask on, as in CI.
+        """
         done = subprocess.run(command or [SH, str(BIN / "unio")] + list(args), stdin=subprocess.DEVNULL,
                               capture_output=True, encoding="utf-8", errors="replace", env=self.box.env(**env),
-                              cwd=str(self.box.root), timeout=180)
+                              cwd=str(self.box.root), timeout=180, start_new_session=True)
         return done.returncode, done.stdout, done.stderr
 
     def test_help(self):
@@ -87,6 +95,71 @@ class PosixCommand(unittest.TestCase):
             code, out, err = self.unio(word, "status")
             self.assertEqual((code, out), (2, ""), word)
             self.assertEqual(err, "Comando desconhecido: %s. Rode unio help.\n" % word)
+
+    def test_each_command_has_its_own_help(self):
+        for name in OWN:
+            own = self.unio(name, "--help")
+            self.assertEqual(own[0], 0, name)
+            self.assertTrue(own[1].startswith("Uso: unio %s" % name), own[1])
+            self.assertEqual(own[2], "")
+            self.assertEqual(self.unio("help", name), own, name)
+
+    def test_a_command_refuses_an_unknown_option(self):
+        for name in OWN:
+            code, out, err = self.unio(name, "--bogus")
+            self.assertEqual((code, out), (2, ""), name)
+            self.assertEqual(err, "Opção desconhecida: --bogus.\nRode unio help %s.\n" % name)
+
+    def write(self, relative, text):
+        path = self.box.home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_status_with_nothing_connected(self):
+        code, out, err = self.unio("status")
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("Nenhum workspace está conectado neste computador. Rode unio connect.", out)
+
+    def test_disconnect_needs_a_workspace(self):
+        code, out, err = self.unio("disconnect", "--yes")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Nenhum workspace vale nesta pasta", err)
+        code, _, err = self.unio("disconnect", "--workspace", "org_Missing", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("O workspace org_Missing não está conectado neste computador", err)
+
+    def test_disconnect_removes_only_that_workspace(self):
+        a = self.write(".config/unio/workspaces/org_A/token", "unio_" + "a" * 46)
+        b = self.write(".config/unio/workspaces/org_B/token", "unio_" + "b" * 46)
+        self.write(".config/unio/default-workspace", "org_A\n")
+        projects = self.write(".config/unio/projects", "%s\torg_B\n/elsewhere\torg_A\n" % self.box.root)
+        # Without a terminal to ask, it refuses before touching anything.
+        code, _, err = self.unio("disconnect", "--workspace", "org_B")
+        self.assertEqual(code, 2)
+        self.assertIn("rode de novo com --yes", err)
+        self.assertTrue(b.exists())
+        code, out, err = self.unio("disconnect", "--yes")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Token do workspace org_B apagado deste computador.", out)
+        self.assertIn("revogue-o em Configurações > Pessoal > Agente de código", out)
+        self.assertFalse(b.exists())
+        self.assertTrue(a.exists())
+        self.assertEqual(projects.read_text(encoding="utf-8"), "/elsewhere\torg_A\n")
+        self.assertEqual((self.box.home / ".config/unio/default-workspace").read_text(encoding="utf-8"), "org_A\n")
+
+    def test_doctor_json_is_a_list_and_exits_1_on_a_problem(self):
+        code, out, err = self.unio("doctor", "--json")
+        self.assertEqual((code, err), (1, ""))
+        items = json.loads(out)
+        self.assertTrue(items)
+        self.assertTrue(all(set(item) == {"status", "area", "check", "detail"} for item in items))
+        self.assertIn(("bad", "token"), [(item["status"], item["check"]) for item in items])
+        # A terminal names the unio command where Claude Code is told /unio:connect.
+        code, out, _ = self.unio("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("rode unio connect", out)
+        self.assertNotIn("/unio:connect", out)
 
     def test_runner_runs_unio_runner_with_the_rest(self):
         code, out, _ = self.unio("runner", "--help")
@@ -150,7 +223,7 @@ class WindowsCommand(unittest.TestCase):
             code, out, _ = self.unio(*args)
             self.assertEqual(code, 0, args)
             self.assertTrue(out.startswith("Uso: unio <comando>"), out)
-            self.assertEqual(commands_in(out), ["runner"])
+            self.assertEqual(commands_in(out), COMMANDS)
 
     def test_help_runner_is_the_runners_own(self):
         for args in (["help", "runner"], ["runner"]):
@@ -181,6 +254,24 @@ class WindowsCommand(unittest.TestCase):
                                  PATH=str(BIN) + os.pathsep + self.box.env()["PATH"])
         self.assertEqual(code, 1, out)
         self.assertIn("Rode primeiro: unio runner setup --workspace org_test", out)
+
+    def test_the_other_commands_run_through_gits_sh(self):
+        # bin/unio itself, by Git for Windows' sh.exe: the same words as on macOS and Linux.
+        code, out, _ = self.unio("help", "connect")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.startswith("Uso: unio connect"), out)
+        code, out, _ = self.unio("status")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Nenhum workspace está conectado neste computador. Rode unio connect.", out)
+        code, out, err = self.unio("connect", "--bogus")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Opção desconhecida: --bogus.", err)
+
+    def test_without_git_for_windows(self):
+        system = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")
+        code, out, err = self.unio("status", PATH=system)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Falta o Git for Windows", err)
 
     def test_runner_without_a_python_that_runs(self):
         # The Microsoft Store's python.exe alias opens the Store instead of running Python.

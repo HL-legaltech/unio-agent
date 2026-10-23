@@ -90,6 +90,12 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       CLAUDE_CODE_VERSION: "2.1.309"
     steps:
+      # Git for Windows' default: checkouts get CRLF line ends unless
+      # .gitattributes says otherwise, and sh cannot run a CRLF script.
+      - name: Check out with Git for Windows' line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf true
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -184,10 +190,34 @@ jobs:
             if ($out -notmatch 'org_ seguido de letras') { throw "$shell did not run install.ps1" }
           }
 
+      - name: Run install.ps1's plugin mode through Git's sh
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The clone install.ps1 keeps, made from this checkout, so install.sh
+          # is this branch's. It stops at the hidden prompt: no terminal here.
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'localappdata'
+          git clone --quiet . (Join-Path $env:LOCALAPPDATA 'unio\agent')
+          foreach ($shell in 'powershell', 'pwsh') {
+            $out = & $shell -NoProfile -NonInteractive -Command '& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Workspace org_ci -Renew' 2>&1 | Out-String
+            Write-Host "${shell}: $out"
+            if ($out -notmatch 'precisa de um terminal') { throw "$shell did not reach install.sh through Git's sh" }
+          }
+          # A clone already where install.sh cloned before stays the one in
+          # use, and the unio command on the Path is that clone's.
+          $env:HOME = Join-Path $env:RUNNER_TEMP 'home'
+          $legacy = Join-Path $env:HOME '.local\share\unio\agent'
+          git clone --quiet . $legacy
+          $out = & pwsh -NoProfile -NonInteractive -Command '& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Workspace org_ci -Renew' 2>&1 | Out-String -Width 4096
+          Write-Host "old clone: $out"
+          if ($out -notmatch [regex]::Escape((Join-Path $legacy 'bin'))) { throw "install.ps1 did not use the clone at the old place" }
+
       - name: Run bin/unio.cmd from PowerShell
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $connect = & .\bin\unio.cmd help connect | Out-String
+          if ($LASTEXITCODE -or $connect -notmatch '^Uso: unio connect') { throw "unio.cmd help connect: $connect" }
           & .\bin\unio.cmd bogus
           if ($LASTEXITCODE -ne 2) { throw "unio.cmd bogus exited $LASTEXITCODE" }
           $help = & .\bin\unio.cmd help | Out-String
