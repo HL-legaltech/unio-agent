@@ -270,6 +270,12 @@ forms=$("$shell" -c '
   printf "%s|" "$(unio_workspace /Users/ana/REPO)"
 ' sh "$scripts/lib.sh")
 [ "$forms" = "/c/users/ana/repo|/c/users/ana/repo|/c/users/ana/repo|org_A|org_B|org_A|org_B|" ]; check "Windows folder forms and case-insensitive systems map one folder (got $forms)"
+mkdir -p "$tmp/real-repo/sub"
+ln -s "$tmp/real-repo" "$tmp/linked-repo"
+printf '%s\torg_A\n' "$tmp/real-repo" > "$conf/projects"
+# shellcheck disable=SC2016 # the script's own expansions, in its shell
+linked=$("$shell" -c '. "$1"; unio_workspace "$2"' sh "$scripts/lib.sh" "$tmp/linked-repo/sub")
+[ "$linked" = org_A ]; check "a folder reached through a link maps as the folder it points to"
 rm -f "$conf/default-workspace" "$conf/projects" "$conf/token"
 rm -rf "$conf/workspaces"
 

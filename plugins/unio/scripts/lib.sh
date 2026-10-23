@@ -84,6 +84,10 @@ unio_is_org() {
 # macOS ignore case, so there the form is lower case.
 unio_dir_key() {
   d=$1
+  # A folder that exists is read back from the system, physical and, on
+  # Windows, by its long name: Claude Code may name it C:/Users/RUNNER~1/...
+  # where Git Bash says /c/Users/runneradmin/....
+  real=$(CDPATH='' cd -P -- "$d" 2>/dev/null && pwd -P) && [ -n "$real" ] && d=$real
   if [ "$UNIO_OS" = windows ]; then
     case $d in
       [A-Za-z]:*)
