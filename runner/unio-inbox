@@ -8,6 +8,7 @@
     unio-inbox --needs --dry-run     list the tasks waiting on a person and what a check would do
     unio-inbox --workspace org_<id> ...    any of the above with that workspace's profile
     unio-inbox --workspace org_<id> --print-paths    the profile's folders and token file, as JSON
+    unio-inbox --workspace org_<id> --check          whether the profile can answer, as JSON (exit 0 or 1)
 
 Each item is claimed on the server (so no machine or restart handles it
 twice), marked with an eyes reaction, and answered by one headless Claude Code
@@ -4171,6 +4172,55 @@ def print_needs(rows):
         print(f"  {'':<10} check: {printable(row['judge'])}")
 
 
+def check_profile(cfg):
+    """--check: whether this profile can answer, as one JSON object on stdout,
+    {ok, workspace: {clerkId, name}, agent: {name}, language, problems,
+    codes}: each problem an English line and, at the same index in codes, a
+    stable code unio-runner words for people. It claims nothing and writes
+    no presence. Exit 0 when ok, else 1."""
+    problems, codes = [], []
+
+    def problem(code, text):
+        codes.append(code)
+        problems.append(text)
+
+    result = {"ok": False, "workspace": None, "agent": None, "language": None, "problems": problems, "codes": codes}
+    token = cfg.token()
+    if not token:
+        problem("no_token", f"no runner token in {cfg.token_file}")
+    else:
+        try:
+            status, data = Api(cfg.api, token).call("GET", "/agents/me", timeout=20)
+        except ApiUnreachable as e:
+            status, data = 0, None
+            problem("unio_unreachable", str(e))
+        me = unwrap(data) if status == 200 else None
+        if status == 401:
+            problem("token_refused", "Unio refused the token: it was revoked, has expired, or its issuer may no "
+                                     "longer run the agent")
+        elif status == 403:
+            agents_off = isinstance(data, dict) and data.get("code") == "agents_disabled"
+            problem("agents_off" if agents_off else "forbidden", f"Unio refused the agent: {describe(status, data)}")
+        elif status and not isinstance(me, dict):
+            problem("unio_error", f"GET /agents/me: {describe(status, data)}")
+        elif status:
+            ws = me.get("workspace") if isinstance(me.get("workspace"), dict) else {}
+            agent = me.get("agent") if isinstance(me.get("agent"), dict) else {}
+            purpose = (me.get("token") or {}).get("purpose") if isinstance(me.get("token"), dict) else None
+            result.update(workspace={"clerkId": ws.get("clerkId"), "name": ws.get("name")},
+                          agent={"name": agent.get("name")}, language=writing_language(me))
+            if purpose != "runner":
+                problem("not_runner_token", f"the token's purpose is {purpose or 'not given'}, not runner: issue a "
+                                            "runner token for the answering service")
+            if cfg.workspace and ws.get("clerkId") != cfg.workspace:
+                problem("wrong_workspace", f"the token belongs to workspace {ws.get('clerkId')}, not {cfg.workspace}")
+    if not (shutil.which(cfg.claude) or Path(cfg.claude).is_file()):
+        problem("claude_missing", f"Claude Code was not found ({cfg.claude})")
+    result["ok"] = not problems
+    print(json.dumps(result))
+    return 0 if result["ok"] else 1
+
+
 def is_agent_comment(item):
     return ((item.get("comment") or {}).get("author") or {}).get("kind") == "agent"
 
@@ -4205,6 +4255,8 @@ def main(argv=None):
     mode.add_argument("--dry-run", action="store_true", help="list pending items without claiming")
     mode.add_argument("--print-paths", action="store_true",
                       help="print the profile's config and state folders and its token file as JSON, then exit")
+    mode.add_argument("--check", action="store_true",
+                      help="check the token, its workspace and Claude Code, print the result as JSON, then exit")
     ap.add_argument("--reviews", action="store_true",
                     help="with --dry-run: list the project review candidates and which would run")
     ap.add_argument("--needs", action="store_true",
@@ -4228,6 +4280,8 @@ def main(argv=None):
     env_keys = apply_env_file(Path(profile_dirs(args.workspace)[0]) / "env") if args.workspace else []
     cfg = Config(os.environ, args.workspace)
     cfg.env_keys = env_keys
+    if args.check:
+        return check_profile(cfg)
     runner = Runner(cfg)
     if args.dry_run:
         if args.reviews:

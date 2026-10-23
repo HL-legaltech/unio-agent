@@ -2,13 +2,11 @@
 always been, one profile per workspace on each system, and the env file."""
 import json
 import os
-import subprocess
-import sys
 import unittest
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
-from inbox_support import RUNNER, HomeCase, inbox
+from inbox_support import HomeCase, inbox
 
 
 class LegacyPaths(HomeCase):
@@ -143,10 +141,6 @@ class EnvFile(HomeCase):
 
 
 class CommandLine(HomeCase):
-    def run_inbox(self, *args):
-        return subprocess.run([sys.executable, str(RUNNER), *args], capture_output=True, text=True,
-                              encoding="utf-8", env=dict(os.environ), timeout=60, stdin=subprocess.DEVNULL)
-
     def test_print_paths(self):
         p = self.run_inbox("--workspace", "org_abc", "--print-paths")
         self.assertEqual(p.returncode, 0, p.stderr)
