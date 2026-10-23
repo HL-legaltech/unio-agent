@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+
+- O agente move o status de um projeto junto com o trabalho: Em andamento quando uma tarefa começa, Concluído quando todas terminam, e de volta a Em andamento se o trabalho recomeça.
+- Um status que uma pessoa escolheu à mão continua como está.
+
 ## 1.2.0
 
 - Conecte sem copiar token: /unio:connect mostra um comando que pede a conexão ao Unio. Você confere o código, escolhe o workspace e aprova no navegador, e o token vai direto para este computador.
