@@ -22,7 +22,7 @@ is public: every file, commit and pull request here is visible to anyone.
 - `bin/unio` (POSIX `sh`) and `bin/unio.cmd` (Windows): the `unio` command
   people type, which runs from the clone it sits in. `unio runner …` is
   `runner/unio-runner`; text people read says `unio runner`, never
-  `unio-runner`.
+  `unio-runner`. The `--runner` installs put it on the PATH.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.

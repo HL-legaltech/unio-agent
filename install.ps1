@@ -6,9 +6,11 @@
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1))) -Runner -Workspace org_<id>
 #
 # It checks Git, Python 3.9 or later and Claude Code, clones this repository
-# to %LOCALAPPDATA%\unio\agent (or updates the clone there), then runs
-# runner\unio-runner setup, which reads the service's token at a hidden
-# prompt and installs a Task Scheduler task. macOS and Linux use install.sh.
+# to %LOCALAPPDATA%\unio\agent (or updates the clone there), puts the clone's
+# bin folder on the user's Path for the unio command, then runs
+# runner\unio-runner setup (`unio runner setup`), which reads the service's
+# token at a hidden prompt and installs a Task Scheduler task. macOS and
+# Linux use install.sh.
 #
 # It runs inside the person's own session, so it never calls exit, which
 # would close their window. The file is ASCII only: Windows PowerShell 5.1
@@ -84,6 +86,51 @@ function Get-Clone([string]$Clone) {
     }
 }
 
+# Tells running programs, Explorer above all, that the user's environment
+# changed, so a terminal opened next gets the new Path without signing out.
+function Send-EnvironmentChange {
+    if (-not ('UnioInstall.Native' -as [type])) {
+        Add-Type -Namespace UnioInstall -Name Native -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+'@
+    }
+    $result = [UIntPtr]::Zero
+    # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, at most 5 s.
+    [void][UnioInstall.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+}
+
+# Puts $Folder on the user's Path, which needs no administrator, and on this
+# session's; $true when the user's Path did not have it yet. The value is
+# read and written raw: it is often REG_EXPAND_SZ with %VARIABLES% in it,
+# which [Environment]::SetEnvironmentVariable would expand and save as REG_SZ.
+function Add-UserPath([string]$Folder) {
+    $want = $Folder.TrimEnd('\')
+    $present = $false
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        foreach ($entry in $raw -split ';') {
+            if ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $want) { $present = $true }
+        }
+        if (-not $present) {
+            $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+            if ($null -ne $key.GetValue('Path')) { $kind = $key.GetValueKind('Path') }
+            $value = $raw.TrimEnd(';')
+            if ($value) { $value += ';' }
+            $key.SetValue('Path', $value + $Folder, $kind)
+        }
+    } finally {
+        $key.Close()
+    }
+    if (-not (@("$env:Path" -split ';') | Where-Object { $_.TrimEnd('\') -ieq $want })) {
+        $env:Path = "$env:Path".TrimEnd(';') + ';' + $Folder
+    }
+    if ($present) { return $false }
+    Send-EnvironmentChange
+    return $true
+}
+
 function Install-Runner {
     if (-not $Runner) {
         Say 'Este instalador instala o servi\u00e7o de respostas do Unio no Windows. Rode o comando que a p\u00e1gina Agentes mostra, que termina em -Runner -Workspace org_...'
@@ -124,6 +171,18 @@ function Install-Runner {
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         Say 'O clone em {0} ainda n\u00e3o tem o servi\u00e7o de respostas. Rode este comando de novo em instantes.' $clone
         return
+    }
+    $bin = Join-Path $clone 'bin'
+    if (Test-Path -LiteralPath (Join-Path $bin 'unio.cmd') -PathType Leaf) {
+        try {
+            if (Add-UserPath $bin) {
+                Say 'Pasta {0} acrescentada ao Path do usu\u00e1rio. Abra um terminal novo para usar o comando unio; neste ele j\u00e1 funciona.' $bin
+            } else {
+                Say 'O comando unio j\u00e1 est\u00e1 no Path do usu\u00e1rio.'
+            }
+        } catch {
+            Say 'N\u00e3o foi poss\u00edvel acrescentar {0} ao Path do usu\u00e1rio ({1}). O comando do Unio est\u00e1 em {2}.' $bin, $_.Exception.Message, (Join-Path $bin 'unio.cmd')
+        }
     }
     $rest = @($python | Select-Object -Skip 1)
     & $python[0] @rest $setup setup --workspace $Workspace
