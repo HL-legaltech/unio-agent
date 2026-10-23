@@ -1,0 +1,9 @@
+# Git for Windows checks text out with CRLF by default (core.autocrlf), and
+# sh stops at the first \r: shell scripts and the runner keep LF on every
+# system. cmd.exe can miss labels in a batch file with bare LFs, so
+# unio.cmd keeps the CRLF it is stored with.
+*.sh text eol=lf
+bin/unio text eol=lf
+runner/unio-inbox text eol=lf
+runner/unio-runner text eol=lf
+bin/unio.cmd -text

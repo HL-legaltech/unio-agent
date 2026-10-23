@@ -11,9 +11,21 @@ is public: every file, commit and pull request here is visible to anyone.
   also serve Codex from a clone of this repository.
 - `install.sh`: the installer the Agente de código page in Unio runs with
   `curl … | sh`. It installs the plugin (or, for Codex, the clone) and stores
-  a token per workspace.
+  a token per workspace. On Windows the page runs `install.ps1`, which checks
+  Git for Windows and Claude Code, then runs `install.sh` with Git's `sh`.
 - `tests/`: the plugin's scripts and the installer, run against a fake Unio
   API in a throwaway HOME.
+- `runner/`: the answering service (`unio-inbox`) and its setup
+  (`unio-runner`), which run on the computer of a person in the workspace;
+  see [runner/README.md](runner/README.md). It is not part of the plugin, so
+  a change there raises no plugin version. `install.sh --runner` and
+  `install.ps1 -Runner` (Windows) install it.
+- `bin/unio` (POSIX `sh`) and `bin/unio.cmd` (Windows): the `unio` command
+  people type, which runs from the clone it sits in. `unio runner …` is
+  `runner/unio-runner`; text people read says `unio runner`, never
+  `unio-runner`. Every install keeps the clone and links the command as
+  `~/.local/bin/unio`; on Windows only `install.ps1` puts it on the PATH,
+  by adding the clone's `bin` folder to the user `Path`.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.
@@ -54,11 +66,13 @@ before opening one:
 claude plugin validate --strict .
 claude plugin validate --strict plugins/unio
 git ls-files -z '*.sh' | xargs -0 shellcheck -s sh
+shellcheck -s sh bin/unio
 python3 -I tests/check_fixture.py
 dash tests/run.sh
 bash tests/run.sh
 sh tests/check_versions.sh origin/main
 python3 -I tests/e2e/claude_session.py
+python3 -m unittest discover -s runner/tests -v
 ```
 
 - `tests/e2e/claude_session.py` runs the real Claude Code with the plugin
@@ -117,3 +131,20 @@ No AI attribution. Stage named paths only.
 - Text a person reads at runtime (hook messages, command output) is Brazilian
   Portuguese: sentence case, no em dash, no emoji. Repository files are in
   English.
+- `unio help` prints the lines of `bin/unio` that start with `#:`, the one
+  table of commands, and `bin/unio.cmd` prints the same lines. A new command
+  adds its line there and a branch to each file; the table lists only
+  commands both files run.
+- `bin/unio.cmd` runs every command but `runner` as `bin/unio`, through Git
+  for Windows' `sh.exe`, which is not on the PATH: it finds it from
+  `where git`.
+- On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
+  `install.sh` and `install.ps1`'s plugin mode keep using a clone already at
+  `~/.local/share/unio/agent`, since a Codex config names it.
+- `bin/unio.cmd` stays ASCII with CRLF line ends: cmd reads it in the
+  console's code page, and can miss a label in a file with bare LFs. The
+  help's accents reach it only as data, under code page 65001.
+- `install.ps1` stays ASCII, with accents as `\u` escapes that its `Say`
+  turns back: Windows PowerShell 5.1 reads a file without a BOM in the
+  system's code page, and a BOM breaks `[scriptblock]::Create`. It runs in
+  the person's own session, so it never calls `exit`.

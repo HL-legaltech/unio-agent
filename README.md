@@ -13,17 +13,25 @@ The plugin carries four things:
 
 - A Unio workspace with agents turned on, where you have the developer role. You generate your own token in Unio, under Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>).
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
-- Linux, WSL or macOS, which bring the `sh`, `curl` and `ps` the plugin uses (and `lsof`, on macOS). On Windows, [Git for Windows](https://git-scm.com/downloads/win): Claude Code needs git there to install a plugin from GitHub, and Git for Windows brings Git Bash, where Claude Code runs the plugin's scripts. Run the commands below in a Git Bash terminal.
+- Linux, WSL or macOS, which bring the `sh`, `curl` and `ps` the plugin uses (and `lsof`, on macOS). On Windows, [Git for Windows](https://git-scm.com/downloads/win): Claude Code needs git there to install a plugin from GitHub, and Git for Windows brings Git Bash, where Claude Code runs the plugin's scripts. Install from PowerShell with the Windows command below; the `sh` commands in this file run in Git Bash.
 
 <a id="install"></a>
 
 ## Install with one command
 
-In a terminal of your own, outside Claude Code (on Windows, Git Bash), run:
+In a terminal of your own, outside Claude Code, run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1)))
+```
+
+[install.ps1](install.ps1) checks Git for Windows and Claude Code, then runs the same `install.sh` with Git's `sh`. It takes `-Workspace org_…`, `-Client codex`, `-Renew` and `-Browser` for the flags below.
 
 It installs the plugin, then prints a link to Unio and a code, and opens your browser when it can. Sign in, check that the page shows the same code, pick the workspace and approve. The token goes from Unio straight into `~/.config/unio/workspaces/<workspace>/token`: it never appears on screen, in a clipboard, in the chat or in the shell history. Over SSH, open the link on any device. `--browser` asks for this flow explicitly, for example with `--renew`.
 
@@ -42,9 +50,11 @@ The page fills in `--workspace`, the workspace the token belongs to. `--client c
 5. asks Unio whether it accepts the token, and tells a network failure apart from a refused token and from another workspace's token;
 6. only then saves it to `~/.config/unio/workspaces/<workspace>/token`, readable by you alone.
 
+Before it connects, it also keeps a clone of this repository, the home of the [`unio` command](#the-unio-command), and puts that command on your PATH.
+
 The first workspace on a computer serves every folder. For another one, it asks whether that workspace serves only the folder you ran it in (the default) or the whole computer, except the folders tied to another workspace. Each line it prints is in Portuguese, and the last one is `Conectado ao Unio.` when everything worked.
 
-To read the script before running it, open [install.sh](install.sh). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
+To read the script before running it, open [install.sh](install.sh) (and [install.ps1](install.ps1), on Windows). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
 
 ## Install in Claude Code by hand
 
@@ -63,9 +73,9 @@ In a session that is already open, run `/reload-plugins`. On a computer without 
 
 ## Connect
 
-[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It prints `sh <plugin folder>/scripts/connect.sh browser`, to run in another terminal, outside Claude Code, from your project's folder. That command asks Unio for a token and waits up to 10 minutes while you approve the request in the browser: check that the page shows the code your terminal shows, pick the workspace and approve. Approve only a request you just started; a link or code someone sends you would connect their computer as you. The token is saved as the installer saves it. If this computer already uses another workspace, it asks whether the new one covers only this folder or the whole computer.
+[The one command](#install) installs and connects at once. To connect again, for example when a token expires, run `/unio:connect` in Claude Code. It prints `unio connect` (or, without the `unio` command, `sh <plugin folder>/scripts/connect.sh browser`), to run in another terminal, outside Claude Code, from your project's folder. That command asks Unio for a token and waits up to 10 minutes while you approve the request in the browser: check that the page shows the code your terminal shows, pick the workspace and approve. Approve only a request you just started; a link or code someone sends you would connect their computer as you. The token is saved as the installer saves it. If this computer already uses another workspace, it asks whether the new one covers only this folder or the whole computer.
 
-`/unio:connect` also sends you to Configurações > Pessoal > Agente de código for a token to paste, and when the folder already has a workspace, it prints the installer's command with `--renew` for it. Otherwise, run the command the page shows.
+`/unio:connect` also sends you to Configurações > Pessoal > Agente de código for a token to paste, and when the folder already has a workspace, it prints `unio connect --token --workspace org_…` for it (without the `unio` command, the installer's command with `--renew`). Otherwise, run the command the page shows.
 
 Then run `/mcp`, choose `plugin:unio:unio` and Reconnect (or run `/reload-plugins`), and `/unio:doctor` to confirm. Never paste a token into the chat: anything you type there stays in the transcript. If one ends up there, revoke it in Configurações > Pessoal > Agente de código and generate a new one.
 
@@ -106,7 +116,8 @@ Where managed settings restrict marketplaces with `strictKnownMarketplaces`, add
 Without auto-update, a notice at the start of a session tells you once when a release is out, and the agent tells you when Unio reports your version behind. To update:
 
 - **In Claude Code:** run `/unio:update`, then `/reload-plugins`.
-- **From a shell:**
+- **From a terminal:** run `unio update`. It updates what this computer has: the plugin, the clone Codex and the `unio` command use, and the answering service. Then run `/reload-plugins` in each open session.
+- **From a shell, without the `unio` command:**
 
   ```sh
   claude plugin marketplace update unio
@@ -114,7 +125,7 @@ Without auto-update, a notice at the start of a session tells you once when a re
   ```
 
   Then run `/reload-plugins` in each open session. New sessions load the new version on their own.
-- **In Codex:** run `git -C ~/.local/share/unio/agent pull --ff-only`, then start a new Codex session.
+- **In Codex:** run `unio update`, or `git -C ~/.local/share/unio/agent pull --ff-only`, then start a new Codex session.
 
 When a version is below the minimum Unio accepts, every Unio tool but `get_me` refuses with `agent_client_outdated` until you update.
 
@@ -126,6 +137,21 @@ When a version is below the minimum Unio accepts, every Unio tool but `get_me` r
 | `/unio:doctor` | Checks the plugin, Claude Code, the token, Unio's answer, updates, Codex, and leftovers of a setup made by hand, and says how to fix each problem. It never shows the token. |
 | `/unio:update` | Installs the newest release now. |
 | `/unio:help` | What the plugin does, its commands and ready prompts, and what this release changed. |
+
+## The unio command
+
+The installers put a `unio` command on your PATH: [`bin/unio`](bin/unio) in the clone, linked as `~/.local/bin/unio` on macOS and Linux. On Windows they add the clone's `bin` folder to your user `Path`, and `unio` runs in PowerShell, cmd and Git Bash alike. It speaks Portuguese, works in any folder, and follows the same folder and token rules as the plugin.
+
+| Command | What it does |
+| --- | --- |
+| `unio connect` | Connects this computer to a workspace, approved in the browser. `--token --workspace org_…` reads a token from the page at a hidden prompt instead. |
+| `unio status` | Each connected workspace, whether Unio accepts its token and when it expires, the folders it serves, and what is installed. |
+| `unio doctor` | The same checks as `/unio:doctor`, for the current folder. `--codex` checks Codex instead; `--json` prints one item per check, for scripts. |
+| `unio update` | Installs the newest plugin, clone and answering service, as installed. |
+| `unio disconnect` | Deletes a workspace's token and folder lines from this computer (`--workspace org_…`, or the current folder's). The token stays valid in Unio until you revoke it. |
+| `unio runner` | The [answering service](#answering-service)'s commands. |
+
+`unio help <command>` and `unio <command> --help` show each command's options. The command exits with 0 when everything worked, 1 when something failed or is missing, and 2 for a usage error, and never waits for an answer without a terminal.
 
 ## Ready prompts
 
@@ -160,7 +186,7 @@ If the helper cannot learn the folder, it connects without a token rather than w
 
 ## Codex
 
-Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. By hand:
+Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. On Windows it clones to `%LOCALAPPDATA%\unio\agent`, the clone `install.ps1` keeps, unless a clone is already at `~/.local/share/unio/agent`, and the block it prints names that folder. By hand:
 
 1. Clone it, and link the skill where Codex looks for skills:
 
@@ -234,7 +260,17 @@ claude plugin uninstall unio@unio
 claude plugin marketplace remove unio
 ```
 
-For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
+For Codex, remove the `[mcp_servers.unio]` block and `~/.agents/skills/unio`. Run `unio disconnect` for each workspace, then remove the clone (`~/.local/share/unio/agent`, or `%LOCALAPPDATA%\unio\agent` on Windows) and the command: `~/.local/bin/unio`, or the clone's `bin` folder in your user `Path`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
+
+## Answering service
+
+The answering service answers for a workspace's agent, from the computer of a person in that workspace and on their Claude plan. A developer who administers the workspace generates its token in Unio, under Configurações > Sistema > Agentes, where the page also shows the install command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --runner --workspace org_…
+```
+
+On Windows, `install.ps1` does the same from PowerShell. Both also put the `unio` command on your PATH, so `unio runner status` shows how the service is doing. See [runner/README.md](runner/README.md) for what it installs, its commands, and how to remove it.
 
 ## Security
 

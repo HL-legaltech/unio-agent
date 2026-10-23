@@ -1,10 +1,10 @@
 """Runs the real Claude Code with the plugin against tests/e2e/fake_services.py.
 
 Proves, on whatever system runs it, what only a real session shows: that the
-SessionStart hook runs and its context reaches the model, that /unio:doctor's
-injected script is allowed to run, and that the MCP header helper sends each
-folder its own workspace's token, and no token at all where its workspace has
-none.
+SessionStart hook runs and its context reaches the model, that the scripts
+/unio:doctor and /unio:connect inject are allowed to run, and that the MCP
+header helper sends each folder its own workspace's token, and no token at all
+where its workspace has none.
 
 Three folders under a throwaway HOME:
   "Proj Alpha"  mapped to org_Alpha in ~/.config/unio/projects, written in the
@@ -246,6 +246,13 @@ def main():
               "tokens seen: %s" % sorted(t[:12] if t else "<none>" for t in tokens))
         check("The Unio tools have no token on this computer" in texts(entries),
               "gamma: the hook's context reached the model", texts(entries)[-800:])
+
+        # 4. /unio:connect's injected script is allowed in the default mode.
+        done, entries = run(folders["Proj Alpha"], "/unio:connect")
+        check(done.returncode == 0, "connect: claude -p exits 0", (done.stderr or done.stdout)[-1500:])
+        check("Para conectar este computador ao Unio" in texts(entries),
+              "connect: the instructions reached the model",
+              texts(entries)[-800:] or (done.stderr or done.stdout)[-1500:])
         try:
             with open(trace, encoding="utf-8") as f:
                 print("trace:\n  " + f.read().strip().replace("\n", "\n  "))

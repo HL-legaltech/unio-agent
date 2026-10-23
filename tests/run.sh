@@ -89,13 +89,17 @@ JSON
   *) echo "unexpected claude call: \$*" >&2; exit 64 ;;
 esac
 EOF
-# git, only for the installer's Codex runs: a clone copies this plugin.
+# git, for the installer's clone: a clone copies this plugin and bin/, and
+# the stub runner/ once a check made one. It fails while $tmp/git-fails exists.
 mkdir -p "$tmp/git-bin"
 cat > "$tmp/git-bin/git" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$tmp/git-argv.log"
+[ ! -e "$tmp/git-fails" ] || { echo "fatal: unable to access GitHub" >&2; exit 128; }
 case \$1 in
-  clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" ;;
+  clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" &&
+    cp -R "$here/../bin" "\$dest/bin" &&
+    if [ -d "$tmp/runner-stub" ]; then cp -R "$tmp/runner-stub" "\$dest/runner"; fi ;;
   -C) [ "\$3" = pull ] ;;
   *) exit 64 ;;
 esac
@@ -109,7 +113,19 @@ printf '%s\n' "\$*" >> "$tmp/browser.log"
 EOF
 done
 chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open" "$tmp/bin/open"
-PATH=$tmp/bin:$PATH
+# A unio command installed on this computer would turn connect's and the
+# doctor's hints to it, so its folders leave the PATH; the checks that want
+# one put a fake first.
+clean_path=
+saved_ifs=$IFS
+IFS=:
+set -f
+for d in $PATH; do
+  [ -x "$d/unio" ] || clean_path=${clean_path:+$clean_path:}$d
+done
+set +f
+IFS=$saved_ifs
+PATH=$tmp/bin:$clean_path
 
 free_port() {
   python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
@@ -341,6 +357,14 @@ out=$(CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions
 renew_a="curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_A --renew"
 has_line "$out" "$renew_a" && has "$out" "coding-agent?ws=org_A" && ! has_line "$out" "sh $scripts/connect.sh" &&
   has_line "$out" "sh $scripts/connect.sh browser"; check "connect gives a folder with a workspace the browser approval and the installer's renewal, and no hand command"
+mkdir -p "$tmp/unio-bin"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/unio-bin/unio"
+chmod +x "$tmp/unio-bin/unio"
+out=$(PATH=$tmp/unio-bin:$PATH CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions)
+has_line "$out" "unio connect" && has_line "$out" "unio connect --token --workspace org_A" &&
+  ! has "$out" "connect.sh browser" && ! has_line "$out" "$renew_a"; check "connect names the unio command, for approval and renewal, when it is installed"
+report=$(doctor)
+has "$report" "^info core command: o comando unio" && ! has "$(PATH=$tmp/unio-bin:$PATH doctor)" "core command"; check "doctor says when the unio command is missing, and only then"
 printf 'org_A\n' > "$conf/default-workspace"
 out=$("$shell" "$scripts/connect.sh" instructions)
 has_line "$out" "$renew_a" && ! has_line "$out" "sh $scripts/connect.sh"; check "connect gives the default workspace's renewal, and no hand command, while default-workspace exists"
@@ -558,7 +582,9 @@ types() {
 install_in() {
   dir=$1
   shift
-  (cd "$dir" && python3 -I "$here/pty_run.py" "$installer" "$tmp/answers" -- "$shell" -s -- "$@") > "$tmp/transcript"
+  # Every install keeps a clone now, so every run gets the fake git: a real
+  # one would reach GitHub.
+  (cd "$dir" && PATH=$tmp/git-bin:$PATH python3 -I "$here/pty_run.py" "$installer" "$tmp/answers" -- "$shell" -s -- "$@") > "$tmp/transcript"
   result=$?
   cat "$tmp/transcript" >> "$tmp/transcripts.log"
   cat "$tmp/transcript"
@@ -612,6 +638,14 @@ code=$?
 [ "$code" -eq 1 ] && has_text "$out" "Não foi possível instalar o plugin do Unio (Failed to add marketplace: network unreachable)" &&
   lacks "$out" "Cole o token" && [ ! -e "$conf/workspaces" ]; check "a failed plugin install stops the installer with claude's reason"
 rm -f "$tmp/claude-fails"
+home clone-fails
+types "$good"
+touch "$tmp/git-fails"
+out=$(install_in "$tmp/repo" --workspace org_test)
+code=$?
+rm -f "$tmp/git-fails"
+[ "$code" -eq 0 ] && [ "$(last_line "$out")" = "Conectado ao Unio." ] && has_text "$out" "Não foi possível baixar o Unio" &&
+  [ ! -e "$HOME/.local/bin/unio" ]; check "a failed clone still installs and connects the plugin, without the unio command"
 
 home fresh
 types "$good"
@@ -619,6 +653,8 @@ before=$(calls)
 out=$(install_in "$tmp/repo" --workspace org_test)
 code=$?
 [ "$code" -eq 0 ] && [ "$(last_line "$out")" = "Conectado ao Unio." ]; check "a first install ends with Conectado ao Unio."
+[ -f "$HOME/.local/share/unio/agent/bin/unio" ] && [ "$(readlink "$HOME/.local/bin/unio")" = "$HOME/.local/share/unio/agent/bin/unio" ] &&
+  has_text "$out" "Comando unio ligado em ~/.local/bin/unio."; check "a plugin install keeps a clone and links the unio command to it"
 has_text "$out" "Claude Code 2.1.308 encontrado." && has_text "$out" "Plugin do Unio instalado." &&
   grep -qx 'plugin install unio --marketplace HL-legaltech/unio-agent' "$tmp/claude-argv.log"; check "the installer checks Claude Code and installs the plugin from the marketplace"
 python3 -I -c '
@@ -772,11 +808,88 @@ has "$out" "Bearer $good" && has "$out" "codex/$version"; check "Codex: the help
 printf '\n[mcp_servers.unio]\n%s\n' "$helper_line" >> "$HOME/.codex/config.toml"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
 grep -qx "\-C $HOME/.local/share/unio/agent pull --quiet --ff-only" "$tmp/git-argv.log" && has_text "$out" "A skill do Unio já está em ~/.agents/skills/unio." &&
-  has_text "$out" "O Codex já lê o token pelo helper do Unio" && lacks "$out" "Acrescente"; check "Codex, run again: the clone is pulled, the link and the config are kept"
+  has_text "$out" "O Codex já lê o token pelo helper do Unio" && lacks "$out" "Acrescente este bloco"; check "Codex, run again: the clone is pulled, the link and the config are kept"
 home codex-taken
 mkdir -p "$HOME/.local/share/unio/agent"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
 has_text "$out" "não é um clone do Unio" && lacks "$out" "Cole o token"; check "Codex: a folder in the clone's place stops the installer"
+
+# The answering service: --runner clones as Codex does, then hands the
+# terminal to the clone's runner/unio-runner, here a stub that logs how it
+# was called. unio-runner's own tests are in runner/tests.
+runner_calls() {
+  if [ -f "$tmp/runner-argv.log" ]; then wc -l < "$tmp/runner-argv.log" | tr -d ' '; else echo 0; fi
+}
+home runner-args
+before=$(claude_calls)
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner)
+code=$?
+[ "$code" -eq 2 ] && has_text "$out" "--runner precisa de --workspace org_" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner without --workspace stops before cloning"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test --renew)
+code=$?
+[ "$code" -eq 2 ] && has_text "$out" "--runner não combina com --renew" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner refuses --renew"
+mkdir -p "$tmp/fake-windows"
+printf '#!/bin/sh\necho MINGW64_NT-10.0-26100\n' > "$tmp/fake-windows/uname"
+chmod +x "$tmp/fake-windows/uname"
+out=$(PATH=$tmp/fake-windows:$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+has_text "$out" "No Windows, rode o comando do PowerShell" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner under Git Bash points at the PowerShell command"
+home runner-missing
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "ainda não tem o serviço de respostas" && [ "$(runner_calls)" -eq 0 ] &&
+  [ ! -e "$HOME/.local/bin/unio" ]; check "--runner stops when the clone has no runner yet, before linking the command"
+
+mkdir -p "$tmp/runner-stub"
+cat > "$tmp/runner-stub/unio-runner" <<STUB
+import os, sys
+with open("$tmp/runner-argv.log", "a") as log:
+    log.write(" ".join(sys.argv[1:]) + " tty=%d\n" % os.isatty(0))
+print("unio-runner setup chamado.")
+STUB
+printf '9.9.9\n' > "$tmp/runner-stub/VERSION"
+home runner
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 0 ] && [ "$(last_line "$out")" = "unio-runner setup chamado." ] && has_text "$out" "Unio baixado em ~/.local/share/unio/agent." &&
+  grep -qx "clone --quiet https://github.com/HL-legaltech/unio-agent.git $HOME/.local/share/unio/agent" "$tmp/git-argv.log"; check "--runner clones the repository as Codex does, then runs the clone's unio-runner"
+[ "$(tail -n 1 "$tmp/runner-argv.log")" = "setup --workspace org_test --api http://127.0.0.1:$port/v1 tty=1" ]; check "--runner runs setup for the workspace, on this computer's API, with the terminal as stdin"
+lacks "$out" "Cole o token" && [ "$(claude_calls)" -eq "$before" ] && [ ! -e "$conf/workspaces" ] && [ ! -e "$HOME/.agents" ]; check "--runner installs no plugin, links no skill and stores no coding agent token"
+[ -L "$HOME/.local/bin/unio" ] && [ "$(readlink "$HOME/.local/bin/unio")" = "$HOME/.local/share/unio/agent/bin/unio" ] &&
+  has_text "$out" "Comando unio ligado em ~/.local/bin/unio."; check "--runner links ~/.local/bin/unio to the clone's bin/unio"
+# shellcheck disable=SC2016 # the line the installer prints, unexpanded
+has_text "$out" "A pasta ~/.local/bin não está no PATH deste terminal" && has_text "$out" 'export PATH="$HOME/.local/bin:$PATH"'; check "--runner says when ~/.local/bin is not on PATH, and how to add it"
+out=$(PATH=$HOME/.local/bin:$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+grep -qx "\-C $HOME/.local/share/unio/agent pull --quiet --ff-only" "$tmp/git-argv.log" && [ "$(runner_calls)" -eq 2 ] &&
+  has_text "$out" "Unio atualizado em ~/.local/share/unio/agent."; check "--runner, run again, pulls the clone and runs setup again"
+has_text "$out" "O comando unio já está em ~/.local/bin/unio." && lacks "$out" "não está no PATH" &&
+  [ "$(readlink "$HOME/.local/bin/unio")" = "$HOME/.local/share/unio/agent/bin/unio" ]; check "--runner, run again, keeps its link and says nothing of a PATH that has ~/.local/bin"
+mkdir -p "$tmp/old-python"
+cat > "$tmp/old-python/python3" <<STUB
+#!/bin/sh
+case "\$*" in *version_info*) exit 1 ;; esac
+exec "$(command -v python3)" "\$@"
+STUB
+chmod +x "$tmp/old-python/python3"
+out=$(PATH=$tmp/old-python:$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "precisa do Python 3.9 ou mais novo" && [ "$(runner_calls)" -eq 2 ]; check "--runner stops on a Python older than 3.9"
+out=$("$shell" "$HOME/.local/bin/unio" --version) && [ "$out" = 9.9.9 ]; check "the linked unio finds its clone through the link"
+(cd "$tmp/elsewhere" && "$shell" "$HOME/.local/bin/unio" runner status --workspace org_test </dev/null >/dev/null) &&
+  [ "$(tail -n 1 "$tmp/runner-argv.log")" = "status --workspace org_test tty=0" ]; check "unio runner hands the rest to the clone's unio-runner"
+"$shell" "$HOME/.local/bin/unio" bogus >/dev/null 2>&1
+[ $? -eq 2 ]; check "unio refuses a command it does not have"
+home runner-taken
+mkdir -p "$HOME/.local/bin"
+ln -s /nonexistent/unio "$HOME/.local/bin/unio"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+# shellcheck disable=SC2088 # the text the installer prints
+[ "$(readlink "$HOME/.local/bin/unio")" = /nonexistent/unio ] && [ "$(last_line "$out")" = "unio-runner setup chamado." ] &&
+  has_text "$out" "~/.local/bin/unio já existe e não é o comando unio deste clone, então ficou como estava." &&
+  has_text "$out" "O comando do Unio está em ~/.local/share/unio/agent/bin/unio." && lacks "$out" "não está no PATH"; check "--runner leaves a ~/.local/bin/unio that points elsewhere, says so, and goes on"
+rm -f "$HOME/.local/bin/unio"
+printf 'mine\n' > "$HOME/.local/bin/unio"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+[ "$(cat "$HOME/.local/bin/unio")" = mine ] && has_text "$out" "já existe e não é o comando unio deste clone"; check "--runner never replaces a file named ~/.local/bin/unio"
 
 # The browser approval (connect.sh browser and the installer without
 # --workspace), against the fake's scripted polls. The fake asks for a poll

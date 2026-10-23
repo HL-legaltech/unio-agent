@@ -1,0 +1,478 @@
+#!/bin/sh
+# unio: Unio's command on this computer. install.sh links it into
+# ~/.local/bin and install.ps1 puts bin/unio.cmd's folder on the Windows
+# Path; it runs from the clone it sits in.
+#
+# The lines that start with "#:" are `unio help`, word for word. They hold
+# the one table of commands, one line each, and bin/unio.cmd prints the same
+# lines on Windows. A command joins that table and the case at the bottom
+# together, and only a command the case runs belongs in the table.
+#
+#: Uso: unio <comando> [opções]
+#:
+#: Comandos:
+#:   connect     Conecta este computador a um workspace do Unio.
+#:   status      Mostra os workspaces deste computador e as pastas de cada um.
+#:   doctor      Confere a instalação e diz o que corrigir.
+#:   update      Instala agora as versões mais novas do Unio neste computador.
+#:   disconnect  Tira um workspace deste computador.
+#:   runner      Liga e cuida do serviço de respostas do Unio neste computador.
+#:
+#: unio <comando> --help mostra as opções de cada comando.
+#: unio --version mostra a versão instalada.
+
+say() { printf '%s\n' "$1"; }
+
+# Text a person typed, safe to print on a terminal.
+clean() { printf '%s' "$1" | tr -d '\000-\037\177' | cut -c1-40; }
+
+# This file's own path, through the links on the way (~/.local/bin/unio is
+# one). readlink without -f, which macOS lacks before 12.3.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self") || break
+  case $link in
+    /*) self=$link ;;
+    *) case $self in */*) self=${self%/*}/$link ;; *) self=$link ;; esac ;;
+  esac
+done
+case $self in */*) bin=${self%/*} ;; *) bin=. ;; esac
+root=$(CDPATH='' cd -P -- "$bin/.." 2>/dev/null && pwd -P) || {
+  say "Não foi possível achar a pasta do Unio a partir de $self." >&2
+  exit 1
+}
+scripts=$root/plugins/unio/scripts
+
+# The folder, token and API rules are the plugin's own, so this command and
+# a Claude Code session never disagree on which token a folder uses.
+use_lib() {
+  # shellcheck source=../plugins/unio/scripts/lib.sh
+  . "$scripts/lib.sh"
+}
+
+usage_error() {
+  say "$2" >&2
+  say "Rode unio help $1." >&2
+  exit 2
+}
+
+# In a subshell: a failed redirection on a special builtin ends dash.
+has_tty() { ( : </dev/tty ) 2>/dev/null; }
+
+# The installed Claude Code plugin's folder, or nothing when Claude Code or
+# the plugin is missing. Its scripts are the ones Claude Code runs, so the
+# doctor reads its version and its leftovers, not the clone's.
+plugin_dir() {
+  command -v claude >/dev/null 2>&1 || return 0
+  claude plugin list --json </dev/null 2>/dev/null | tr -d '\n' |
+    sed -n 's/.*"id": *"unio@unio"[^}]*"installPath": *"\([^"]*\)".*/\1/p' |
+    sed 's/\\\\/\\/g'
+}
+
+# Python 3.9 or later, as a command line: python3, or on Windows the py
+# launcher. Only a run proves an interpreter: macOS's /usr/bin/python3
+# without the Command Line Tools is a stub that offers to install them.
+python_cmd() {
+  for candidate in python3 'py -3' python; do
+    command -v "${candidate%% *}" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2086 # the launcher and its flag are two words
+    if $candidate -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1 </dev/null; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Whether this computer runs the answering service for any workspace.
+has_runner_profiles() {
+  conf=${XDG_CONFIG_HOME:-$HOME/.config}
+  case $(uname -s 2>/dev/null) in
+    MINGW*|MSYS*|CYGWIN*) [ -z "${APPDATA:-}" ] || conf=$(cygpath -u "$APPDATA") ;;
+  esac
+  for dir in "$conf"/unio/runners/org_*; do
+    [ -d "$dir" ] && return 0
+  done
+  return 1
+}
+
+help_connect() {
+  cat <<'EOF'
+Uso: unio connect [--token --workspace org_...]
+
+Pede um token ao Unio e espera você aprovar no navegador: confira que a
+página mostra o mesmo código do terminal, escolha o workspace e aprove. O
+token vai do Unio direto para este computador, sem passar pela tela nem
+pela área de transferência.
+
+  --token        Em vez do navegador, lê um token gerado em Configurações >
+                 Pessoal > Agente de código, num campo que não mostra o que
+                 você cola.
+  --workspace    O workspace do token (org_... do link da página). Só com
+                 --token.
+
+Se o computador já usa outro workspace, ele pergunta se o novo vale só na
+pasta atual ou em todo o computador.
+EOF
+}
+
+help_status() {
+  cat <<'EOF'
+Uso: unio status
+
+Mostra cada workspace conectado neste computador, se o Unio aceita o token
+dele e quando ele vence, as pastas em que ele vale, e o que está instalado.
+Sai com 1 quando nenhum workspace está conectado.
+EOF
+}
+
+help_doctor() {
+  cat <<'EOF'
+Uso: unio doctor [--codex] [--json]
+
+Confere o plugin do Claude Code, o token da pasta atual, a resposta do Unio,
+as atualizações e o que sobrou de uma configuração feita à mão, e diz como
+corrigir cada problema. Nunca mostra o token.
+
+  --codex   Confere a instalação do Codex em vez da do Claude Code.
+  --json    Uma lista JSON, um item por verificação, para scripts.
+
+Sai com 1 quando alguma verificação encontra um problema.
+EOF
+}
+
+help_update() {
+  cat <<'EOF'
+Uso: unio update
+
+Instala agora as versões mais novas: o plugin do Claude Code, o Unio para o
+Codex e o serviço de respostas, conforme o que estiver instalado. Nas
+sessões abertas do Claude Code, rode /reload-plugins depois.
+EOF
+}
+
+help_disconnect() {
+  cat <<'EOF'
+Uso: unio disconnect [--workspace org_...] [--yes]
+
+Apaga deste computador o token de um workspace e as pastas ligadas a ele.
+Sem --workspace, é o workspace da pasta atual. O token continua valendo no
+Unio: revogue-o em Configurações > Pessoal > Agente de código.
+
+  --workspace   O workspace a tirar (org_...).
+  --yes         Não pergunta antes de apagar. Sem um terminal, é obrigatório.
+EOF
+}
+
+cmd_connect() {
+  token=
+  workspace=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --token) token=1 ;;
+      --workspace)
+        [ $# -ge 2 ] || usage_error connect "Falta o valor de --workspace."
+        workspace=$2
+        shift ;;
+      --workspace=*) workspace=${1#*=} ;;
+      -h|--help) help_connect; exit 0 ;;
+      *) usage_error connect "Opção desconhecida: $(clean "$1")." ;;
+    esac
+    shift
+  done
+  if [ -n "$token" ]; then
+    [ -n "$workspace" ] || usage_error connect "--token precisa de --workspace org_...: copie-o da página Agente de código, no Unio."
+    exec sh "$root/install.sh" --workspace "$workspace" --renew
+  fi
+  [ -z "$workspace" ] || usage_error connect "--workspace vale só com --token: na aprovação pelo navegador, você escolhe o workspace na página."
+  exec sh "$scripts/connect.sh" browser
+}
+
+cmd_doctor() {
+  kind=claude-code
+  json=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --codex) kind=codex ;;
+      --json) json=1 ;;
+      -h|--help) help_doctor; exit 0 ;;
+      *) usage_error doctor "Opção desconhecida: $(clean "$1")." ;;
+    esac
+    shift
+  done
+  dir=
+  missing=
+  if [ "$kind" = claude-code ]; then
+    dir=$(plugin_dir)
+    if [ -z "$dir" ] || [ ! -f "$dir/scripts/doctor.sh" ]; then
+      dir=
+      missing="bad core plugin: o plugin do Unio não está instalado no Claude Code; rode o instalador da página Agente de código"
+    fi
+  fi
+  [ -n "$dir" ] || dir=$root/plugins/unio
+  report=$(sh "$dir/scripts/doctor.sh" "$kind")
+  [ -z "$missing" ] || report="$missing
+$report"
+  # The report is written for Claude Code; a terminal has unio commands.
+  report=$(printf '%s\n' "$report" | sed -e 's#/unio:connect#unio connect#g' -e 's#/unio:update#unio update#g')
+  if [ -n "$json" ]; then
+    printf '%s\n' "$report" | awk '
+      function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      NF {
+        status = $1; area = $2
+        rest = $0; sub(/^[^ ]+ [^ ]+ /, "", rest)
+        check = rest; sub(/:.*/, "", check)
+        detail = rest; sub(/^[^:]*: ?/, "", detail)
+        printf "%s{\"status\":\"%s\",\"area\":\"%s\",\"check\":\"%s\",\"detail\":\"%s\"}", (n++ ? "," : "["), esc(status), esc(area), esc(check), esc(detail)
+      }
+      END { print (n ? "]" : "[]") }'
+  else
+    printf '%s\n' "$report" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      word=${line%% *}
+      rest=${line#* }
+      rest=${rest#* }
+      case $word in
+        ok) tag='ok      ' ;;
+        warn) tag='atenção ' ;;
+        bad) tag='problema' ;;
+        *) tag='info    ' ;;
+      esac
+      printf '%s  %s\n' "$tag" "$rest"
+    done
+  fi
+  case $report in
+    bad\ *|*"
+bad "*) exit 1 ;;
+  esac
+  exit 0
+}
+
+# What Unio says about token $1: sets name (the workspace's, as Unio names
+# it), owner (its org id) and state (one line for the person).
+ask_unio() {
+  name=
+  owner=
+  state="o Unio não respondeu; confira a rede"
+  body=$(umask 077 && mktemp 2>/dev/null) || return 0
+  case $(unio_get_me "$1" "$body") in
+    200)
+      json=$(cat "$body" 2>/dev/null)
+      name=$(unio_json_field "$json" workspace name | tr -d '\000-\037\177' | cut -c1-80)
+      owner=$(unio_json_field "$json" workspace clerkId)
+      days=$(unio_json_field "$json" token expiresInDays)
+      case $days in
+        ''|*[!0-9]*) state="token aceito" ;;
+        *) state="token aceito; $(unio_expires_in "$days")" ;;
+      esac ;;
+    401) state="o Unio recusou o token; rode unio connect" ;;
+    403) state="os agentes estão desligados neste workspace" ;;
+  esac
+  rm -f "$body"
+}
+
+cmd_status() {
+  case ${1-} in
+    '') ;;
+    -h|--help) help_status; exit 0 ;;
+    *) usage_error status "Opção desconhecida: $(clean "$1")." ;;
+  esac
+  use_lib
+  default=$(unio_workspace '')
+  tab=$(printf '\t')
+  found=
+  for dir in "$UNIO_CONF"/workspaces/org_*; do
+    [ -d "$dir" ] || continue
+    org=${dir##*/}
+    unio_is_org "$org" || continue
+    found=1
+    token=$(unio_read_token "$dir/token")
+    if [ -n "$token" ]; then
+      ask_unio "$token"
+    else
+      name=
+      state="falta o token em $(unio_tilde "$dir/token"); rode unio connect"
+    fi
+    say "${name:-$org} ($org)"
+    say "  $state"
+    [ "$org" != "$default" ] || say "  vale em todas as pastas sem workspace próprio"
+    if [ -r "$UNIO_CONF/projects" ]; then
+      while IFS=$tab read -r path key || [ -n "$path" ]; do
+        key=$(printf '%s' "$key" | tr -d ' \t\r')
+        [ "$key" = "$org" ] && [ -n "$path" ] && say "  vale em $(unio_tilde "$path")"
+      done < "$UNIO_CONF/projects"
+    fi
+  done
+  # A setup made by hand keeps one token for the whole computer.
+  token=
+  [ -n "$default" ] || token=$(unio_read_token "$UNIO_CONF/token")
+  if [ -n "$token" ]; then
+    found=1
+    ask_unio "$token"
+    say "${name:-Workspace sem nome} (${owner:-?})"
+    say "  $state"
+    say "  vale em todas as pastas, por uma configuração feita à mão ($(unio_tilde "$UNIO_CONF/token"))"
+  fi
+  [ -n "$found" ] || say "Nenhum workspace está conectado neste computador. Rode unio connect."
+  say ""
+  dir=$(plugin_dir)
+  if [ -n "$dir" ]; then
+    say "Plugin do Claude Code: unio $(unio_version "$dir")"
+  elif command -v claude >/dev/null 2>&1; then
+    say "Plugin do Claude Code: não instalado"
+  fi
+  say "Comando unio: $(unio_version "$root/plugins/unio"), em $(unio_tilde "$root")"
+  if has_runner_profiles; then
+    say "Serviço de respostas: configurado; unio runner status mostra cada workspace"
+  fi
+  [ -n "$found" ] || exit 1
+  exit 0
+}
+
+cmd_disconnect() {
+  workspace=
+  yes=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --workspace)
+        [ $# -ge 2 ] || usage_error disconnect "Falta o valor de --workspace."
+        workspace=$2
+        shift ;;
+      --workspace=*) workspace=${1#*=} ;;
+      --yes|-y) yes=1 ;;
+      -h|--help) help_disconnect; exit 0 ;;
+      *) usage_error disconnect "Opção desconhecida: $(clean "$1")." ;;
+    esac
+    shift
+  done
+  use_lib
+  [ -n "$workspace" ] || workspace=$(unio_workspace "$(pwd -P)")
+  if [ -z "$workspace" ]; then
+    say "Nenhum workspace vale nesta pasta. Diga qual tirar com --workspace org_...; unio status mostra os deste computador." >&2
+    exit 1
+  fi
+  unio_is_org "$workspace" || usage_error disconnect "O valor de --workspace não é um workspace do Unio (org_ seguido de letras e números)."
+  dir=$UNIO_CONF/workspaces/$workspace
+  default=$(unio_workspace '')
+  if [ ! -e "$dir/token" ] && [ "$default" != "$workspace" ] && ! unio_mapped "$workspace"; then
+    say "O workspace $workspace não está conectado neste computador; unio status mostra os que estão." >&2
+    exit 1
+  fi
+  if [ -z "$yes" ]; then
+    if ! has_tty; then
+      say "Sem um terminal para confirmar, rode de novo com --yes." >&2
+      exit 2
+    fi
+    printf 'Tirar o workspace %s deste computador? [s/N] ' "$workspace" >/dev/tty
+    IFS= read -r answer </dev/tty || answer=
+    case $answer in
+      s|S|sim|Sim|SIM) ;;
+      *) say "Nada foi mudado."; exit 0 ;;
+    esac
+  fi
+  rm -f "$dir/token"
+  rmdir "$dir" 2>/dev/null
+  if [ -r "$UNIO_CONF/projects" ]; then
+    (umask 077 && W=$workspace awk -F '\t' '{ k = $2; gsub(/[ \t\r]/, "", k); if (k != ENVIRON["W"]) print }' \
+      "$UNIO_CONF/projects" > "$UNIO_CONF/projects.new") && mv -f "$UNIO_CONF/projects.new" "$UNIO_CONF/projects"
+  fi
+  say "Token do workspace $workspace apagado deste computador."
+  if [ "$default" = "$workspace" ]; then
+    rm -f "$UNIO_CONF/default-workspace"
+    say "Ele era o padrão deste computador: nas pastas sem workspace próprio, o Unio fica sem token até você rodar unio connect."
+  fi
+  say "O token continua valendo no Unio: revogue-o em Configurações > Pessoal > Agente de código (https://unio.so/app/settings/coding-agent)."
+  exit 0
+}
+
+cmd_update() {
+  case ${1-} in
+    '') ;;
+    -h|--help) help_update; exit 0 ;;
+    *) usage_error update "Opção desconhecida: $(clean "$1")." ;;
+  esac
+  failed=
+  use_lib
+  # The answering service pulls the clone itself and restarts what it runs.
+  if has_runner_profiles; then
+    "$self" runner update || failed=1
+  elif [ -d "$root/.git" ]; then
+    before=$(unio_version "$root/plugins/unio")
+    if GIT_TERMINAL_PROMPT=0 git -C "$root" pull --quiet --ff-only </dev/null >/dev/null 2>&1; then
+      after=$(unio_version "$root/plugins/unio")
+      if [ "$after" = "$before" ]; then
+        say "O Unio em $(unio_tilde "$root") já está na versão mais nova ($after)."
+      else
+        say "Unio atualizado em $(unio_tilde "$root"): de $before para $after."
+      fi
+    else
+      say "Não foi possível atualizar $(unio_tilde "$root") com git pull --ff-only; a versão que já está lá continua valendo."
+      failed=1
+    fi
+  fi
+  if [ -n "$(plugin_dir)" ]; then
+    claude plugin marketplace update unio </dev/null >/dev/null 2>&1
+    if out=$(claude plugin update unio@unio </dev/null 2>&1); then
+      say "$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1 | cut -c1-200)"
+      say "Nas sessões abertas do Claude Code, rode /reload-plugins; as novas já usam a versão nova."
+    else
+      say "Não foi possível atualizar o plugin do Claude Code ($(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1 | cut -c1-200))."
+      failed=1
+    fi
+  fi
+  [ -z "$failed" ] || exit 1
+  exit 0
+}
+
+# Each command's own help, for unio help <comando> and a bare unio runner.
+case ${1-}:${2-} in
+  help:runner|-h:runner|--help:runner|runner:) set -- runner --help ;;
+  help:?*|-h:?*|--help:?*) set -- "$2" --help ;;
+esac
+
+case ${1:-help} in
+  connect)
+    shift
+    cmd_connect "$@" ;;
+  status)
+    shift
+    cmd_status "$@" ;;
+  doctor)
+    shift
+    cmd_doctor "$@" ;;
+  update)
+    shift
+    cmd_update "$@" ;;
+  disconnect)
+    shift
+    cmd_disconnect "$@" ;;
+  runner)
+    shift
+    if [ ! -f "$root/runner/unio-runner" ]; then
+      say "Falta runner/unio-runner em $root. Atualize o clone e rode este comando de novo." >&2
+      exit 1
+    fi
+    if ! python=$(python_cmd); then
+      if command -v python3 >/dev/null 2>&1; then
+        say "O serviço de respostas precisa do Python 3.9 ou mais novo. Instale um Python mais novo e rode este comando de novo." >&2
+      else
+        say "O comando python3 não está no PATH. Instale o Python 3.9 ou mais novo e rode este comando de novo." >&2
+      fi
+      exit 1
+    fi
+    # shellcheck disable=SC2086 # the launcher and its flag are two words
+    exec $python "$root/runner/unio-runner" "$@" ;;
+  help|-h|--help)
+    sed -n -e 's/^#: //p' -e 's/^#:$//p' "$self" ;;
+  --version)
+    version=
+    if [ -r "$root/runner/VERSION" ]; then IFS= read -r version < "$root/runner/VERSION"; fi
+    if [ -z "$version" ]; then
+      say "Não foi possível ler a versão em $root/runner/VERSION." >&2
+      exit 1
+    fi
+    say "$version" ;;
+  *)
+    say "Comando desconhecido: $(clean "$1"). Rode unio help." >&2
+    exit 2 ;;
+esac

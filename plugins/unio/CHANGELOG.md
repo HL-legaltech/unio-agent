@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.1
+
+- O comando unio cuida do Unio pelo terminal: unio connect, unio status, unio doctor, unio update e unio disconnect. O instalador da página Agente de código o instala.
+- /unio:connect mostra unio connect quando o comando está instalado, e /unio:doctor avisa quando ele falta.
+
+## 1.3.0
+
+- O agente move o status de um projeto junto com o trabalho: Em andamento quando uma tarefa começa, Concluído quando todas terminam, e de volta a Em andamento se o trabalho recomeça.
+- Um status que uma pessoa escolheu à mão continua como está.
+
 ## 1.2.1
 
 - As ferramentas do Unio passam a usar o token do workspace ligado à pasta da sessão. Antes, o Claude Code usava sempre o workspace padrão do computador, mesmo numa pasta de outro workspace.
