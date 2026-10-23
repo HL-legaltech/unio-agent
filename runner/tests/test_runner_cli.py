@@ -64,10 +64,14 @@ class PosixCommand(unittest.TestCase):
         self.box = Sandbox(self)
 
     def unio(self, *args, command=None, **env):
-        """bin/unio through sh, or `command` as given; returns (code, stdout, stderr)."""
+        """bin/unio through sh, or `command` as given; returns (code, stdout, stderr).
+
+        In a session of its own, so a test run from a terminal leaves bin/unio
+        no /dev/tty to ask on, as in CI.
+        """
         done = subprocess.run(command or [SH, str(BIN / "unio")] + list(args), stdin=subprocess.DEVNULL,
                               capture_output=True, encoding="utf-8", errors="replace", env=self.box.env(**env),
-                              cwd=str(self.box.root), timeout=180)
+                              cwd=str(self.box.root), timeout=180, start_new_session=True)
         return done.returncode, done.stdout, done.stderr
 
     def test_help(self):
