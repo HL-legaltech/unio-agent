@@ -314,6 +314,14 @@ out=$(CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions
 renew_a="curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --workspace org_A --renew"
 has_line "$out" "$renew_a" && has "$out" "coding-agent?ws=org_A" && ! has_line "$out" "sh $scripts/connect.sh" &&
   has_line "$out" "sh $scripts/connect.sh browser"; check "connect gives a folder with a workspace the browser approval and the installer's renewal, and no hand command"
+mkdir -p "$tmp/unio-bin"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/unio-bin/unio"
+chmod +x "$tmp/unio-bin/unio"
+out=$(PATH=$tmp/unio-bin:$PATH CLAUDE_PROJECT_DIR=$tmp/mapped "$shell" "$scripts/connect.sh" instructions)
+has_line "$out" "unio connect" && has_line "$out" "unio connect --token --workspace org_A" &&
+  ! has "$out" "connect.sh browser" && ! has_line "$out" "$renew_a"; check "connect names the unio command, for approval and renewal, when it is installed"
+report=$(doctor)
+has "$report" "^info core command: o comando unio" && ! has "$(PATH=$tmp/unio-bin:$PATH doctor)" "core command"; check "doctor says when the unio command is missing, and only then"
 printf 'org_A\n' > "$conf/default-workspace"
 out=$("$shell" "$scripts/connect.sh" instructions)
 has_line "$out" "$renew_a" && ! has_line "$out" "sh $scripts/connect.sh"; check "connect gives the default workspace's renewal, and no hand command, while default-workspace exists"
