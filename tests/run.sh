@@ -671,6 +671,11 @@ printf '%s\torg_Second\n%s\torg_Second\n' "$tmp/repo2" "$tmp/linked-repo2" | cmp
 in2=$(headers "$tmp/repo2")
 out2=$(headers "$tmp/elsewhere")
 got="$(token_name "$in2"), $(token_name "$out2"); $(decides "$tmp/repo2")"
+if ! has "$in2" "Bearer $second"; then
+  # The helper's own trace, without any line that holds a token.
+  got="$got; trace: $(agent "$tmp/repo2" "$plugin" "$shell" -x "$scripts/mcp-headers.sh" claude-code 2>&1 >/dev/null |
+    grep -v -e unio_ -e Bearer | grep -e 'folder=' -e 'want=' -e 'path=' -e 'org=' -e 'pid=' -e 'PWD' | tail -n 25 | tr '\n' '|')"
+fi
 has "$in2" "Bearer $second" && has "$out2" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's (got $got)"
 has "$(CLAUDE_PROJECT_DIR=$tmp/repo2 doctor)" "^ok core token: .*(o token do workspace org_Second, ligado a esta pasta)"; check "doctor says a mapped folder's workspace is tied to the folder"
 types "$second" x ''
