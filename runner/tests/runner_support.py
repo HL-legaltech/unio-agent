@@ -144,7 +144,8 @@ def closed_port_url():
 
 
 FAKE_CLAUDE = r'''"""The fake claude of unio-runner's tests: FAKE_CLAUDE_AUTH is in (the
-default), out, or old for a CLI without auth status."""
+default), api_key (signed in with an API key), out, or old for a CLI without
+auth status. auth status answers as Claude Code 2.1.309 does."""
 import json
 import os
 import sys
@@ -157,9 +158,9 @@ if args == ["--version"]:
     print("2.1.309 (Claude Code)")
     sys.exit(0)
 if args == ["auth", "status", "--json"] and auth != "old":
-    signed = auth == "in"
-    print(json.dumps({"loggedIn": signed, "authMethod": "claude.ai" if signed else "none",
-                      "apiProvider": "firstParty"}, indent=2))
+    signed = auth != "out"
+    method = {"in": "claude.ai", "api_key": "api_key"}.get(auth, "none")
+    print(json.dumps({"loggedIn": signed, "authMethod": method, "apiProvider": "firstParty"}, indent=2))
     sys.exit(0 if signed else 1)
 print("error: unknown command " + " ".join(args), file=sys.stderr)
 sys.exit(1)

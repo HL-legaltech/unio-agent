@@ -217,6 +217,12 @@ class SetupWithoutService(Base):
         self.assertEqual(out.splitlines()[1], "  --yes, para manter o token salvo, ou --token-stdin, para trocá-lo")
         self.assertEqual(self.token(), RUNNER)
 
+    def test_a_token_from_an_api_key_terminal_warns(self):
+        code, out = self.setup("--yes", FAKE_CLAUDE_AUTH="api_key", ANTHROPIC_API_KEY="not-a-key")
+        self.assertEqual(code, 0, out)
+        self.assertIn("O Claude Code está usando a ANTHROPIC_API_KEY deste terminal, que o serviço não recebe.", out)
+        self.assertNotIn("Claude Code conectado a uma conta.", out)
+
 
 class Questions(Base):
     """The interactive steps, in this process, with the person's answers."""
