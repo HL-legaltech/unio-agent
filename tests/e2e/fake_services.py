@@ -16,7 +16,8 @@ credential is needed.
   for an MCP request, so a session cannot end before Claude Code connects
   to Unio: in print mode it does not wait for the connection itself. It
   first waits out the connections the previous session left open, so none
-  of their requests counts as this session's.
+  of their requests counts as this session's, and answers 503 when one
+  stays open past 10 s.
 
 Every request becomes one JSON line in the log file.
 
@@ -123,7 +124,9 @@ class Handler(BaseHTTPRequestHandler):
             # A request of the previous session still in a handler could set
             # MCP_SEEN after the clear below; only this connection may be open.
             with OPEN:
-                OPEN.wait_for(lambda: open_connections <= 1, timeout=10)
+                drained = OPEN.wait_for(lambda: open_connections <= 1, timeout=10)
+            if not drained:
+                return self.send_json(503, {"error": "a connection of the previous session is still open"})
             MCP_SEEN.clear()
             EXPECT_MCP.set()
             return self.send_empty(204)

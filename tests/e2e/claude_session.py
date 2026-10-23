@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -189,7 +190,11 @@ def main():
 
         def run(folder, prompt):
             nonlocal offset
-            urllib.request.urlopen(urllib.request.Request(base + "/control/expect-mcp", data=b"", method="POST"))
+            try:
+                urllib.request.urlopen(urllib.request.Request(base + "/control/expect-mcp", data=b"", method="POST"))
+            except urllib.error.HTTPError as refused:
+                check(False, "the fake API waits for this session's MCP connection",
+                      refused.read().decode("utf-8", "replace"))
             started = time.time()
             done = subprocess.run(
                 [args.claude, "-p", "--plugin-dir", plugin, "--output-format", "json", prompt],
