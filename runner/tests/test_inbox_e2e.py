@@ -9,7 +9,7 @@ import signal
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox, write_fake_claude
+from inbox_support import FakeUnio, HomeCase, inbox, non_utf8_locale, write_fake_claude
 
 TASK_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -188,3 +188,16 @@ class OnceWithoutProfile(Once):
         self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/claim"), [])
         health = json.loads((self.state / "health.json").read_text(encoding="utf-8"))
         self.assertEqual(health["backoffReason"], "responder_missing")
+
+
+class DryRun(HomeCase):
+    def test_into_a_pipe_it_is_utf8(self):
+        item = mention()
+        item["comment"]["content"] = "Você pode explicar a seção?"
+        self.profile("org_test", FakeUnio.RUNNER)
+        with FakeUnio() as fake:
+            fake.items = [item]
+            p = self.run_inbox("--workspace", "org_test", "--dry-run",
+                               env=non_utf8_locale(dict(os.environ, UNIO_API_URL=fake.url)))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("Person Marker: Você pode explicar a seção?", p.stdout)
