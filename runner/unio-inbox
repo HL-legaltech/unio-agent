@@ -6,6 +6,7 @@
     unio-inbox --dry-run             list the pending items without claiming any
     unio-inbox --reviews --dry-run   list the project review candidates and which would run
     unio-inbox --needs --dry-run     list the tasks waiting on a person and what a check would do
+    unio-inbox --status --dry-run    list the projects whose work calls for another status
     unio-inbox --workspace org_<id> ...    any of the above with that workspace's profile
     unio-inbox --workspace org_<id> --print-paths    the profile's folders and token file, as JSON
     unio-inbox --workspace org_<id> --check          whether the profile can answer, as JSON (exit 0 or 1)
@@ -54,6 +55,17 @@ done; the runner ticks them. Its writes go through the MCP endpoint, each
 against the task's updatedAt as read. UNIO_NEEDS=observe logs what it would do
 and writes nothing; off (the default) never looks.
 
+Project status, with UNIO_STATUS=on: after a poll that found no item, at most
+every UNIO_STATUS_INTERVAL, the runner asks Unio which projects' work calls for
+another status (GET /agents/projects/status: planned to in progress once a task
+began, to completed once every task is done, completed back to in progress when
+work resumes; never against a status a person chose) and sets each one with
+update_project through the MCP endpoint. No model runs. A finish waits
+UNIO_STATUS_DONE_AFTER after the last task closed, so people can still add work
+and the morning review can say the project finished. A write the server refuses
+waits an hour before the same move is tried again. UNIO_STATUS=observe logs
+what it would set; off (the default) never asks.
+
 Profiles: with --workspace org_<id>, everything belongs to that workspace's
 profile, one per workspace on a computer (unio-runner sets them up):
   <config>/unio/runners/<org>/    runner-token, repos.json and runner-id, as below;
@@ -100,6 +112,9 @@ wait doubles after each check that finds nothing, up to 8 times, and a done or
 canceled task is never rechecked), UNIO_NEEDS_DAILY_RUNS (30 checks over any
 24 h, rechecks at most half of them) and UNIO_NEEDS_MODEL (default: the
 inbox's). Checks count toward UNIO_INBOX_DAILY_BUDGET_USD, as reviews do.
+UNIO_STATUS (off, observe or on; default off), UNIO_STATUS_INTERVAL (15 min
+between passes) and UNIO_STATUS_DONE_AFTER (24 h between a project's last task
+closing and the runner finishing it).
 """
 import argparse
 import hashlib
@@ -291,6 +306,11 @@ ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[
 # Only codes, numbers and times from the candidates row reach a review's prompt.
 PROMPT_FACT = re.compile(r"^[A-Za-z0-9_.:+-]{1,80}$")
 NEEDS_MODES = ("off", "observe", "on")
+STATUS_MODES = ("off", "observe", "on")
+# A move the server refused is not tried again sooner than this.
+STATUS_RETRY = timedelta(hours=1)
+PROJECT_CATEGORIES = ("backlog", "planned", "in_progress", "completed", "canceled")
+STATUS_REASONS = ("work_started", "work_done", "work_resumed")
 NEEDS_LABEL = "Needs action"
 NEEDS_LABEL_COLOR = "orange"
 # A needs check reads the task and its thread; the runner makes every write itself.
@@ -947,6 +967,14 @@ class Config:
         self.needs_max_budget_usd = float(self.needs_max_budget)
         # A mention that arrives during a check waits at most this long (s).
         self.needs_timeout = 300.0
+        status = (env.get("UNIO_STATUS") or "off").strip().lower()
+        self.status_mode = status if status in STATUS_MODES else "off"
+        status_every, bad_every = env_number(env, "UNIO_STATUS_INTERVAL", 15, 1, 24 * 60)
+        done_after, bad_done = env_number(env, "UNIO_STATUS_DONE_AFTER", 24, 0, 30 * 24)
+        self.status_interval = timedelta(minutes=status_every)
+        self.status_done_after = timedelta(hours=done_after)
+        self.status_error = (f"UNIO_STATUS={status} is not off, observe or on" if status not in STATUS_MODES else
+                             bad_every or bad_done)
 
     def protocol(self, name):
         """A protocol file: in a profile, its own copy when it has one, else the
@@ -2462,6 +2490,12 @@ class Runner:
         self.needs_quiet = {}
         # A check that failed for the machine's sake holds the next one this long, charging no task.
         self.needs_judge_hold = None
+        self.status_pass_at = None
+        self.status_off_logged = set()
+        # Project id -> (the move, when it may be tried again) for a move the server refused.
+        self.status_refused = {}
+        # Observe mode, and a finish waiting out its day, log a project's decision when it changes.
+        self.status_seen = {}
         self._workspace = None
         # The teams GET /agents/me listed, for the responder's workspace section.
         self._team_rows = None
@@ -3275,6 +3309,8 @@ class Runner:
                 self.review_tick()
                 if not self.review_ran:
                     self.needs_tick()
+                # No model runs here, so a review that just ran does not hold it back.
+                self.status_tick()
             return listed
 
     def serve(self, updater=None):
@@ -3285,6 +3321,7 @@ class Runner:
         asked, watched = self.watch_stop_file() if self.cfg.workspace else (None, None)
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
                        reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode,
+                       status=self.cfg.status_mode,
                        workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None,
                        autoUpdate=("on" if updater else "off") if self.cfg.workspace else None)
         if not sys.platform.startswith("linux"):
@@ -4355,6 +4392,148 @@ class Runner:
         print_needs(result["rows"])
         return 0
 
+    def status_status(self, h):
+        """The status block of health.json, for unio-doctor."""
+        block = h["status"] = h["status"] if isinstance(h.get("status"), dict) else {}
+        block.update(mode=self.cfg.status_mode, configError=self.cfg.status_error,
+                     doneAfterHours=round(self.cfg.status_done_after.total_seconds() / 3600, 2))
+        return block
+
+    def status_tick(self):
+        """After a poll that listed nothing: a status pass at most every status_interval."""
+        if self.cfg.status_mode == "off" or stopping.is_set():
+            return
+        try:
+            self._status_tick(utcnow())
+        except Exception as e:  # a status bug must never stop the answers
+            self.state.log("status", action="error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
+
+    def _status_tick(self, now):
+        cfg = self.cfg
+        if cfg.status_error:
+            if "config" not in self.status_off_logged:
+                self.status_off_logged.add("config")
+                self.state.log("status", action="off", reason="config", detail=cfg.status_error)
+            return
+        if self.status_pass_at and now - self.status_pass_at < cfg.status_interval:
+            return
+        h = self.state.health()
+        until = parse_iso(h.get("backoffUntil"))
+        if until and until > now and h.get("backoffReason") == "unio_unavailable":
+            return
+        self.status_pass_at = now
+        token = cfg.token()
+        if not token:
+            self.status_status(h).update(lastPassAt=iso(now),
+                                         lastPassError=f"no token in {cfg.token_file} ({cfg.token_hint})",
+                                         lastPassErrorAt=iso(now))
+            self.save(h)
+            return
+        self.status_pass(Api(cfg.api, token), h, now, cfg.status_mode)
+
+    def status_rows(self, api):
+        """(rows, error): the projects whose work calls for another status, each checked for shape."""
+        try:
+            status, data = api.call("GET", "/agents/projects/status")
+        except ApiUnreachable as e:
+            return [], str(e)
+        if status == 404:
+            return [], "GET /agents/projects/status: HTTP 404 (this Unio does not serve it yet)"
+        if status != 200:
+            return [], f"GET /agents/projects/status: {describe(status, data)}"
+        rows = unwrap(data)
+        if not isinstance(rows, list):
+            return [], "GET /agents/projects/status: the answer is not a list"
+        return [r for r in (status_row(row) for row in rows) if r], None
+
+    def status_pass(self, api, h, now, mode):
+        """One pass: read the projects to move and set each due one. 'on' writes;
+        'observe' logs what it would set; 'dry' writes nothing, not even here.
+        Returns {rows, moved, error}."""
+        writing, logging = mode == "on", mode != "dry"
+        started = time.monotonic()
+        result = {"rows": [], "moved": 0, "error": None}
+        rows, error = self.status_rows(api)
+        if error:
+            result["error"] = error
+            if logging:
+                if error != self.status_seen.get("_error"):
+                    self.state.log("status", action="error", error=short(error, 500))
+                self.status_seen["_error"] = error
+                self.status_status(h).update(lastPassAt=iso(now), lastPassError=short(error, 300),
+                                             lastPassErrorAt=iso(now))
+                self.save(h)
+            return result
+        self.status_seen.pop("_error", None)
+        mcp = Mcp(self.cfg.mcp_url, api.token) if writing else None
+        live = set()
+        for row in rows:
+            if stopping.is_set():
+                break
+            live.add(row["id"])
+            move = f"{row['to']['id']}:{row['since']}"
+            decision, wait = status_decision(row, now, self.cfg.status_done_after)
+            refused = self.status_refused.get(row["id"])
+            if decision == "move" and refused and refused[0] == move and refused[1] > now:
+                decision, wait = "held", refused[1]
+            row.update(decision=decision, wait=iso(wait) if wait else None)
+            result["rows"].append(row)
+            fields = status_fields(row)
+            if decision != "move" or not writing:
+                sig = (decision, move)
+                if logging and self.status_seen.get(row["id"]) != sig:
+                    self.status_seen[row["id"]] = sig
+                    action = "would_move" if decision == "move" else "waiting" if decision == "wait" else "held"
+                    self.state.log("status", action=action, **fields, until=row["wait"],
+                                   would=True if mode == "observe" else None)
+                continue
+            answer, error = mcp.call_tool("update_project", {"project": row["id"], "status": row["to"]["id"]})
+            if error:
+                if error.startswith("update_project refused:"):
+                    self.status_refused[row["id"]] = (move, now + STATUS_RETRY)
+                row["decision"] = "failed"
+                self.state.log("status", action="move_failed", **fields, error=short(error, 500))
+                continue
+            self.status_refused.pop(row["id"], None)
+            self.status_seen.pop(row["id"], None)
+            result["moved"] += 1
+            self.state.log("status", action="moved", **fields)
+        # What the list no longer names needs no memory: it moved, or a person moved it.
+        for pid in [p for p in self.status_refused if p not in live]:
+            self.status_refused.pop(pid)
+        for pid in [p for p in self.status_seen if p not in live and p != "_error"]:
+            self.status_seen.pop(pid)
+        if not logging:
+            return result
+        if rows:
+            self.state.log("status", action="pass", mode=mode, rows=len(rows), moved=result["moved"] or None,
+                           durationMs=int((time.monotonic() - started) * 1000),
+                           would=True if mode == "observe" else None)
+        self.status_status(h).update(lastPassAt=iso(now), pending=len(rows) - result["moved"],
+                                     lastPassError=None)
+        self.save(h)
+        return result
+
+    def status_dry_run(self):
+        """--status --dry-run: one pass, printed; nothing written anywhere."""
+        cfg, now = self.cfg, utcnow()
+        if cfg.status_error:
+            print(f"unio-inbox: {cfg.status_error}", file=sys.stderr)
+            return 1
+        token = cfg.token()
+        if not token:
+            print(f"unio-inbox: no token in {cfg.token_file} ({cfg.token_hint})", file=sys.stderr)
+            return 1
+        result = self.status_pass(Api(cfg.api, token), {}, now, "dry")
+        if result["error"]:
+            print(f"unio-inbox: {printable(result['error'])}", file=sys.stderr)
+            return 1
+        print(f"Project status: UNIO_STATUS={cfg.status_mode}; a pass every "
+              f"{cfg.status_interval.total_seconds() / 60:g} min, a finish "
+              f"{cfg.status_done_after.total_seconds() / 3600:g} h after the last task closed")
+        print_status(result["rows"])
+        return 0
+
 
 def review_outcome(s, v):
     """(outcome, reason, error) of a review session. Posted if and only if
@@ -4409,6 +4588,61 @@ def print_reviews(rows, decisions):
               f"{row.get('tier') or '-':<5} {row.get('pressure') or '-':<9} "
               f"{'would run' if reason is None else 'no: ' + reason}")
         print(f"  {'':<14} triggers: {', '.join(trigger_codes(row)) or 'none'}")
+
+
+def status_row(row):
+    """A row of GET /agents/projects/status as the pass uses it, or None when it is not one."""
+    if not isinstance(row, dict):
+        return None
+    status, advice = row.get("status"), row.get("advice")
+    if not isinstance(status, dict) or not isinstance(advice, dict):
+        return None
+    to, task = advice.get("to"), advice.get("task")
+    if not isinstance(to, dict) or not isinstance(task, dict):
+        return None
+    pid, slug, key = row.get("id"), row.get("slug"), task.get("key")
+    if not (isinstance(pid, str) and UUID_TEXT.match(pid) and isinstance(to.get("id"), str)
+            and UUID_TEXT.match(to["id"]) and to.get("category") in PROJECT_CATEGORIES
+            and advice.get("because") in STATUS_REASONS and parse_iso(advice.get("since"))):
+        return None
+    category = status.get("category")
+    return {
+        "id": pid.lower(),
+        "slug": slug if isinstance(slug, str) and PROMPT_FACT.match(slug) else None,
+        "from": category if category in PROJECT_CATEGORIES else None,
+        "setBy": status.get("setBy") if status.get("setBy") in ("person", "agent") else None,
+        "to": {"id": to["id"].lower(), "category": to["category"]},
+        "because": advice["because"],
+        "since": advice["since"],
+        "task": key if isinstance(key, str) and PROMPT_FACT.match(key) else None,
+    }
+
+
+def status_decision(row, now, done_after):
+    """("move", None) now, or ("wait", until) for a finish inside its day."""
+    if row["because"] == "work_done":
+        until = parse_iso(row["since"]) + done_after
+        if until > now:
+            return "wait", until
+    return "move", None
+
+
+def status_fields(row):
+    """What the log keeps of a row: no title, nothing people wrote."""
+    return {"project": row["slug"] or row["id"][:8], "projectId": row["id"], "from": row["from"],
+            "to": row["to"]["category"], "because": row["because"], "task": row["task"]}
+
+
+def print_status(rows):
+    if not rows:
+        print("No project's work calls for another status.")
+        return
+    print(f"{len(rows)} project{'s' if len(rows) != 1 else ''} whose work calls for another status:")
+    print(f"  {'PROJECT':<12} {'FROM':<12} {'TO':<12} {'BECAUSE':<13} {'TASK':<10}  DECISION")
+    for row in rows:
+        decision = row["decision"] + (f" until {row['wait']}" if row.get("wait") else "")
+        print(f"  {printable(row['slug'] or row['id'][:8]):<12} {row['from'] or '-':<12} "
+              f"{row['to']['category']:<12} {row['because']:<13} {printable(row['task'] or '-'):<10}  {decision}")
 
 
 def print_needs(rows):
@@ -4513,6 +4747,8 @@ def main(argv=None):
                     help="with --dry-run: list the project review candidates and which would run")
     ap.add_argument("--needs", action="store_true",
                     help="with --dry-run: list the tasks waiting on a person and what a needs check would do")
+    ap.add_argument("--status", action="store_true",
+                    help="with --dry-run: list the projects whose work calls for another status")
     ap.add_argument("--workspace", metavar="org_ID",
                     help="the workspace whose profile to use; without it, the single-machine files")
     args = ap.parse_args(argv)
@@ -4522,8 +4758,10 @@ def main(argv=None):
         ap.error("--reviews goes with --dry-run")
     if args.needs and not args.dry_run:
         ap.error("--needs goes with --dry-run")
-    if args.needs and args.reviews:
-        ap.error("--needs and --reviews are two dry runs: pass one")
+    if args.status and not args.dry_run:
+        ap.error("--status goes with --dry-run")
+    if sum((args.needs, args.reviews, args.status)) > 1:
+        ap.error("--needs, --reviews and --status are separate dry runs: pass one")
     if args.print_paths:
         cfg = Config(os.environ, args.workspace)
         print(json.dumps({"config": str(cfg.config_dir), "state": str(cfg.state_dir),
@@ -4540,6 +4778,8 @@ def main(argv=None):
             return runner.review_dry_run()
         if args.needs:
             return runner.needs_dry_run()
+        if args.status:
+            return runner.status_dry_run()
         return 0 if runner.poll(dry_run=True) is not None else 1
     # A closed terminal (SIGHUP) or SIGQUIT would otherwise end the runner with
     # its session still running in its own process group. Each system has

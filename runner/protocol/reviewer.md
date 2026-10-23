@@ -57,6 +57,10 @@ The message gives the time the facts are counted from: the latest update,
 an agent's update a person deleted included, or the project's creation when
 there is none.
 
+The project's `status` is planned, in progress or completed, whatever the
+workspace calls each. A completed project is here only because it finished
+since the latest update: that is the fact to report.
+
 Read the latest update's body next to `sinceLastUpdate`. If `blockedBy` is
 set, the server refuses any update now, so there is nothing to decide. Take
 the triggers one by one and strike every fact the latest update already
