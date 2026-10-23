@@ -22,6 +22,8 @@ class Arguments(unittest.TestCase):
                          ("setup", {"--workspace": "org_x", "--yes": True, "--api": "https://a.example/v1"}))
         self.assertEqual(ur.parse_args(["update"]), ("update", {}))
         self.assertEqual(ur.parse_args(["status"]), ("status", {}))
+        # --workspace is no longer the parser's to require: one profile stands for it.
+        self.assertEqual(ur.parse_args(["start"]), ("start", {}))
         for argv in ([], ["-h"], ["--help"], ["help"], ["logs", "--help"]):
             self.assertEqual(ur.parse_args(argv)[0], "help", argv)
 
@@ -29,7 +31,6 @@ class Arguments(unittest.TestCase):
         for argv, text in ((["bogus"], "Comando desconhecido: bogus. Rode unio runner help."),
                            (["setup", "--workspace", "org_x", "--token", RUNNER], "Opção desconhecida para setup: --token."),
                            (["logs", "--workspace"], "Falta o valor de --workspace."),
-                           (["start"], "Falta --workspace org_..., o workspace do serviço."),
                            (["setup", "--workspace", "org_x", "--yes=no"], "--yes não leva valor."),
                            (["update", "--workspace", "org_x"], "Opção desconhecida para update: --workspace.")):
             with self.assertRaises(ur.Stop) as caught:
@@ -140,8 +141,9 @@ class Commands(unittest.TestCase):
         self.assertFalse(self.token_file.exists())
         self.assertTrue(self.box.paths("org_other")[2].exists())
         self.assertIn("Token apagado de", out.getvalue())
+        # One token left: the command needs no --workspace now.
         with self.box.inside(), captured(), mock.patch.object(ur, "service", lambda kind=None: svc):
-            self.assertEqual(ur.main(["uninstall", "--workspace", "org_other"]), 0)
+            self.assertEqual(ur.main(["uninstall"]), 0)
         svc.remove.assert_called_with("org_other", last=True)
 
     def test_uninstall_without_anything_installed(self):
@@ -149,6 +151,25 @@ class Commands(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("Não havia serviço instalado para org_test.", out)
         self.assertIn("Não havia token do serviço salvo para org_test neste computador.", out)
+
+    def test_the_only_workspace_needs_no_flag(self):
+        self.make_profile(lines=[{"at": "t1", "event": "poll", "listed": 1}])
+        # What uninstall leaves, a profile without a token, is not a choice.
+        self.make_profile("org_gone", token=False)
+        code, out = self.box.runner(["logs"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "t1 poll listed=1")
+
+    def test_several_workspaces_or_none_are_named(self):
+        code, out = self.box.runner(["logs"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("Falta --workspace org_...: nenhum serviço de respostas está configurado neste computador.", out)
+        self.make_profile("org_one")
+        self.make_profile("org_two")
+        for command in ("setup", "start", "stop", "restart", "logs", "uninstall"):
+            code, out = self.box.runner([command])
+            self.assertEqual(code, 2, out)
+            self.assertIn("mais de um workspace: org_one, org_two. Diga qual com --workspace.", out)
 
 
 class EnvFile(unittest.TestCase):

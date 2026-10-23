@@ -407,7 +407,10 @@ class ServiceEndToEnd(Base):
         self.assertIn("org_test: parado", self.box.runner(["status", "--workspace", "org_test"])[1])
         self.assertEqual(self.box.runner(["start", "--workspace", "org_test"])[0], 0)
         self.assertIn("org_test: ligado", self.box.runner(["status", "--workspace", "org_test"])[1])
-        self.assertEqual(self.box.runner(["restart", "--workspace", "org_test"])[0], 0)
+        # The only workspace on this computer needs no --workspace.
+        code, out = self.box.runner(["restart"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Serviço de org_test reiniciado.", out)
 
         # The real runner logged a start for setup, start and restart, from the profile's env file.
         code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "1000"])

@@ -3,11 +3,13 @@
 service per workspace, and manages it afterwards. People run it as
 `unio runner`, through bin/unio:
 
-    unio runner setup --workspace org_<id> [--api URL] [--token-stdin]
+    unio runner setup [--workspace org_<id>] [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
     unio runner status [--workspace org_<id>]
-    unio runner start|stop|restart|logs|uninstall --workspace org_<id>
+    unio runner start|stop|restart|logs|uninstall [--workspace org_<id>]
     unio runner update
+
+--workspace may be left out when this computer has one workspace's token.
 
 unio-inbox owns where a workspace's profile lives (--print-paths) and whether
 it works (--check): this file asks it and never re-derives either, so the two
@@ -79,7 +81,7 @@ responde às menções ao agente do workspace com o Claude Code daqui, por conta
 do plano de quem o instala.
 
 Comandos:
-  setup --workspace org_...   Confere o computador, guarda o token do serviço,
+  setup                       Confere o computador, guarda o token do serviço,
                               pergunta os repositórios de cada time e liga o
                               serviço.
     --api URL                 Outro endereço da API do Unio
@@ -88,20 +90,22 @@ Comandos:
     --repos-json ARQUIVO      Usa os repositórios deste arquivo, sem perguntar.
     --no-service              Prepara o perfil sem instalar o serviço.
     --yes                     Aceita a resposta padrão de cada pergunta.
-  status [--workspace org_...]
-                              Estado, versão, última linha do registro e
+  status                      Estado, versão, última linha do registro e
                               atualização automática de cada serviço.
-  start --workspace org_...   Liga o serviço.
-  stop --workspace org_...    Para o serviço até o próximo start.
-  restart --workspace org_... Reinicia o serviço.
-  logs --workspace org_... [--lines N] [--follow]
+  start                       Liga o serviço.
+  stop                        Para o serviço até o próximo start.
+  restart                     Reinicia o serviço.
+  logs [--lines N] [--follow]
                               Mostra as últimas linhas do registro.
-  uninstall --workspace org_...
-                              Remove o serviço e o token deste computador.
+  uninstall                   Remove o serviço e o token deste computador.
   update                      Atualiza o clone com git pull --ff-only. Um
                               serviço com atualização automática passa
                               sozinho para a versão nova entre uma resposta e
                               outra; os demais ligados são reiniciados.
+
+Todo comando, menos update, aceita --workspace org_... para escolher o
+workspace. Ele pode ficar de fora quando este computador tem o token de um só;
+status sem ele mostra todos.
 """
 
 # For each command, its options and whether each takes a value.
@@ -116,7 +120,6 @@ OPTIONS = {
     "uninstall": {"--workspace": True},
     "update": {},
 }
-NEEDS_WORKSPACE = ("setup", "start", "stop", "restart", "logs", "uninstall")
 
 
 class Stop(Exception):
@@ -1088,11 +1091,26 @@ def version_key(text):
 
 
 def workspace_of(opts):
+    if "--workspace" not in opts:
+        return only_workspace()
     org = opts.get("--workspace")
     if not isinstance(org, str) or not ORG.match(org):
         raise Stop("O valor de --workspace não é um workspace do Unio (org_ seguido de letras e números). "
                    "Copie de novo o comando da página Agentes.", 2)
     return org
+
+
+def only_workspace():
+    """The workspace a command without --workspace is for: the only one this
+    computer has a token for. A profile without one is what uninstall left."""
+    orgs = [org for org in profiles() if profile(org).token.exists()]
+    if len(orgs) == 1:
+        return orgs[0]
+    if orgs:
+        raise Stop("Este computador tem o serviço de respostas de mais de um workspace: %s. Diga qual com "
+                   "--workspace." % ", ".join(orgs), 2)
+    raise Stop("Falta --workspace org_...: nenhum serviço de respostas está configurado neste computador. Copie o "
+               "comando da página %s, no Unio." % AGENTS_PAGE, 2)
 
 
 def read_token(opts, prof, old):
@@ -1391,8 +1409,6 @@ def parse_args(argv):
             raise Stop("%s não leva valor." % name, 2)
         else:
             opts[name] = True
-    if command in NEEDS_WORKSPACE and "--workspace" not in opts:
-        raise Stop("Falta --workspace org_..., o workspace do serviço.", 2)
     return command, opts
 
 
