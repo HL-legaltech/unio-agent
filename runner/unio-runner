@@ -1118,7 +1118,8 @@ def setup(opts):
     env = child_env(api)
     prof = profile(org, env)
     private_dir(prof.config)
-    prof.state.mkdir(parents=True, exist_ok=True)
+    # The runner's log and health name items and errors: for this user alone.
+    private_dir(prof.state)
 
     old = read_bytes(prof.token)
     secret = read_token(opts, prof, old)

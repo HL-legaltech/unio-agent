@@ -1319,6 +1319,8 @@ class State:
     def ensure(self):
         for d in (self.dir, self.runs_dir, self.mcp_dir, self.repos_dir):
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir's mode spares a folder that already exists, as one setup made may.
+        os.chmod(self.dir, 0o700)
         os.chmod(self.mcp_dir, 0o700)
 
     def health(self):

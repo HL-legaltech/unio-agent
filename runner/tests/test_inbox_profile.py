@@ -44,6 +44,16 @@ class LegacyPaths(HomeCase):
         self.assertNotEqual(cfg.responder.parent, inbox.PROTOCOL_DIR)
 
 
+class PrivateState(HomeCase):
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_a_state_folder_made_before_becomes_private(self):
+        cfg = inbox.Config(dict(os.environ), "org_test")
+        cfg.state_dir.mkdir(parents=True)
+        os.chmod(cfg.state_dir, 0o755)
+        inbox.State(cfg).ensure()
+        self.assertEqual(cfg.state_dir.stat().st_mode & 0o777, 0o700)
+
+
 class ProfilePaths(HomeCase):
     def test_linux_and_macos(self):
         for platform in ("linux", "darwin"):

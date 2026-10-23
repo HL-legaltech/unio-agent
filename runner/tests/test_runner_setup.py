@@ -57,6 +57,8 @@ class SetupWithoutService(Base):
         if os.name != "nt":
             self.assertEqual(self.token_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(self.config.stat().st_mode & 0o777, 0o700)
+            # The runner's log, health and runs go here, whatever the terminal's umask.
+            self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
         self.assertEqual(json.loads((self.config / "repos.json").read_text(encoding="utf-8")),
                          {"PLA": ["octo-org/api"], "SUP": ["octo-org/help"]})
         self.assertIn("UNIO_API_URL=%s" % self.api.url, (self.config / "env").read_text(encoding="utf-8").splitlines())
