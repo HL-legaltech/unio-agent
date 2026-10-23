@@ -554,6 +554,19 @@ def text_run(argv, **kwargs):
                           stdin=subprocess.DEVNULL, **quiet_flags(), **kwargs)
 
 
+def utf8_output():
+    """stdout and stderr in UTF-8 when they are a pipe or a file, as under the
+    services' -X utf8 and PYTHONUTF8=1: Python would write the locale's
+    encoding there, the ANSI code page on Windows. A terminal keeps its own
+    (Windows' console takes UTF-16), and a character it lacks never raises.
+    pythonw.exe has neither stream."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding=None if stream.isatty() else "utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def rule_path(path, windows=None):
     """An absolute path as a permission rule names it: '//' and the path.
     Claude Code matches Windows paths in POSIX form, C:\\Users as /c/Users."""
@@ -4798,4 +4811,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Here, not in main(): a test that calls main() keeps its own streams.
+    utf8_output()
     sys.exit(main())

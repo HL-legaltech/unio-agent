@@ -38,6 +38,15 @@ def load_runner():
 inbox = load_runner()
 
 
+def non_utf8_locale(env):
+    """`env` for a program whose pipes Python would not write in UTF-8. On
+    Windows they get the ANSI code page anyway; elsewhere the C locale makes
+    them ASCII, once neither UTF-8 mode nor locale coercion undoes it."""
+    env = {k: v for k, v in env.items()
+           if k not in ("PYTHONIOENCODING", "LANG", "LANGUAGE") and not k.startswith("LC_")}
+    return dict(env, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+
+
 class HomeCase(unittest.TestCase):
     """A test with a home of its own: HOME, USERPROFILE and the XDG and
     Windows folders point inside it, and CLAUDE_CONFIG_DIR too, so nothing

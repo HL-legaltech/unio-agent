@@ -236,7 +236,9 @@ def write_atomic(path, data, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".new")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
+    # Without O_BINARY, Windows writes each b"\n" as b"\r\n", which breaks the task's UTF-16 XML.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(tmp), flags, 0o600 if mode is None else mode)
     try:
         os.write(fd, data)
     finally:
@@ -1455,12 +1457,19 @@ def parse_args(argv):
     return command, opts
 
 
-def main(argv=None):
+def utf8_output():
+    """stdout and stderr in UTF-8 when they are a pipe or a file, as under
+    unio.cmd's -X utf8: Python would write the locale's encoding there, the
+    ANSI code page on Windows. A terminal keeps its own (Windows' console
+    takes UTF-16), and a character it lacks never raises."""
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(encoding=None if stream.isatty() else "utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+
+
+def main(argv=None):
     try:
         command, opts = parse_args(sys.argv[1:] if argv is None else list(argv))
         if command == "help":
@@ -1477,4 +1486,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Here, not in main(): a test that calls main() keeps its own streams.
+    utf8_output()
     sys.exit(main())

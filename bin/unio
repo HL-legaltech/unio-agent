@@ -36,6 +36,11 @@ root=$(CDPATH='' cd -P -- "$bin/.." 2>/dev/null && pwd -P) || {
   exit 1
 }
 
+# The runner's own help, for unio help runner and a bare unio runner.
+case ${1-}:${2-} in
+  help:runner|-h:runner|--help:runner|runner:) set -- runner --help ;;
+esac
+
 case ${1:-help} in
   runner)
     shift
@@ -45,6 +50,12 @@ case ${1:-help} in
     fi
     if ! command -v python3 >/dev/null 2>&1; then
       say "O comando python3 não está no PATH. Instale o Python 3.9 ou mais novo e rode este comando de novo." >&2
+      exit 1
+    fi
+    # Only a run proves an interpreter: macOS's /usr/bin/python3 without the
+    # Command Line Tools is a stub that offers to install them.
+    if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1 </dev/null; then
+      say "O serviço de respostas precisa do Python 3.9 ou mais novo. Instale um Python mais novo e rode este comando de novo." >&2
       exit 1
     fi
     exec python3 "$root/runner/unio-runner" "$@" ;;

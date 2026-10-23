@@ -5,12 +5,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import inbox
+from inbox_support import inbox, non_utf8_locale
 from runner_support import RUNNER, Sandbox, captured, load_runner
 
 ur = load_runner()
@@ -55,6 +56,12 @@ class Arguments(unittest.TestCase):
         for command in ("setup", "status", "start", "stop", "restart", "logs", "uninstall", "update"):
             self.assertIn("  " + command, text)
         self.assertNotIn("unio-runner", text)
+
+    def test_help_into_a_pipe_is_utf8(self):
+        done = subprocess.run([sys.executable, str(ur.HERE / "unio-runner"), "--help"], stdin=subprocess.DEVNULL,
+                              capture_output=True, env=non_utf8_locale(os.environ), timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.decode("utf-8", "replace").replace("\r\n", "\n"), ur.USAGE)
 
     def test_people_are_told_unio_runner(self):
         # unio-runner survives only as a name that is not a command: the
