@@ -14,13 +14,19 @@ Each item is claimed on the server (so no machine or restart handles it
 twice), marked with an eyes reaction, and answered by one headless Claude Code
 session that has the Unio tools, scoped on the server to the item's live claim,
 its team and what its author may do, and read-only snapshots of the team's
-repositories. The session follows ~/.config/unio/responder.md and ends with a
-JSON outcome line, which is checked against the tool calls it made. The item is
-then completed; failed, so the server retries it (three attempts in all); or
-released without spending an attempt when the machine is the problem. Low
-memory is one: under 4 GiB available, under 1 GiB of free swap with under
-8 GiB available, or a critical reading from unio-desk (its desk.json, under
-90 s old) holds answers for 5 minutes and skips the reviews then due.
+repositories. The session follows the responder protocol (see Files) and ends
+with a JSON outcome line, which is checked against the tool calls it made. The
+item is then completed; failed, so the server retries it (three attempts in
+all); or released without spending an attempt when the machine is the problem.
+Low memory is one, on Linux: under 4 GiB available, under 1 GiB of free swap
+with under 8 GiB available, or a critical reading from unio-desk (its
+desk.json, under 90 s old) holds answers for 5 minutes and skips the reviews
+then due.
+
+Every prompt names the agent's writing language (GET /agents/me), and what the
+runner posts itself comes in that language, English or Brazilian Portuguese.
+A responder protocol holding the workspace marker gets the agent's teams and
+their repositories written in for each run.
 
 The runner tells Unio what it is doing (idle, the item and step it works on,
 or the problem that holds it), so the workspace sees it on the agent's page.
@@ -30,7 +36,7 @@ when a poll found no item, the runner asks Unio which projects changed since
 their latest update and runs one session per chosen project, between inbox
 polls. That session has only get_project and post_project_update, scoped on
 the server to the project (X-Unio-Review-Project), follows
-~/.config/unio/reviewer.md, and most often posts nothing. UNIO_REVIEW=observe
+the review protocol, and most often posts nothing. UNIO_REVIEW=observe
 logs what would run and runs nothing; off (the default) never asks.
 
 Needs checks, with UNIO_NEEDS=on: when a poll found no item and ran no review,
@@ -42,7 +48,7 @@ with it: on while an item is open; once none is, off, with the ticked sections
 For one task a pass whose facts changed (its update time, its comments, the
 GitHub state of the pull requests it links in repos.json's repositories), or
 that it judged UNIO_NEEDS_RECHECK ago, a session with only get_task and
-list_comments on that task follows ~/.config/unio/needs.md and names the items
+list_comments on that task follows the needs protocol and names the items
 done; the runner ticks them. Its writes go through the MCP endpoint, each
 against the task's updatedAt as read. UNIO_NEEDS=observe logs what it would do
 and writes nothing; off (the default) never looks.
