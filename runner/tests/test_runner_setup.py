@@ -349,7 +349,9 @@ class SetupWithService(Base):
         svc = FakeService(self.box)
         code, out = self.run_setup(svc, **folders)
         self.assertEqual(code, 0, out)
-        self.assertTrue((self.box.root / "xdg config" / "unio" / "runners" / "org_test" / "runner-token").exists())
+        # Windows reads no XDG variable: the profile stays under %APPDATA%, and the service needs none.
+        xdg_token = self.box.root / "xdg config" / "unio" / "runners" / "org_test" / "runner-token"
+        self.assertEqual((xdg_token.exists(), self.token_file.exists()), (os.name != "nt", os.name == "nt"))
         self.assertEqual(svc.env, {} if os.name == "nt" else folders)
 
     def test_a_runner_that_never_starts_is_reported(self):
