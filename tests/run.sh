@@ -431,7 +431,9 @@ mkdir -p "$work/r" "$work/o" "$conf/workspaces/org_R" "$conf/workspaces/org_O"
 printf '%s' "$refused" > "$conf/workspaces/org_R/token"
 printf '%s' "$off" > "$conf/workspaces/org_O/token"
 printf '%s\torg_R\n%s\torg_O\n' "$work/r" "$work/o" > "$conf/projects"
-CLAUDE_PROJECT_DIR=$work/r refresh
+# In a subshell: bash in POSIX mode, which macOS's sh is, keeps an
+# assignment written before a function call after the call returns.
+(CLAUDE_PROJECT_DIR=$work/r refresh)
 out=$(CLAUDE_PROJECT_DIR=$work/r notice)
 user=$(hook "$out" user)
 model=$(hook "$out" model)
@@ -442,7 +444,7 @@ printf '%s' "$good" > "$conf/workspaces/org_R/token"
 expire status-org_R
 user=$(hook "$(CLAUDE_PROJECT_DIR=$work/r notice)" user)
 lacks "$user" "recusou"; check "a new token silences the old refusal"
-CLAUDE_PROJECT_DIR=$work/o refresh
+(CLAUDE_PROJECT_DIR=$work/o refresh)
 out=$(CLAUDE_PROJECT_DIR=$work/o notice)
 has "$(hook "$out" user)" "desligados no workspace org_O" && has "$(hook "$out" model)" "switched off"; check "agents switched off are reported, naming the workspace"
 mkdir -p "$work/m"
