@@ -25,6 +25,8 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ur.parse_args(["status", "--json"]), ("status", {"--json": True}))
         # --workspace is no longer the parser's to require: one profile stands for it.
         self.assertEqual(ur.parse_args(["start"]), ("start", {}))
+        self.assertEqual(ur.parse_args(["logs", "-n", "5", "-f"]), ("logs", {"--lines": "5", "--follow": True}))
+        self.assertEqual(ur.parse_args(["logs", "-n=7"]), ("logs", {"--lines": "7"}))
         for argv in ([], ["-h"], ["--help"], ["help"], ["logs", "--help"]):
             self.assertEqual(ur.parse_args(argv)[0], "help", argv)
 
@@ -32,6 +34,10 @@ class Arguments(unittest.TestCase):
         for argv, text in ((["bogus"], "Comando desconhecido: bogus. Rode unio runner help."),
                            (["setup", "--workspace", "org_x", "--token", RUNNER], "Opção desconhecida para setup: --token."),
                            (["logs", "--workspace"], "Falta o valor de --workspace."),
+                           (["logs", "-n"], "Falta o valor de -n."),
+                           (["logs", "-f=1"], "-f não leva valor."),
+                           (["status", "-n", "3"], "Opção desconhecida para status: -n."),
+                           (["start", "-f"], "Opção desconhecida para start: -f."),
                            (["setup", "--workspace", "org_x", "--yes=no"], "--yes não leva valor."),
                            (["update", "--workspace", "org_x"], "Opção desconhecida para update: --workspace.")):
             with self.assertRaises(ur.Stop) as caught:
@@ -192,6 +198,23 @@ class Commands(unittest.TestCase):
     def test_status_json_without_profiles(self):
         code, out = self.box.runner(["status", "--json"])
         self.assertEqual((code, json.loads(out)), (0, {"workspaces": []}))
+
+    def test_logs_follow(self):
+        self.make_profile(lines=[{"at": "t0", "event": "poll"}])
+        log = self.state / "log.jsonl"
+        naps = []
+
+        def nap(seconds):
+            # The first nap sees a new line come in; the second is Ctrl-C.
+            naps.append(seconds)
+            if len(naps) > 1:
+                raise KeyboardInterrupt
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": "t1", "event": "claimed"}) + "\n")
+
+        with self.box.inside(), captured() as out, mock.patch.object(ur.time, "sleep", nap):
+            self.assertEqual(ur.main(["logs", "-f", "-n", "1"]), 0)
+        self.assertEqual(out.getvalue().splitlines()[:2], ["t0 poll", "t1 claimed"])
 
 
 class EnvFile(unittest.TestCase):

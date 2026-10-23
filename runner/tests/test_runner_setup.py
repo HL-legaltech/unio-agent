@@ -416,7 +416,7 @@ class ServiceEndToEnd(Base):
         self.assertIn("Serviço de org_test reiniciado.", out)
 
         # The real runner logged a start for setup, start and restart, from the profile's env file.
-        code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "1000"])
+        code, out = self.box.runner(["logs", "--workspace", "org_test", "-n", "1000"])
         self.assertEqual(code, 0, out)
         starts = [line for line in out.splitlines() if " start " in line]
         self.assertEqual(len(starts), 3, out)

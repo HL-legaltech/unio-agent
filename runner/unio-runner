@@ -6,7 +6,8 @@ service per workspace, and manages it afterwards. People run it as
     unio runner setup [--workspace org_<id>] [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
     unio runner status [--workspace org_<id>] [--json]
-    unio runner start|stop|restart|logs|uninstall [--workspace org_<id>]
+    unio runner start|stop|restart|uninstall [--workspace org_<id>]
+    unio runner logs [--workspace org_<id>] [-n N] [-f]
     unio runner update
 
 --workspace may be left out when this computer has one workspace's token.
@@ -96,8 +97,9 @@ Comandos:
   start                       Liga o serviço.
   stop                        Para o serviço até o próximo start.
   restart                     Reinicia o serviço.
-  logs [--lines N] [--follow]
-                              Mostra as últimas linhas do registro.
+  logs [-n N] [-f]            Mostra as últimas N linhas do registro (40 sem
+                              -n); com -f, segue mostrando as novas. Também
+                              --lines N e --follow.
   uninstall                   Remove o serviço e o token deste computador.
   update                      Atualiza o clone com git pull --ff-only. Um
                               serviço com atualização automática passa
@@ -121,6 +123,8 @@ OPTIONS = {
     "uninstall": {"--workspace": True},
     "update": {},
 }
+# Short forms, for the commands whose long form they stand for.
+ALIASES = {"-n": "--lines", "-f": "--follow"}
 
 
 class Stop(Exception):
@@ -1403,17 +1407,18 @@ def parse_args(argv):
         arg = rest.pop(0)
         if arg in ("-h", "--help"):
             return "help", {}
-        name, eq, value = arg.partition("=")
+        typed, eq, value = arg.partition("=")
+        name = ALIASES[typed] if ALIASES.get(typed) in allowed else typed
         if name not in allowed:
-            raise Stop("Opção desconhecida para %s: %s." % (command, clean(name, 40)), 2)
+            raise Stop("Opção desconhecida para %s: %s." % (command, clean(typed, 40)), 2)
         if allowed[name]:
             if not eq:
                 if not rest:
-                    raise Stop("Falta o valor de %s." % name, 2)
+                    raise Stop("Falta o valor de %s." % typed, 2)
                 value = rest.pop(0)
             opts[name] = value
         elif eq:
-            raise Stop("%s não leva valor." % name, 2)
+            raise Stop("%s não leva valor." % typed, 2)
         else:
             opts[name] = True
     return command, opts
