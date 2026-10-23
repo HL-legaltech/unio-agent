@@ -35,10 +35,11 @@ if not defined unio_args set "unio_args= --help"
 :start_runner
 if not exist "%unio_root%\runner\unio-runner" goto :no_runner
 rem Only a run that exits 0 proves an interpreter: the python.exe Windows
-rem ships is a Microsoft Store alias that opens the Store.
+rem ships is a Microsoft Store alias that opens the Store. call, so that a
+rem batch shim such as pyenv-win's python.bat comes back here.
 set "unio_python="
-py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
-if not defined unio_python python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
+call py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
+if not defined unio_python call python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
 if not defined unio_python goto :no_python
 %unio_python% -X utf8 "%unio_root%\runner\unio-runner"%unio_args%
 exit /b %errorlevel%
