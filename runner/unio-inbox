@@ -115,9 +115,10 @@ if os.name == "nt":
 else:
     import fcntl
 
-# The web app stops saying the agent only answers on tasks once a live presence
-# reports "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE): keep the two equal.
-VERSION = "1.7"
+# Equal to runner/VERSION, which the self-update compares (a test checks). The
+# web app answers project comments only once a live presence reports
+# "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
+VERSION = "2.0.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -405,6 +406,11 @@ def platform_name(platform=None):
     if platform.startswith("linux"):
         return "linux"
     return {"darwin": "macos", "win32": "windows", "cygwin": "windows"}.get(platform, platform)
+
+
+def presence_client(platform=None):
+    """What the agent's page shows for this runner: "unio-inbox 2.0.0 (macos)"."""
+    return f"unio-inbox {VERSION} ({platform_name(platform)})"
 
 
 def quiet_flags():
@@ -1036,7 +1042,7 @@ class Presence:
             self.thread.start()
 
     def set(self, state, **fields):
-        body = {"kind": "inbox", "host": socket.gethostname()[:64], "client": f"unio-inbox {VERSION}",
+        body = {"kind": "inbox", "host": socket.gethostname()[:64], "client": presence_client(),
                 "state": state, **{k: v for k, v in fields.items() if v is not None}}
         with self.lock:
             self.want = body
