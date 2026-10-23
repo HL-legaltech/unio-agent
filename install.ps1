@@ -208,7 +208,15 @@ function Install-Plugin {
         Say 'O comando claude n\u00e3o est\u00e1 no PATH. Instale o Claude Code (irm https://claude.ai/install.ps1 | iex), abra outro terminal e rode este comando de novo.'
         return
     }
+    # install.sh keeps using a clone already where it cloned before, since a
+    # Codex config names its helper there, so the unio command must be that
+    # clone's. Git's sh takes HOME from USERPROFILE when HOME is not set.
     $clone = Join-Path $env:LOCALAPPDATA 'unio\agent'
+    $profileDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+    if ($profileDir) {
+        $legacy = Join-Path $profileDir '.local\share\unio\agent'
+        if (Test-Path -LiteralPath (Join-Path $legacy '.git') -PathType Container) { $clone = $legacy }
+    }
     if (-not (Get-Clone $clone)) { return }
     Set-UnioCommand $clone
     $arguments = @('--client', $Client)

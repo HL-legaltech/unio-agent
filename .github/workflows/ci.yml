@@ -203,6 +203,14 @@ jobs:
             Write-Host "${shell}: $out"
             if ($out -notmatch 'precisa de um terminal') { throw "$shell did not reach install.sh through Git's sh" }
           }
+          # A clone already where install.sh cloned before stays the one in
+          # use, and the unio command on the Path is that clone's.
+          $env:HOME = Join-Path $env:RUNNER_TEMP 'home'
+          $legacy = Join-Path $env:HOME '.local\share\unio\agent'
+          git clone --quiet . $legacy
+          $out = & pwsh -NoProfile -NonInteractive -Command '& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Workspace org_ci -Renew' 2>&1 | Out-String -Width 4096
+          Write-Host "old clone: $out"
+          if ($out -notmatch [regex]::Escape((Join-Path $legacy 'bin'))) { throw "install.ps1 did not use the clone at the old place" }
 
       - name: Run bin/unio.cmd from PowerShell
         if: runner.os == 'Windows'

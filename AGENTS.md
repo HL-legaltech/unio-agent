@@ -139,8 +139,8 @@ No AI attribution. Stage named paths only.
   for Windows' `sh.exe`, which is not on the PATH: it finds it from
   `where git`.
 - On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
-  `install.sh` keeps using a clone already at `~/.local/share/unio/agent`,
-  since a Codex config names it.
+  `install.sh` and `install.ps1`'s plugin mode keep using a clone already at
+  `~/.local/share/unio/agent`, since a Codex config names it.
 - `bin/unio.cmd` stays ASCII with CRLF line ends: cmd reads it in the
   console's code page, and can miss a label in a file with bare LFs. The
   help's accents reach it only as data, under code page 65001.
