@@ -58,6 +58,22 @@ jobs:
             sh tests/check_versions.sh
           fi
 
+  scripts-macos:
+    # The scripts and the installer under macOS's own sh (bash 3.2 in POSIX
+    # mode) and BSD sed, awk, find and stty, which differ from Linux's.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the scripts against a fake API under sh
+        run: /bin/sh tests/run.sh
+
+      - name: Run the scripts against a fake API under bash
+        run: /bin/bash tests/run.sh
+
   session:
     # A real Claude Code session with the plugin, on each system the plugin
     # supports, against fake Anthropic and Unio APIs on loopback: no secret
