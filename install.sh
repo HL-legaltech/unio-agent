@@ -5,6 +5,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh |
 #     sh -s -- [--workspace org_<id>] [--client claude-code|codex] [--renew] [--browser]
 #
+# and the command the Agentes page shows for the answering service, which
+# runs on this computer and answers for the workspace's agent:
+#
+#   curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh |
+#     sh -s -- --runner --workspace org_<id>
+#
 #   --workspace  The workspace the token belongs to (its Clerk organization id),
 #                for a token pasted at a hidden prompt.
 #   --client     claude-code (default) installs the plugin; codex clones this
@@ -13,6 +19,12 @@
 #   --browser    Asks Unio for the token and waits while you approve it in the
 #                browser, where you also pick the workspace. The default
 #                without --workspace.
+#   --runner     Installs the answering service instead: clones this
+#                repository as --client codex does, links ~/.local/bin/unio
+#                to the clone's bin/unio, then hands the terminal to
+#                `unio runner setup`, which asks for the service's token.
+#                Needs --workspace; macOS and Linux (Windows has
+#                install.ps1).
 #
 # It runs piped into sh, so it cannot source the plugin's lib.sh, and its stdin
 # is this script: the token and every answer are read from /dev/tty. All of it
@@ -293,7 +305,8 @@ link_dir() {
   fi
 }
 
-install_codex() {
+# Clones this repository to $clone, or updates the clone already there.
+get_clone() {
   if ! command -v git >/dev/null 2>&1; then
     say "O comando git não está no PATH. Instale o Git e rode este comando de novo."
     return 1
@@ -319,7 +332,10 @@ install_codex() {
     [ "$log" = /dev/null ] || rm -f "$log"
     say "Unio baixado em $(tilde "$clone")."
   fi
+}
 
+install_codex() {
+  get_clone || return 1
   skill=$clone/plugins/unio/skills/unio
   link=$HOME/.agents/skills/unio
   if [ -L "$link" ] && [ ! -e "$link" ]; then rm -f "$link"; fi
@@ -334,6 +350,50 @@ install_codex() {
   else
     say "$(tilde "$link") já existe e não é a skill deste clone. Troque-a por um link para $(tilde "$skill")."
   fi
+}
+
+# The clone, and a Python unio-runner can run on. Its setup checks the rest.
+install_runner() {
+  get_clone || return 1
+  if [ ! -f "$clone/runner/unio-runner" ]; then
+    say "O clone em $(tilde "$clone") ainda não tem o serviço de respostas. Rode este comando de novo em instantes."
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    say "O comando python3 não está no PATH. Instale o Python 3.9 ou mais novo e rode este comando de novo."
+    return 1
+  fi
+  if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' </dev/null >/dev/null 2>&1; then
+    say "O serviço de respostas precisa do Python 3.9 ou mais novo. Instale um Python mais novo e rode este comando de novo."
+    return 1
+  fi
+}
+
+# Links ~/.local/bin/unio to the clone's bin/unio, the command people type.
+# A unio already there that is not that link belongs to someone else and
+# stays as it is.
+link_command() {
+  target=$clone/bin/unio
+  dir=$HOME/.local/bin
+  link=$dir/unio
+  [ -f "$target" ] || return 0
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    say "O comando unio já está em $(tilde "$link")."
+  elif [ -e "$link" ] || [ -L "$link" ]; then
+    say "$(tilde "$link") já existe e não é o comando unio deste clone, então ficou como estava. O comando do Unio está em $(tilde "$target")."
+    return 0
+  elif mkdir -p "$dir" 2>/dev/null && ln -s "$target" "$link" 2>/dev/null; then
+    say "Comando unio ligado em $(tilde "$link")."
+  else
+    say "Não foi possível criar $(tilde "$link"). O comando do Unio está em $(tilde "$target")."
+    return 0
+  fi
+  case :$PATH: in
+    *:"$dir":*|*:"$dir"/:*) ;;
+    *)
+      # shellcheck disable=SC2016 # the line is printed for the person to copy
+      say 'A pasta ~/.local/bin não está no PATH deste terminal, então o comando unio ainda não funciona aqui. Acrescente a linha export PATH="$HOME/.local/bin:$PATH" ao arquivo de início do seu shell (~/.zshrc, ~/.bashrc ou ~/.profile) e abra outro terminal.' ;;
+  esac
 }
 
 # Codex runs the helper without a shell, so the block names the real home
@@ -643,7 +703,7 @@ store_token() {
 
 usage() {
   [ -z "${1:-}" ] || say "$1"
-  say "Uso: curl -fsSL https://raw.githubusercontent.com/$marketplace/main/install.sh | sh -s -- [--workspace org_...] [--client claude-code|codex] [--renew] [--browser]"
+  say "Uso: curl -fsSL https://raw.githubusercontent.com/$marketplace/main/install.sh | sh -s -- [--workspace org_...] [--client claude-code|codex] [--renew] [--browser] [--runner]"
   exit 2
 }
 
@@ -654,6 +714,7 @@ main() {
   workspace=
   renew=
   browser=
+  runner=
   while [ $# -gt 0 ]; do
     case $1 in
       --workspace) [ $# -ge 2 ] || usage "Falta o valor de --workspace."; workspace=$2; shift 2 ;;
@@ -662,9 +723,14 @@ main() {
       --client=*) client=${1#*=}; shift ;;
       --renew) renew=1; shift ;;
       --browser) browser=1; shift ;;
+      --runner) runner=1; shift ;;
       *) usage "Opção desconhecida: $(clean "$1")." ;;
     esac
   done
+  if [ -n "$runner" ]; then
+    [ -n "$workspace" ] || usage "--runner precisa de --workspace org_...: copie o comando da página Agentes, no Unio."
+    [ -z "$renew$browser" ] || usage "--runner não combina com --renew nem com --browser."
+  fi
   if [ -z "$workspace" ]; then
     browser=1
   elif ! is_org "$workspace"; then
@@ -687,6 +753,21 @@ main() {
   if ! ( : </dev/tty ) 2>/dev/null; then
     say "Este comando precisa de um terminal para ler o token sem mostrá-lo. Nada foi instalado."
     return 1
+  fi
+
+  if [ -n "$runner" ]; then
+    case $(uname -s 2>/dev/null) in
+      MINGW*|MSYS*|CYGWIN*)
+        say "No Windows, rode o comando do PowerShell que a página Agentes mostra."
+        return 1 ;;
+    esac
+    install_runner || return 1
+    link_command
+    set -- setup --workspace "$workspace"
+    if [ -r "$conf/api-url" ]; then set -- "$@" --api "$(api)"; fi
+    # The terminal, not this script, is setup's stdin: it reads the token at a
+    # hidden prompt and asks for each team's repositories.
+    exec python3 "$clone/runner/unio-runner" "$@" </dev/tty
   fi
 
   if [ -z "$renew" ]; then

@@ -1,0 +1,64 @@
+#!/bin/sh
+# unio: Unio's command on this computer. install.sh --runner links it into
+# ~/.local/bin; it runs from the clone it sits in.
+#
+# The lines that start with "#:" are `unio help`, word for word. They hold
+# the one table of commands, one line each, and bin/unio.cmd prints the same
+# lines on Windows. A command joins that table and the case at the bottom
+# together, and only a command the case runs belongs in the table.
+#
+#: Uso: unio <comando> [opções]
+#:
+#: Comandos:
+#:   runner    Liga e cuida do serviço de respostas do Unio neste computador.
+#:
+#: unio <comando> --help mostra as opções de cada comando.
+#: unio --version mostra a versão instalada.
+
+say() { printf '%s\n' "$1"; }
+
+# Text a person typed, safe to print on a terminal.
+clean() { printf '%s' "$1" | tr -d '\000-\037\177' | cut -c1-40; }
+
+# This file's own path, through the links on the way (~/.local/bin/unio is
+# one). readlink without -f, which macOS lacks before 12.3.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self") || break
+  case $link in
+    /*) self=$link ;;
+    *) case $self in */*) self=${self%/*}/$link ;; *) self=$link ;; esac ;;
+  esac
+done
+case $self in */*) bin=${self%/*} ;; *) bin=. ;; esac
+root=$(CDPATH='' cd -P -- "$bin/.." 2>/dev/null && pwd -P) || {
+  say "Não foi possível achar a pasta do Unio a partir de $self." >&2
+  exit 1
+}
+
+case ${1:-help} in
+  runner)
+    shift
+    if [ ! -f "$root/runner/unio-runner" ]; then
+      say "Falta runner/unio-runner em $root. Atualize o clone e rode este comando de novo." >&2
+      exit 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      say "O comando python3 não está no PATH. Instale o Python 3.9 ou mais novo e rode este comando de novo." >&2
+      exit 1
+    fi
+    exec python3 "$root/runner/unio-runner" "$@" ;;
+  help|-h|--help)
+    sed -n -e 's/^#: //p' -e 's/^#:$//p' "$self" ;;
+  --version)
+    version=
+    if [ -r "$root/runner/VERSION" ]; then IFS= read -r version < "$root/runner/VERSION"; fi
+    if [ -z "$version" ]; then
+      say "Não foi possível ler a versão em $root/runner/VERSION." >&2
+      exit 1
+    fi
+    say "$version" ;;
+  *)
+    say "Comando desconhecido: $(clean "$1"). Rode unio help." >&2
+    exit 2 ;;
+esac
