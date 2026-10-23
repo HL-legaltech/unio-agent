@@ -238,8 +238,14 @@ unio_open_url() {
   case $(uname -s 2>/dev/null) in
     Darwin)
       if command -v open >/dev/null 2>&1; then (open "$1" </dev/null >/dev/null 2>&1 &); fi ;;
+    MINGW*|MSYS*|CYGWIN*)
+      (rundll32.exe url.dll,FileProtocolHandler "$1" </dev/null >/dev/null 2>&1 &) ;;
     *)
-      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+      # WSL opens the browser of the Windows around it, through interop.
+      if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null &&
+        command -v rundll32.exe >/dev/null 2>&1; then
+        (rundll32.exe url.dll,FileProtocolHandler "$1" </dev/null >/dev/null 2>&1 &)
+      elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
         (xdg-open "$1" </dev/null >/dev/null 2>&1 &)
       fi ;;
   esac
