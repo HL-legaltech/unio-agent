@@ -1,0 +1,28 @@
+# Unio's answering service, one instance per workspace:
+# unio-runner@<workspace id>.service. Written by `unio-runner setup`, which
+# fills in the interpreter, the runner and the PATH it ran with.
+[Unit]
+Description=Unio answering service for workspace %i
+Documentation=https://github.com/HL-legaltech/unio-agent/blob/main/runner/README.md
+
+[Service]
+Type=simple
+ExecStart=${python} ${inbox} --workspace %i
+# Also after exit 75, which unio-inbox uses once it has updated itself.
+Restart=always
+RestartSec=10
+# The user manager's PATH lacks the folders claude, git and gh are often
+# installed in.
+Environment=${path}
+Environment=PYTHONUTF8=1
+Environment=PYTHONUNBUFFERED=1
+MemoryHigh=768M
+MemoryMax=1G
+# SIGTERM reaches unio-inbox alone: it stops its running session's process
+# group itself, releases the item and marks its presence ended, which takes
+# about 40 s at worst against an API that never answers.
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

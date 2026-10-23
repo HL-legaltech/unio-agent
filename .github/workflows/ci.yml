@@ -57,3 +57,71 @@ jobs:
           else
             sh tests/check_versions.sh
           fi
+
+  runner:
+    # The answering service and its setup on each system it supports.
+    # GitHub-hosted only, as above.
+    name: runner (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the runner's tests
+        run: python -m unittest discover -s runner/tests -v
+
+      - name: Verify the systemd unit setup writes
+        if: runner.os == 'Linux'
+        run: |
+          unit="$RUNNER_TEMP/unio-runner@org_ci.service"
+          python runner/tests/runner_support.py render systemd "$unit"
+          if command -v systemd-analyze >/dev/null 2>&1; then
+            systemd-analyze --user verify "$unit"
+          else
+            echo "systemd-analyze is not installed here; skipped"
+          fi
+
+      - name: Lint the launchd plist setup writes
+        if: runner.os == 'macOS'
+        run: |
+          plist="$RUNNER_TEMP/so.unio.runner.org_ci.plist"
+          python runner/tests/runner_support.py render launchd "$plist"
+          plutil -lint "$plist"
+
+      - name: Create, query and delete the scheduled task setup writes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $xml = Join-Path $env:RUNNER_TEMP 'unio-runner-task.xml'
+          python runner/tests/runner_support.py render schtasks $xml
+          if ($LASTEXITCODE) { exit 1 }
+          schtasks /Create /TN '\Unio\Runner org_ci' /XML $xml /F
+          if ($LASTEXITCODE) { exit 1 }
+          schtasks /Query /TN '\Unio\Runner org_ci' /V /FO LIST
+          if ($LASTEXITCODE) { exit 1 }
+          schtasks /Delete /TN '\Unio\Runner org_ci' /F
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Run install.ps1 in Windows PowerShell and PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($shell in 'powershell', 'pwsh') {
+            $out = & $shell -NoProfile -NonInteractive -Command '& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Runner -Workspace org_a-b' 2>&1 | Out-String
+            Write-Host "${shell}: $out"
+            if ($out -notmatch 'org_ seguido de letras') { throw "$shell did not run install.ps1" }
+          }

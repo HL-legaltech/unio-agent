@@ -86,13 +86,15 @@ JSON
   *) echo "unexpected claude call: \$*" >&2; exit 64 ;;
 esac
 EOF
-# git, only for the installer's Codex runs: a clone copies this plugin.
+# git, only for the installer's Codex and --runner runs: a clone copies this
+# plugin, and the stub runner/ once a check made one.
 mkdir -p "$tmp/git-bin"
 cat > "$tmp/git-bin/git" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$tmp/git-argv.log"
 case \$1 in
-  clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" ;;
+  clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" &&
+    if [ -d "$tmp/runner-stub" ]; then cp -R "$tmp/runner-stub" "\$dest/runner"; fi ;;
   -C) [ "\$3" = pull ] ;;
   *) exit 64 ;;
 esac
@@ -673,6 +675,58 @@ home codex-taken
 mkdir -p "$HOME/.local/share/unio/agent"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
 has_text "$out" "não é um clone do Unio" && lacks "$out" "Cole o token"; check "Codex: a folder in the clone's place stops the installer"
+
+# The answering service: --runner clones as Codex does, then hands the
+# terminal to the clone's runner/unio-runner, here a stub that logs how it
+# was called. unio-runner's own tests are in runner/tests.
+runner_calls() {
+  if [ -f "$tmp/runner-argv.log" ]; then wc -l < "$tmp/runner-argv.log" | tr -d ' '; else echo 0; fi
+}
+home runner-args
+before=$(claude_calls)
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner)
+code=$?
+[ "$code" -eq 2 ] && has_text "$out" "--runner precisa de --workspace org_" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner without --workspace stops before cloning"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test --renew)
+code=$?
+[ "$code" -eq 2 ] && has_text "$out" "--runner não combina com --renew" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner refuses --renew"
+mkdir -p "$tmp/fake-windows"
+printf '#!/bin/sh\necho MINGW64_NT-10.0-26100\n' > "$tmp/fake-windows/uname"
+chmod +x "$tmp/fake-windows/uname"
+out=$(PATH=$tmp/fake-windows:$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+has_text "$out" "No Windows, rode o comando do PowerShell" && [ ! -e "$HOME/.local/share/unio" ]; check "--runner under Git Bash points at the PowerShell command"
+home runner-missing
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "ainda não tem o serviço de respostas" && [ "$(runner_calls)" -eq 0 ]; check "--runner stops when the clone has no runner yet"
+
+mkdir -p "$tmp/runner-stub"
+cat > "$tmp/runner-stub/unio-runner" <<STUB
+import os, sys
+with open("$tmp/runner-argv.log", "a") as log:
+    log.write(" ".join(sys.argv[1:]) + " tty=%d\n" % os.isatty(0))
+print("unio-runner setup chamado.")
+STUB
+home runner
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 0 ] && [ "$(last_line "$out")" = "unio-runner setup chamado." ] && has_text "$out" "Unio baixado em ~/.local/share/unio/agent." &&
+  grep -qx "clone --quiet https://github.com/HL-legaltech/unio-agent.git $HOME/.local/share/unio/agent" "$tmp/git-argv.log"; check "--runner clones the repository as Codex does, then runs the clone's unio-runner"
+[ "$(tail -n 1 "$tmp/runner-argv.log")" = "setup --workspace org_test --api http://127.0.0.1:$port/v1 tty=1" ]; check "--runner runs setup for the workspace, on this computer's API, with the terminal as stdin"
+lacks "$out" "Cole o token" && [ "$(claude_calls)" -eq "$before" ] && [ ! -e "$conf/workspaces" ] && [ ! -e "$HOME/.agents" ]; check "--runner installs no plugin, links no skill and stores no coding agent token"
+out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+grep -qx "\-C $HOME/.local/share/unio/agent pull --quiet --ff-only" "$tmp/git-argv.log" && [ "$(runner_calls)" -eq 2 ] &&
+  has_text "$out" "Unio atualizado em ~/.local/share/unio/agent."; check "--runner, run again, pulls the clone and runs setup again"
+mkdir -p "$tmp/old-python"
+cat > "$tmp/old-python/python3" <<STUB
+#!/bin/sh
+case "\$*" in *version_info*) exit 1 ;; esac
+exec "$(command -v python3)" "\$@"
+STUB
+chmod +x "$tmp/old-python/python3"
+out=$(PATH=$tmp/old-python:$tmp/git-bin:$PATH install_in "$tmp/repo" --runner --workspace org_test)
+code=$?
+[ "$code" -eq 1 ] && has_text "$out" "precisa do Python 3.9 ou mais novo" && [ "$(runner_calls)" -eq 2 ]; check "--runner stops on a Python older than 3.9"
 
 # The browser approval (connect.sh browser and the installer without
 # --workspace), against the fake's scripted polls. The fake asks for a poll

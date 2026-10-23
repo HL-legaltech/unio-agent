@@ -1,0 +1,1289 @@
+#!/usr/bin/env python3
+"""Sets up Unio's answering service (runner/unio-inbox) on this computer, one
+service per workspace, and manages it afterwards:
+
+    unio-runner setup --workspace org_<id> [--api URL] [--token-stdin]
+                      [--repos-json FILE] [--no-service] [--yes]
+    unio-runner status [--workspace org_<id>]
+    unio-runner start|stop|restart|logs|uninstall --workspace org_<id>
+    unio-runner update
+
+unio-inbox owns where a workspace's profile lives (--print-paths) and whether
+it works (--check): this file asks it and never re-derives either, so the two
+cannot disagree. The service runs `<python> runner/unio-inbox --workspace
+<org>` from the clone this file sits in, under systemd --user on Linux, a
+LaunchAgent on macOS and a Task Scheduler task on Windows; the definitions
+come from runner/services/. UNIO_RUNNER_INBOX points at another unio-inbox.
+
+Python 3.9 or later, standard library only. Everything it prints is Brazilian
+Portuguese, in install.sh's voice. A token never reaches argv or a log.
+"""
+import sys
+
+# Before anything newer than Python 3.6 can fail with a less useful error.
+if sys.version_info < (3, 9):
+    sys.stderr.write(
+        "O serviço de respostas precisa do Python 3.9 ou mais novo; este é o %d.%d. "
+        "Instale um Python mais novo e rode este comando de novo.\n" % sys.version_info[:2])
+    sys.exit(1)
+
+import getpass
+import json
+import os
+import re
+import shlex
+import shutil
+import string
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
+
+HERE = Path(__file__).resolve().parent
+CLONE = HERE.parent
+SERVICES = HERE / "services"
+
+ORG = re.compile(r"^org_[A-Za-z0-9]+$")
+TOKEN = re.compile(r"^unio_[0-9A-Za-z]{46}$")
+# The rule unio-inbox applies to repos.json.
+REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+DEFAULT_API = "https://api.unio.so/v1"
+AGENTS_PAGE = "Configurações > Sistema > Agentes"
+START_WAIT = 60
+STATE_WORDS = {
+    "running": "ligado",
+    "stopped": "parado",
+    "failed": "parado com erro",
+    "absent": "sem serviço instalado",
+    "unknown": "estado desconhecido",
+}
+
+USAGE = """Uso: unio-runner <comando> [opções]
+
+Liga e cuida do serviço de respostas do Unio neste computador: o programa que
+responde às menções ao agente do workspace com o Claude Code daqui, por conta
+do plano de quem o instala.
+
+Comandos:
+  setup --workspace org_...   Confere o computador, guarda o token do serviço,
+                              pergunta os repositórios de cada time e liga o
+                              serviço.
+    --api URL                 Outro endereço da API do Unio
+                              (o padrão é https://api.unio.so/v1).
+    --token-stdin             Lê o token da entrada padrão em vez de perguntar.
+    --repos-json ARQUIVO      Usa os repositórios deste arquivo, sem perguntar.
+    --no-service              Prepara o perfil sem instalar o serviço.
+    --yes                     Aceita a resposta padrão de cada pergunta.
+  status [--workspace org_...]
+                              Estado, versão, última linha do registro e
+                              atualização automática de cada serviço.
+  start --workspace org_...   Liga o serviço.
+  stop --workspace org_...    Para o serviço até o próximo start.
+  restart --workspace org_... Reinicia o serviço.
+  logs --workspace org_... [--lines N] [--follow]
+                              Mostra as últimas linhas do registro.
+  uninstall --workspace org_...
+                              Remove o serviço e o token deste computador.
+  update                      Atualiza o clone com git pull --ff-only e
+                              reinicia os serviços ligados.
+"""
+
+# For each command, its options and whether each takes a value.
+OPTIONS = {
+    "setup": {"--workspace": True, "--api": True, "--token-stdin": False, "--repos-json": True,
+              "--no-service": False, "--yes": False},
+    "status": {"--workspace": True},
+    "start": {"--workspace": True},
+    "stop": {"--workspace": True},
+    "restart": {"--workspace": True},
+    "logs": {"--workspace": True, "--lines": True, "--follow": False},
+    "uninstall": {"--workspace": True},
+    "update": {},
+}
+NEEDS_WORKSPACE = ("setup", "start", "stop", "restart", "logs", "uninstall")
+
+
+class Stop(Exception):
+    """Ends the command with a message for the person and an exit code."""
+
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+def say(text=""):
+    print(text, flush=True)
+
+
+def clean(text, limit=80):
+    """Text a server sent or a person typed, safe to print on a terminal."""
+    return re.sub(r"[\x00-\x1f\x7f]", "", str(text))[:limit]
+
+
+def last_line(text, limit=200):
+    """The last line a failed command printed, without colors or control bytes."""
+    lines = [clean(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line), limit) for line in str(text or "").splitlines()]
+    lines = [line.strip() for line in lines if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def tilde(path):
+    """A path as people read it, with ~ for the home folder (POSIX only)."""
+    text = str(path)
+    if os.name == "nt":
+        return text
+    home = str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home + "/"):
+        return "~/" + text[len(home) + 1:]
+    return text
+
+
+def shown(path):
+    """A path for a command the person may copy: ~ when it needs no quoting."""
+    text = tilde(path)
+    return text if re.fullmatch(r"[~A-Za-z0-9_./@+-]+", text) else shlex.quote(str(path))
+
+
+def self_command():
+    if os.name == "nt":
+        return '& "%s" "%s"' % (sys.executable, Path(__file__).resolve())
+    return "python3 " + shown(Path(__file__).resolve())
+
+
+def foreground_command(org):
+    if os.name == "nt":
+        return '& "%s" "%s" --workspace %s' % (sys.executable, inbox_path(), org)
+    return "python3 %s --workspace %s" % (shown(inbox_path()), org)
+
+
+def run(argv, env=None, timeout=120):
+    """(exit code, stdout, stderr) of a command, which never raises: 127 when it
+    is missing, 124 when it ran past the timeout. Commands are resolved on PATH
+    first, so Windows finds .cmd and .bat shims too."""
+    argv = [str(a) for a in argv]
+    found = shutil.which(argv[0], path=(env or os.environ).get("PATH"))
+    if found:
+        argv[0] = found
+    try:
+        done = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="replace", env=env,
+            timeout=timeout)
+    except FileNotFoundError:
+        return 127, "", "%s: command not found" % argv[0]
+    except subprocess.TimeoutExpired:
+        return 124, "", "%s: timed out after %s s" % (argv[0], timeout)
+    except OSError as e:
+        return 126, "", "%s: %s" % (argv[0], e)
+    return done.returncode, done.stdout or "", done.stderr or ""
+
+
+def must(result, what):
+    code, out, err = result
+    if code != 0:
+        why = last_line(err) or last_line(out) or "código %d" % code
+        raise Stop("Não foi possível %s (%s)." % (what, why))
+    return result
+
+
+def write_atomic(path, data, mode=None):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".new")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    if mode is not None and os.name != "nt":
+        os.chmod(str(tmp), mode)
+    os.replace(str(tmp), str(path))
+
+
+def write_secret(path, data):
+    write_atomic(path, data, mode=0o600)
+
+
+def private_dir(path):
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(str(path), 0o700)
+
+
+def read_bytes(path):
+    try:
+        return Path(path).read_bytes()
+    except OSError:
+        return None
+
+
+def inbox_path():
+    return Path(os.environ.get("UNIO_RUNNER_INBOX") or HERE / "unio-inbox")
+
+
+def child_env(api=None):
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    if api:
+        env["UNIO_API_URL"] = api
+    return env
+
+
+class Profile:
+    def __init__(self, org, config, state, token):
+        self.org = org
+        self.config = Path(config)
+        self.state = Path(state)
+        self.token = Path(token)
+
+    @property
+    def env_file(self):
+        return self.config / "env"
+
+    @property
+    def repos_file(self):
+        return self.config / "repos.json"
+
+    @property
+    def log_file(self):
+        return self.state / "log.jsonl"
+
+
+def profile(org, env=None):
+    inbox = inbox_path()
+    if not inbox.is_file():
+        raise Stop("O unio-inbox não está em %s. Atualize o clone com %s update e rode este comando de novo."
+                   % (tilde(inbox), self_command()))
+    code, out, err = run([sys.executable, inbox, "--workspace", org, "--print-paths"],
+                         env=env or child_env(), timeout=60)
+    try:
+        data = json.loads(out)
+        paths = {key: data[key] for key in ("config", "state", "token")}
+        if not all(isinstance(v, str) and v for v in paths.values()):
+            paths = None
+    except (ValueError, KeyError, TypeError):
+        paths = None
+    if code != 0 or not paths:
+        why = last_line(err) or last_line(out)
+        raise Stop("O unio-inbox não informou as pastas do perfil %s%s." % (org, " (%s)" % why if why else ""))
+    return Profile(org, **paths)
+
+
+def profiles():
+    """The workspace ids that have a profile on this computer."""
+    # unio-inbox owns the path rule. Every profile sits in the same parent
+    # folder, so the paths of any valid id point at it.
+    root = profile("org_0").config.parent
+    try:
+        return sorted(p.name for p in root.iterdir() if p.is_dir() and ORG.match(p.name))
+    except OSError:
+        return []
+
+
+def read_env_file(path):
+    """KEY=VALUE lines, # comments, as unio-inbox reads the profile's env."""
+    values = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def set_env_value(path, key, value):
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    kept, done = [], False
+    for line in lines:
+        name = line.split("=", 1)[0].strip() if "=" in line and not line.strip().startswith("#") else None
+        if name == key:
+            if not done:
+                kept.append("%s=%s" % (key, value))
+                done = True
+            continue
+        kept.append(line)
+    if not done:
+        kept.append("%s=%s" % (key, value))
+    write_atomic(path, ("\n".join(kept) + "\n").encode("utf-8"), mode=0o600)
+
+
+def normalize_api(url):
+    url = (url or "").strip().rstrip("/")
+    if re.search(r"[^A-Za-z0-9.:/_-]", url) or not re.match(
+            r"^(https://[^/]+|http://(127\.0\.0\.1|localhost):[0-9]+)(/.*)?$", url):
+        raise Stop("O valor de --api não é um endereço da API do Unio (https://..., ou http://localhost:<porta>).", 2)
+    if re.match(r"^https?://[^/]+$", url):
+        url += "/v1"
+    return url
+
+
+def effective_api(prof, given=None):
+    """The API unio-inbox will call: --api, else the real environment, else the
+    profile's env file, else the default."""
+    api = given or os.environ.get("UNIO_API_URL") or read_env_file(prof.env_file).get("UNIO_API_URL")
+    return (api or DEFAULT_API).rstrip("/")
+
+
+def agents_me(api, token, timeout=15):
+    """(HTTP status, JSON body) of GET /agents/me; status 0 when nothing answered."""
+    req = urllib.request.Request(api + "/agents/me", headers={
+        "Authorization": "Bearer " + token, "Accept": "application/json", "User-Agent": "unio-runner"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as reply:
+            return reply.status, json.loads(reply.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, None
+
+
+def run_check(org, env):
+    code, out, err = run([sys.executable, inbox_path(), "--workspace", org, "--check"], env=env, timeout=90)
+    data = None
+    for text in (out.strip(), (out.strip().splitlines() or [""])[-1]):
+        try:
+            data = json.loads(text)
+            break
+        except ValueError:
+            continue
+    if not isinstance(data, dict):
+        data = {"ok": False, "problems": [last_line(err) or "unio-inbox --check printed no result"]}
+    data["ok"] = bool(data.get("ok")) and code == 0
+    return data
+
+
+def check_failure(org, check, api, token):
+    """Why --check refused, in the person's words: the token's own answer from
+    /agents/me tells a revoked token, agents switched off, another workspace's
+    token and a person's token apart; anything else shows the check's problems."""
+    lines = ["O Unio não aceitou este token para o serviço de respostas. Nada foi salvo."]
+    status, me = agents_me(api, token) if token else (None, None)
+    data = me.get("data") if isinstance(me, dict) else None
+    if status == 0:
+        lines.append("O Unio não respondeu: confira a rede e rode o comando de novo.")
+    elif status == 401:
+        lines.append("O token foi recusado: ele pode ter sido revogado ou ter vencido. Gere outro em %s." % AGENTS_PAGE)
+    elif status == 403:
+        lines.append("Os agentes estão desligados neste workspace. Um administrador pode ligá-los em %s." % AGENTS_PAGE)
+    elif status == 200 and isinstance(data, dict):
+        owner = data["workspace"].get("clerkId") if isinstance(data.get("workspace"), dict) else None
+        purpose = data["token"].get("purpose") if isinstance(data.get("token"), dict) else None
+        if isinstance(owner, str) and ORG.match(owner) and owner != org:
+            lines.append("Este token é do workspace %s, mas o comando é para o %s. Use o token e o comando da mesma página."
+                         % (owner, org))
+        elif purpose != "runner":
+            lines.append("Este não é um token do serviço de respostas. Gere um em %s, em Serviço de respostas."
+                         % AGENTS_PAGE)
+    if len(lines) == 1:
+        problems = [clean(p, 200) for p in check.get("problems") or [] if isinstance(p, str) and p.strip()]
+        if problems:
+            lines.append("O que a verificação encontrou:")
+            lines.extend("  - " + p for p in problems)
+        else:
+            lines.append("A verificação não disse o motivo. Rode o comando de novo em instantes.")
+    return "\n".join(lines)
+
+
+def prompt(text):
+    """One answer typed by the person; None at the end of input."""
+    try:
+        return input(text)
+    except EOFError:
+        say()
+        return None
+
+
+def prompt_secret(text):
+    return getpass.getpass(text)
+
+
+def stdin_is_tty():
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def ask_yes_no(text):
+    while True:
+        answer = prompt(text)
+        if answer is None:
+            return False
+        answer = answer.strip().lower()
+        if answer in ("", "n", "nao", "não"):
+            return False
+        if answer in ("s", "sim", "y", "yes"):
+            return True
+
+
+def parse_repos(text):
+    """(repositories as owner/name, entries that are not one) from a person's
+    answer: commas or spaces between them, a GitHub link or .git suffix allowed."""
+    names, bad = [], []
+    for part in re.split(r"[,\s]+", text.strip()):
+        if not part:
+            continue
+        name = re.sub(r"^(https?://)?(www\.)?github\.com/", "", part, flags=re.I)
+        name = re.sub(r"\.git$", "", name.strip("/"))
+        if valid_repo(name):
+            if name not in names:
+                names.append(name)
+        else:
+            bad.append(part)
+    return names, bad
+
+
+def valid_repo(name):
+    return bool(REPO.match(name)) and not any(p in (".", "..") for p in name.split("/"))
+
+
+def read_repos(path):
+    """repos.json as {team identifier: [owner/name, ...]}, or {} when absent or broken."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return normalize_repos(data) or {}
+
+
+def normalize_repos(data):
+    """The mapping with every value a list of valid names, or None when it is not one."""
+    if not isinstance(data, dict):
+        return None
+    mapping = {}
+    for team, names in data.items():
+        names = [names] if isinstance(names, str) else names
+        if not isinstance(team, str) or not team or not isinstance(names, list):
+            return None
+        if not all(isinstance(n, str) and valid_repo(n) for n in names):
+            return None
+        if names:
+            mapping[team] = list(dict.fromkeys(names))
+    return mapping
+
+
+def load_repos_json(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError:
+        raise Stop("Não foi possível ler o arquivo de --repos-json (%s)." % tilde(path), 2)
+    except ValueError:
+        data = None
+    mapping = normalize_repos(data)
+    if mapping is None:
+        raise Stop("O arquivo de --repos-json precisa ser um objeto JSON que liga o identificador de cada time "
+                   "a uma lista de repositórios dono/nome, como {\"ENG\": [\"octo-org/octo-repo\"]}.", 2)
+    return mapping
+
+
+def agent_teams(me):
+    data = me.get("data") if isinstance(me, dict) else None
+    teams = data.get("teams") if isinstance(data, dict) else None
+    found = []
+    for team in teams if isinstance(teams, list) else []:
+        if isinstance(team, dict) and isinstance(team.get("identifier"), str) and team["identifier"].strip():
+            found.append({"identifier": clean(team["identifier"], 40).strip(),
+                          "name": clean(team.get("name") or team["identifier"]).strip()})
+    return found
+
+
+def ask_repos(teams, current, agent):
+    mapping = {team: list(names) for team, names in current.items()}
+    if not teams:
+        say("O agente ainda não está em nenhum time, então não há repositórios a escolher.")
+        return mapping
+    say("%s lê uma cópia dos repositórios do GitHub ligados ao time de cada pedido, só para consultar." % agent)
+    say("Para cada time, diga quais repositórios ele pode ler, no formato dono/nome e separados por vírgula.")
+    for team in teams:
+        before = mapping.get(team["identifier"]) or []
+        hint = "Enter mantém %s; - para nenhum" % ", ".join(before) if before else "Enter para nenhum"
+        while True:
+            answer = prompt("Time %s (%s) [%s]: " % (team["name"], team["identifier"], hint))
+            if answer is None or not answer.strip():
+                chosen = before
+                break
+            if answer.strip() == "-":
+                chosen = []
+                break
+            names, bad = parse_repos(answer)
+            if bad:
+                say("%s: use o formato dono/nome, como em octo-org/octo-repo." % ", ".join(clean(b) for b in bad))
+                continue
+            chosen = names
+            break
+        if chosen:
+            mapping[team["identifier"]] = chosen
+        else:
+            mapping.pop(team["identifier"], None)
+    return mapping
+
+
+def claude_signed_in(claude):
+    """(signed in: True, False or None when the CLI cannot say, auth method).
+    `claude auth status --json` reads local state only: it starts no session."""
+    code, out, _ = run([claude, "auth", "status", "--json"], timeout=30)
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None, None
+    if not isinstance(data, dict) or not isinstance(data.get("loggedIn"), bool):
+        return None, None
+    return data["loggedIn"], data.get("authMethod")
+
+
+def check_computer():
+    if not shutil.which("git"):
+        raise Stop("O comando git não está no PATH. Instale o Git e rode este comando de novo.")
+    claude = shutil.which("claude")
+    if not claude:
+        raise Stop("O comando claude não está no PATH. Instale o Claude Code e rode este comando de novo.")
+    code, out, _ = run([claude, "--version"], timeout=60)
+    found = re.match(r"\s*([0-9]+\.[0-9][0-9.]*)", out)
+    if code != 0 or not found:
+        raise Stop("Não foi possível ler a versão do Claude Code (claude --version). "
+                   "Confira a instalação e rode este comando de novo.")
+    say("Claude Code %s encontrado." % found.group(1))
+    signed, method = claude_signed_in(claude)
+    if signed is False:
+        raise Stop("O Claude Code deste computador não está conectado a uma conta. "
+                   "Rode claude, entre com /login e rode este comando de novo.")
+    if signed is None:
+        say("Não foi possível confirmar que o Claude Code está conectado a uma conta (claude auth status). "
+            "O serviço só responde se estiver.")
+    elif method == "api_key" and os.environ.get("ANTHROPIC_API_KEY"):
+        say("O Claude Code está usando a ANTHROPIC_API_KEY deste terminal, que o serviço não recebe. "
+            "Entre com /login no claude para o serviço usar a sua conta.")
+    else:
+        say("Claude Code conectado a uma conta.")
+    if shutil.which("gh"):
+        say("GitHub CLI (gh) encontrado: repositórios privados usam o login dele.")
+    else:
+        say("O gh (GitHub CLI) não está no PATH, então o serviço só vai ler repositórios públicos. "
+            "Para ler privados, instale o gh, rode gh auth login e rode este comando de novo.")
+
+
+def service_kind(platform=None):
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        return "systemd"
+    if platform == "darwin":
+        return "launchd"
+    if platform == "win32":
+        return "schtasks"
+    return None
+
+
+def unit_name(org):
+    return "unio-runner@%s.service" % org
+
+
+def launchd_label(org):
+    return "so.unio.runner." + org
+
+
+def task_name(org):
+    return "\\Unio\\Runner " + org
+
+
+def template(name):
+    return string.Template((SERVICES / name).read_text(encoding="utf-8"))
+
+
+def plain(*values):
+    for value in values:
+        if re.search(r"[\x00-\x1f\x7f]", str(value)):
+            raise ValueError("a line break or control character in %r" % value)
+
+
+def systemd_quote(value, dollar=True):
+    """One argument of a unit's ExecStart (dollar=True) or Environment line."""
+    value = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if dollar:
+        value = value.replace("$", "$$")
+    return '"%s"' % value
+
+
+def render_systemd(python, inbox, path):
+    plain(python, inbox, path)
+    return template("unio-runner@.service").substitute(
+        python=systemd_quote(python), inbox=systemd_quote(inbox),
+        path=systemd_quote("PATH=" + path, dollar=False))
+
+
+def render_launchd(org, python, inbox, path, log):
+    plain(org, python, inbox, path, log)
+    return template("so.unio.runner.plist").substitute(
+        label=xml_escape(launchd_label(org)), org=xml_escape(org), python=xml_escape(str(python)),
+        inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)))
+
+
+def render_task(org, pythonw, inbox, user, workdir):
+    """The task's XML, to write as UTF-16 as Task Scheduler exports it.
+
+    RestartOnFailure covers a task that fails to start, but an exit code alone
+    may not count as a failure, so the logon trigger also repeats every
+    minute and IgnoreNew drops the repeat while the runner runs: after an exit
+    (75 once it has updated itself, or a crash) it starts again within a
+    minute. -X utf8 is PYTHONUTF8=1 without a console window for a wrapper."""
+    plain(org, pythonw, inbox, user, workdir)
+    if '"' in str(inbox):
+        raise ValueError("a quote in %r" % inbox)
+    arguments = '-X utf8 "%s" --workspace %s' % (inbox, org)
+    body = template("unio-runner-task.xml").substitute(
+        org=xml_escape(org), name=xml_escape(task_name(org)), user=xml_escape(user),
+        command=xml_escape(str(pythonw)), arguments=xml_escape(arguments), workdir=xml_escape(str(workdir)))
+    return '<?xml version="1.0" encoding="UTF-16"?>\n' + body
+
+
+def service_python(kind):
+    exe = sys.executable or shutil.which("python3") or "python3"
+    if kind == "schtasks":
+        windowless = Path(exe).with_name("pythonw.exe")
+        if windowless.exists():
+            return str(windowless)
+    return exe
+
+
+def service_path(environ=None):
+    """The PATH setup ran with, absolute folders only, for the service."""
+    folders = []
+    for part in (environ if environ is not None else os.environ).get("PATH", "").split(os.pathsep):
+        if part and os.path.isabs(part) and part not in folders:
+            folders.append(part)
+    return os.pathsep.join(folders) or "/usr/local/bin:/usr/bin:/bin"
+
+
+def task_user(environ=None):
+    environ = os.environ if environ is None else environ
+    user = environ.get("USERNAME") or getpass.getuser()
+    domain = environ.get("USERDOMAIN")
+    return "%s\\%s" % (domain, user) if domain else user
+
+
+class Systemd:
+    kind = "systemd"
+
+    def __init__(self, home=None, run_command=None):
+        self.home = Path(home) if home else Path.home()
+        self.run = run_command or run
+
+    @property
+    def unit_file(self):
+        return self.home / ".config" / "systemd" / "user" / "unio-runner@.service"
+
+    def name(self, org):
+        return unit_name(org)
+
+    def systemctl(self, *args):
+        return self.run(["systemctl", "--user"] + list(args))
+
+    def available(self):
+        return self.systemctl("show-environment")[0] == 0
+
+    def unavailable(self, org):
+        return ("O systemd deste computador não aceita serviços do usuário (systemctl --user). "
+                "Rode o serviço num terminal que fique aberto: %s" % foreground_command(org))
+
+    def install(self, org, prof, python, inbox, path):
+        write_atomic(self.unit_file, render_systemd(python, inbox, path).encode("utf-8"), mode=0o644)
+        must(self.systemctl("daemon-reload"), "recarregar o systemd do usuário")
+        must(self.systemctl("enable", unit_name(org)), "habilitar %s" % unit_name(org))
+        must(self.systemctl("restart", unit_name(org)), "ligar %s" % unit_name(org))
+
+    def hints(self, user=None):
+        user = user or getpass.getuser()
+        code, out, _ = self.run(["loginctl", "show-user", user, "--property=Linger", "--value"])
+        if code == 0 and out.strip() == "no":
+            return ["Para o serviço seguir ligado quando você sair da sessão, e ligar sozinho quando o "
+                    "computador reiniciar, rode: loginctl enable-linger %s" % user]
+        return []
+
+    def start(self, org):
+        must(self.systemctl("enable", "--now", unit_name(org)), "ligar %s" % unit_name(org))
+
+    def stop(self, org):
+        must(self.systemctl("disable", "--now", unit_name(org)), "parar %s" % unit_name(org))
+
+    def restart(self, org):
+        must(self.systemctl("restart", unit_name(org)), "reiniciar %s" % unit_name(org))
+
+    def remove(self, org, last):
+        self.systemctl("disable", "--now", unit_name(org))
+        self.systemctl("reset-failed", unit_name(org))
+        if last:
+            try:
+                self.unit_file.unlink()
+            except FileNotFoundError:
+                pass
+            self.systemctl("daemon-reload")
+
+    def state(self, org):
+        if not self.unit_file.exists():
+            return "absent"
+        _, out, _ = self.systemctl("is-active", unit_name(org))
+        word = (out.strip().splitlines() or [""])[0].strip()
+        return {"active": "running", "activating": "running", "reloading": "running", "failed": "failed",
+                "inactive": "stopped", "deactivating": "stopped"}.get(word, "unknown")
+
+    def output_hint(self, org, prof):
+        return "journalctl --user -u %s" % unit_name(org)
+
+
+class Launchd:
+    kind = "launchd"
+
+    def __init__(self, home=None, run_command=None, uid=None):
+        self.home = Path(home) if home else Path.home()
+        self.run = run_command or run
+        self.uid = uid if uid is not None else getattr(os, "getuid", lambda: 0)()
+
+    def plist(self, org):
+        return self.home / "Library" / "LaunchAgents" / (launchd_label(org) + ".plist")
+
+    @property
+    def domain(self):
+        return "gui/%d" % self.uid
+
+    def target(self, org):
+        return "%s/%s" % (self.domain, launchd_label(org))
+
+    def name(self, org):
+        return launchd_label(org)
+
+    def available(self):
+        return True
+
+    def install(self, org, prof, python, inbox, path):
+        plist = self.plist(org)
+        log = prof.state / "service.log"
+        write_atomic(plist, render_launchd(org, python, inbox, path, log).encode("utf-8"), mode=0o644)
+        must(self.run(["plutil", "-lint", plist]), "validar %s" % tilde(plist))
+        self.run(["launchctl", "bootout", self.target(org)])
+        # A stop leaves the service disabled, and launchd refuses to load it so.
+        self.run(["launchctl", "enable", self.target(org)])
+        code, out, err = self.run(["launchctl", "bootstrap", self.domain, plist])
+        if code != 0:
+            raise Stop("Não foi possível carregar o serviço no launchd (%s). Rode este comando no Terminal do "
+                       "próprio Mac, com a sua sessão aberta." % (last_line(err) or last_line(out) or code))
+
+    def hints(self, user=None):
+        return []
+
+    def start(self, org):
+        self.run(["launchctl", "enable", self.target(org)])
+        if self.run(["launchctl", "bootstrap", self.domain, self.plist(org)])[0] != 0:
+            must(self.run(["launchctl", "kickstart", self.target(org)]), "ligar %s" % launchd_label(org))
+
+    def stop(self, org):
+        self.run(["launchctl", "disable", self.target(org)])
+        self.run(["launchctl", "bootout", self.target(org)])
+
+    def restart(self, org):
+        must(self.run(["launchctl", "kickstart", "-k", self.target(org)]), "reiniciar %s" % launchd_label(org))
+
+    def remove(self, org, last):
+        self.run(["launchctl", "bootout", self.target(org)])
+        self.run(["launchctl", "enable", self.target(org)])
+        try:
+            self.plist(org).unlink()
+        except FileNotFoundError:
+            pass
+
+    def state(self, org):
+        if not self.plist(org).exists():
+            return "absent"
+        code, out, _ = self.run(["launchctl", "print", self.target(org)])
+        if code != 0:
+            return "stopped"
+        return "running" if re.search(r"^\s*state = running\s*$", out, re.M) else "stopped"
+
+    def output_hint(self, org, prof):
+        return tilde(prof.state / "service.log")
+
+
+class Tasks:
+    kind = "schtasks"
+
+    def __init__(self, run_command=None, user=None):
+        self.run = run_command or run
+        self.user = user
+
+    def name(self, org):
+        return task_name(org)
+
+    def available(self):
+        return True
+
+    def install(self, org, prof, python, inbox, path):
+        xml = prof.state / "task.xml"
+        text = render_task(org, python, inbox, self.user or task_user(), prof.state)
+        write_atomic(xml, text.encode("utf-16"), mode=0o600)
+        must(self.run(["schtasks", "/Create", "/TN", task_name(org), "/XML", xml, "/F"]),
+             "criar a tarefa agendada %s" % task_name(org))
+        must(self.run(["schtasks", "/Run", "/TN", task_name(org)]), "iniciar a tarefa %s" % task_name(org))
+
+    def hints(self, user=None):
+        return []
+
+    def start(self, org):
+        must(self.run(["schtasks", "/Change", "/TN", task_name(org), "/ENABLE"]), "ativar %s" % task_name(org))
+        must(self.run(["schtasks", "/Run", "/TN", task_name(org)]), "iniciar %s" % task_name(org))
+
+    def stop(self, org):
+        # The trigger repeats every minute, so only a disabled task stays stopped.
+        must(self.run(["schtasks", "/Change", "/TN", task_name(org), "/DISABLE"]), "desativar %s" % task_name(org))
+        self.run(["schtasks", "/End", "/TN", task_name(org)])
+
+    def restart(self, org):
+        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        must(self.run(["schtasks", "/Run", "/TN", task_name(org)]), "iniciar %s" % task_name(org))
+
+    def remove(self, org, last):
+        self.run(["schtasks", "/End", "/TN", task_name(org)])
+        self.run(["schtasks", "/Delete", "/TN", task_name(org), "/F"])
+
+    def state(self, org):
+        # The state as a number: schtasks prints it in the system's language.
+        script = ("$t = Get-ScheduledTask -TaskPath '\\Unio\\' -TaskName 'Runner %s' -ErrorAction SilentlyContinue; "
+                  "if ($t) { [int]$t.State } else { -1 }" % org)
+        code, out, _ = self.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+        number = out.strip()
+        if code == 0 and re.fullmatch(r"-?[0-9]+", number):
+            return {"-1": "absent", "1": "stopped", "2": "running", "3": "stopped", "4": "running"}.get(number, "unknown")
+        code, _, _ = self.run(["schtasks", "/Query", "/TN", task_name(org)])
+        return "unknown" if code == 0 else "absent"
+
+    def output_hint(self, org, prof):
+        return None
+
+
+def service(kind=None, **kwargs):
+    kind = kind or service_kind()
+    classes = {"systemd": Systemd, "launchd": Launchd, "schtasks": Tasks}
+    return classes[kind](**kwargs) if kind in classes else None
+
+
+class LogTail:
+    """New entries of the runner's log.jsonl from a mark on, across a rotation."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.offset = 0
+
+    def mark(self):
+        try:
+            self.offset = self.path.stat().st_size
+        except OSError:
+            self.offset = 0
+
+    def entries(self):
+        try:
+            if self.path.stat().st_size < self.offset:
+                self.offset = 0
+            with open(self.path, "rb") as f:
+                f.seek(self.offset)
+                data = f.read()
+        except OSError:
+            return []
+        end = data.rfind(b"\n")
+        if end < 0:
+            return []
+        self.offset += end + 1
+        return [parse_entry(line) for line in data[:end].splitlines() if line.strip()]
+
+
+def parse_entry(line):
+    text = line.decode("utf-8", "replace") if isinstance(line, bytes) else line
+    try:
+        entry = json.loads(text)
+    except ValueError:
+        entry = None
+    return entry if isinstance(entry, dict) else {"raw": text}
+
+
+def started(entry):
+    event = str(entry.get("event") or "")
+    return event == "start" or event.startswith("presence")
+
+
+def wait_for_start(tail, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        for entry in tail.entries():
+            if started(entry):
+                return entry
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(1)
+
+
+def read_entries(path, limit=None):
+    try:
+        with open(path, "rb") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    entries = [parse_entry(line) for line in lines if line.strip()]
+    return entries[-limit:] if limit else entries
+
+
+def format_entry(entry):
+    if "raw" in entry and len(entry) == 1:
+        return clean(entry["raw"], 500)
+    parts = [str(entry.get("at") or "?"), str(entry.get("event") or "?")]
+    for key, value in entry.items():
+        if key not in ("at", "event"):
+            parts.append("%s=%s" % (key, value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)))
+    return clean(" ".join(parts), 500)
+
+
+def running_version(prof):
+    for entry in reversed(read_entries(prof.log_file)):
+        if entry.get("event") == "start" and entry.get("version"):
+            return clean(entry["version"], 20)
+    return None
+
+
+def autoupdate(prof):
+    value = os.environ.get("UNIO_RUNNER_AUTOUPDATE") or read_env_file(prof.env_file).get("UNIO_RUNNER_AUTOUPDATE")
+    if (value or "").strip().lower() == "off":
+        return "desligada (UNIO_RUNNER_AUTOUPDATE=off)"
+    if not (CLONE / ".git").exists():
+        return "desligada (%s não é um clone git)" % tilde(CLONE)
+    return "ligada"
+
+
+def workspace_of(opts):
+    org = opts.get("--workspace")
+    if not isinstance(org, str) or not ORG.match(org):
+        raise Stop("O valor de --workspace não é um workspace do Unio (org_ seguido de letras e números). "
+                   "Copie de novo o comando da página Agentes.", 2)
+    return org
+
+
+def read_token(opts, prof, old):
+    """The new token, or None to keep the one saved."""
+    if opts.get("--token-stdin"):
+        return sys.stdin.read().strip()
+    if old is not None and (opts.get("--yes") or not ask_yes_no(
+            "Já existe um token do serviço para %s neste computador. Trocar por outro? [s/N] " % prof.org)):
+        return None
+    if not stdin_is_tty():
+        raise Stop("Este comando precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin. "
+                   "Nada foi salvo.")
+    try:
+        return prompt_secret("Cole o token do serviço de respostas: ").strip()
+    except EOFError:
+        return ""
+
+
+def setup(opts):
+    org = workspace_of(opts)
+    api = normalize_api(opts["--api"]) if "--api" in opts else None
+    if opts.get("--token-stdin") and not (opts.get("--repos-json") or opts.get("--yes")):
+        raise Stop("Com --token-stdin, passe também --repos-json ou --yes: a entrada padrão já levou o token.", 2)
+    if os.environ.get("CLAUDECODE"):
+        raise Stop("Rode este comando em outro terminal, fora do Claude Code: aqui, o que você digita pode entrar "
+                   "na conversa.")
+    given_repos = load_repos_json(opts["--repos-json"]) if opts.get("--repos-json") else None
+    kind = None if opts.get("--no-service") else service_kind()
+    if not opts.get("--no-service") and kind is None:
+        raise Stop("O unio-runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
+                   "o serviço rodando num terminal: %s" % foreground_command(org))
+
+    check_computer()
+    env = child_env(api)
+    prof = profile(org, env)
+    private_dir(prof.config)
+    prof.state.mkdir(parents=True, exist_ok=True)
+
+    old = read_bytes(prof.token)
+    secret = read_token(opts, prof, old)
+    if secret is not None and not TOKEN.match(secret):
+        raise Stop("Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo.")
+    token = secret if secret is not None else old.decode("utf-8", "replace").strip()
+    confirmed = False
+    try:
+        if secret is not None:
+            try:
+                write_secret(prof.token, secret.encode("utf-8"))
+            except OSError:
+                raise Stop("Não foi possível gravar %s. Nada foi salvo." % tilde(prof.token))
+        say("Conferindo o token com o Unio.")
+        check = run_check(org, env)
+        if not check["ok"]:
+            raise Stop(check_failure(org, check, effective_api(prof, api), token))
+        confirmed = True
+    finally:
+        if secret is not None and not confirmed:
+            try:
+                if old is None:
+                    prof.token.unlink()
+                else:
+                    write_secret(prof.token, old)
+            except OSError:
+                pass
+
+    workspace = check.get("workspace") if isinstance(check.get("workspace"), dict) else {}
+    agent = check.get("agent") if isinstance(check.get("agent"), dict) else {}
+    name = clean(workspace.get("name") or org).strip() or org
+    agent_name = clean(agent.get("name") or "O agente").strip() or "O agente"
+    say("Token aceito: %s, no workspace %s. Ele fica em %s." % (agent_name, name, tilde(prof.token)))
+    if api:
+        set_env_value(prof.env_file, "UNIO_API_URL", api)
+
+    current = read_repos(prof.repos_file)
+    if given_repos is not None:
+        mapping = given_repos
+    elif opts.get("--yes"):
+        mapping = current
+    else:
+        status, me = agents_me(effective_api(prof, api), token)
+        if status == 200:
+            mapping = ask_repos(agent_teams(me), current, agent_name)
+        else:
+            say("Não foi possível ler os times do agente agora; os repositórios ficam como estavam. "
+                "Rode setup de novo para escolhê-los.")
+            mapping = current
+    write_atomic(prof.repos_file, (json.dumps(mapping, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+                 mode=0o600)
+    count = sum(len(v) for v in mapping.values())
+    say("Repositórios salvos em %s (%d)." % (tilde(prof.repos_file), count) if count else
+        "Nenhum repositório ligado; a lista fica em %s." % tilde(prof.repos_file))
+
+    if opts.get("--no-service"):
+        say("Para rodar o serviço num terminal que fique aberto: %s" % foreground_command(org))
+        say("Perfil do serviço de respostas pronto para %s." % name)
+        return 0
+
+    svc = service(kind)
+    if not svc.available():
+        raise Stop(svc.unavailable(org))
+    tail = LogTail(prof.log_file)
+    tail.mark()
+    say("Instalando o serviço %s." % svc.name(org))
+    svc.install(org, prof, service_python(kind), inbox_path(), service_path())
+    for line in svc.hints():
+        say(line)
+    say("Esperando o serviço dar sinal (até %d s)." % START_WAIT)
+    if not wait_for_start(tail, START_WAIT):
+        entries = read_entries(prof.log_file, 1)
+        raise Stop("O serviço foi instalado, mas não deu sinal em %d s.%s Veja o registro com: %s logs --workspace %s"
+                   % (START_WAIT, " Última linha: %s." % format_entry(entries[-1]) if entries else "",
+                      self_command(), org))
+    say("Para ver como ele está: %s status --workspace %s" % (self_command(), org))
+    say("Serviço de respostas ligado para %s." % name)
+    return 0
+
+
+def status(opts):
+    orgs = [workspace_of(opts)] if "--workspace" in opts else profiles()
+    if not orgs:
+        say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
+            "página %s, no Unio." % AGENTS_PAGE)
+        return 0
+    svc = service()
+    for org in orgs:
+        prof = profile(org)
+        state = svc.state(org) if svc else "unknown"
+        entries = read_entries(prof.log_file, 1)
+        say("%s: %s" % (org, STATE_WORDS[state]))
+        say("  versão: %s" % (running_version(prof) or "ainda não começou"))
+        say("  atualização automática: %s" % autoupdate(prof))
+        say("  última linha do registro: %s" % (format_entry(entries[-1]) if entries else "nenhuma"))
+    return 0
+
+
+def installed_service(org):
+    svc = service()
+    if svc is None:
+        raise Stop("O unio-runner não sabe cuidar de serviços neste sistema.")
+    if svc.state(org) == "absent":
+        raise Stop("Não há serviço instalado para %s. Rode primeiro: %s setup --workspace %s"
+                   % (org, self_command(), org))
+    return svc
+
+
+def start(opts):
+    org = workspace_of(opts)
+    installed_service(org).start(org)
+    say("Serviço de %s ligado." % org)
+    return 0
+
+
+def stop(opts):
+    org = workspace_of(opts)
+    installed_service(org).stop(org)
+    say("Serviço de %s parado. Ele só volta a ligar com: %s start --workspace %s" % (org, self_command(), org))
+    return 0
+
+
+def restart(opts):
+    org = workspace_of(opts)
+    installed_service(org).restart(org)
+    say("Serviço de %s reiniciado." % org)
+    return 0
+
+
+def logs(opts):
+    org = workspace_of(opts)
+    text = opts.get("--lines", "40")
+    if not re.fullmatch(r"[0-9]{1,5}", str(text)) or int(text) < 1:
+        raise Stop("O valor de --lines precisa ser um número de 1 a 99999.", 2)
+    prof = profile(org)
+    entries = read_entries(prof.log_file, int(text))
+    if not entries:
+        say("O registro de %s ainda está vazio (%s)." % (org, tilde(prof.log_file)))
+    for entry in entries:
+        say(format_entry(entry))
+    svc = service()
+    hint = svc.output_hint(org, prof) if svc else None
+    if hint and not opts.get("--follow"):
+        say("A saída do próprio serviço fica em: %s" % hint)
+    if opts.get("--follow"):
+        tail = LogTail(prof.log_file)
+        tail.mark()
+        try:
+            while True:
+                for entry in tail.entries():
+                    say(format_entry(entry))
+                time.sleep(1)
+        except KeyboardInterrupt:
+            say()
+    return 0
+
+
+def uninstall(opts):
+    org = workspace_of(opts)
+    prof = profile(org)
+    svc = service()
+    if svc and svc.state(org) != "absent":
+        others = [o for o in profiles() if o != org and profile(o).token.exists()]
+        svc.remove(org, last=not others)
+        say("Serviço de %s removido." % org)
+    else:
+        say("Não havia serviço instalado para %s." % org)
+    if prof.token.exists():
+        try:
+            prof.token.unlink()
+        except OSError:
+            raise Stop("Não foi possível apagar %s." % tilde(prof.token))
+        say("Token apagado de %s. Ele continua valendo no Unio até ser revogado: revogue-o em %s, que este "
+            "comando não consegue." % (tilde(prof.token), AGENTS_PAGE))
+    else:
+        say("Não havia token do serviço salvo para %s neste computador." % org)
+    say("As configurações e o registro ficam em %s e %s; apague essas pastas se não precisar mais delas."
+        % (tilde(prof.config), tilde(prof.state)))
+    return 0
+
+
+def clone_version():
+    try:
+        return (CLONE / "runner" / "VERSION").read_text(encoding="utf-8").strip()[:20] or None
+    except OSError:
+        return None
+
+
+def update(opts):
+    if not (CLONE / ".git").exists():
+        raise Stop("%s não é um clone git; atualize-o à mão." % tilde(CLONE))
+    if not shutil.which("git"):
+        raise Stop("O comando git não está no PATH. Instale o Git e rode este comando de novo.")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    before = run(["git", "-C", CLONE, "rev-parse", "--short", "HEAD"], env=env)[1].strip()
+    version = clone_version()
+    code, out, err = run(["git", "-C", CLONE, "pull", "--quiet", "--ff-only"], env=env, timeout=300)
+    if code != 0:
+        raise Stop("Não foi possível atualizar %s com git pull --ff-only (%s)."
+                   % (tilde(CLONE), last_line(err) or last_line(out) or code))
+    after = run(["git", "-C", CLONE, "rev-parse", "--short", "HEAD"], env=env)[1].strip()
+    if after == before:
+        say("O clone em %s já estava atualizado." % tilde(CLONE))
+    else:
+        say("Clone atualizado em %s: %s para %s." % (tilde(CLONE), version or before, clone_version() or after))
+    svc = service()
+    for org in profiles() if svc else []:
+        state = svc.state(org)
+        if state in ("running", "failed"):
+            try:
+                svc.restart(org)
+                say("%s: reiniciado." % org)
+            except Stop as e:
+                say("%s: %s" % (org, e.message))
+        elif state == "stopped":
+            say("%s: parado, continua parado." % org)
+    return 0
+
+
+COMMANDS = {"setup": setup, "status": status, "start": start, "stop": stop, "restart": restart, "logs": logs,
+            "uninstall": uninstall, "update": update}
+
+
+def parse_args(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        return "help", {}
+    command = argv[0]
+    if command not in OPTIONS:
+        raise Stop("Comando desconhecido: %s. Rode unio-runner --help para ver os comandos." % clean(command, 40), 2)
+    allowed = OPTIONS[command]
+    opts = {}
+    rest = list(argv[1:])
+    while rest:
+        arg = rest.pop(0)
+        if arg in ("-h", "--help"):
+            return "help", {}
+        name, eq, value = arg.partition("=")
+        if name not in allowed:
+            raise Stop("Opção desconhecida para %s: %s." % (command, clean(name, 40)), 2)
+        if allowed[name]:
+            if not eq:
+                if not rest:
+                    raise Stop("Falta o valor de %s." % name, 2)
+                value = rest.pop(0)
+            opts[name] = value
+        elif eq:
+            raise Stop("%s não leva valor." % name, 2)
+        else:
+            opts[name] = True
+    if command in NEEDS_WORKSPACE and "--workspace" not in opts:
+        raise Stop("Falta --workspace org_..., o workspace do serviço.", 2)
+    return command, opts
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    try:
+        command, opts = parse_args(sys.argv[1:] if argv is None else list(argv))
+        if command == "help":
+            sys.stdout.write(USAGE)
+            return 0
+        return COMMANDS[command](opts)
+    except Stop as e:
+        say(e.message)
+        return e.code
+    except KeyboardInterrupt:
+        say()
+        say("Cancelado.")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
