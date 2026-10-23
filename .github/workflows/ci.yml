@@ -184,6 +184,20 @@ jobs:
             if ($out -notmatch 'org_ seguido de letras') { throw "$shell did not run install.ps1" }
           }
 
+      - name: Run install.ps1's plugin mode through Git's sh
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The clone install.ps1 keeps, made from this checkout, so install.sh
+          # is this branch's. It stops at the hidden prompt: no terminal here.
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'localappdata'
+          git clone --quiet . (Join-Path $env:LOCALAPPDATA 'unio\agent')
+          foreach ($shell in 'powershell', 'pwsh') {
+            $out = & $shell -NoProfile -NonInteractive -Command '& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Workspace org_ci -Renew' 2>&1 | Out-String
+            Write-Host "${shell}: $out"
+            if ($out -notmatch 'precisa de um terminal') { throw "$shell did not reach install.sh through Git's sh" }
+          }
+
       - name: Run bin/unio.cmd from PowerShell
         if: runner.os == 'Windows'
         shell: pwsh

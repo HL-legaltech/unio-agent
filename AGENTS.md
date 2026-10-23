@@ -11,14 +11,15 @@ is public: every file, commit and pull request here is visible to anyone.
   also serve Codex from a clone of this repository.
 - `install.sh`: the installer the Agente de código page in Unio runs with
   `curl … | sh`. It installs the plugin (or, for Codex, the clone) and stores
-  a token per workspace.
+  a token per workspace. On Windows the page runs `install.ps1`, which checks
+  Git for Windows and Claude Code, then runs `install.sh` with Git's `sh`.
 - `tests/`: the plugin's scripts and the installer, run against a fake Unio
   API in a throwaway HOME.
 - `runner/`: the answering service (`unio-inbox`) and its setup
   (`unio-runner`), which run on the computer of a person in the workspace;
   see [runner/README.md](runner/README.md). It is not part of the plugin, so
   a change there raises no plugin version. `install.sh --runner` and
-  `install.ps1` (Windows) install it.
+  `install.ps1 -Runner` (Windows) install it.
 - `bin/unio` (POSIX `sh`) and `bin/unio.cmd` (Windows): the `unio` command
   people type, which runs from the clone it sits in. `unio runner …` is
   `runner/unio-runner`; text people read says `unio runner`, never

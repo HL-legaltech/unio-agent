@@ -13,17 +13,25 @@ The plugin carries four things:
 
 - A Unio workspace with agents turned on, where you have the developer role. You generate your own token in Unio, under Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>).
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
-- Linux, WSL or macOS, which bring the `sh`, `curl` and `ps` the plugin uses (and `lsof`, on macOS). On Windows, [Git for Windows](https://git-scm.com/downloads/win): Claude Code needs git there to install a plugin from GitHub, and Git for Windows brings Git Bash, where Claude Code runs the plugin's scripts. Run the commands below in a Git Bash terminal.
+- Linux, WSL or macOS, which bring the `sh`, `curl` and `ps` the plugin uses (and `lsof`, on macOS). On Windows, [Git for Windows](https://git-scm.com/downloads/win): Claude Code needs git there to install a plugin from GitHub, and Git for Windows brings Git Bash, where Claude Code runs the plugin's scripts. Install from PowerShell with the Windows command below; the `sh` commands in this file run in Git Bash.
 
 <a id="install"></a>
 
 ## Install with one command
 
-In a terminal of your own, outside Claude Code (on Windows, Git Bash), run:
+In a terminal of your own, outside Claude Code, run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1)))
+```
+
+[install.ps1](install.ps1) checks Git for Windows and Claude Code, then runs the same `install.sh` with Git's `sh`. It takes `-Workspace org_…`, `-Client codex`, `-Renew` and `-Browser` for the flags below.
 
 It installs the plugin, then prints a link to Unio and a code, and opens your browser when it can. Sign in, check that the page shows the same code, pick the workspace and approve. The token goes from Unio straight into `~/.config/unio/workspaces/<workspace>/token`: it never appears on screen, in a clipboard, in the chat or in the shell history. Over SSH, open the link on any device. `--browser` asks for this flow explicitly, for example with `--renew`.
 
@@ -46,7 +54,7 @@ Before it connects, it also keeps a clone of this repository, the home of the [`
 
 The first workspace on a computer serves every folder. For another one, it asks whether that workspace serves only the folder you ran it in (the default) or the whole computer, except the folders tied to another workspace. Each line it prints is in Portuguese, and the last one is `Conectado ao Unio.` when everything worked.
 
-To read the script before running it, open [install.sh](install.sh). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
+To read the script before running it, open [install.sh](install.sh) (and [install.ps1](install.ps1), on Windows). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
 
 ## Install in Claude Code by hand
 
