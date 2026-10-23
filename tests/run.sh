@@ -86,12 +86,13 @@ JSON
   *) echo "unexpected claude call: \$*" >&2; exit 64 ;;
 esac
 EOF
-# git, only for the installer's Codex and --runner runs: a clone copies this
-# plugin and bin/, and the stub runner/ once a check made one.
+# git, for the installer's clone: a clone copies this plugin and bin/, and
+# the stub runner/ once a check made one. It fails while $tmp/git-fails exists.
 mkdir -p "$tmp/git-bin"
 cat > "$tmp/git-bin/git" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$tmp/git-argv.log"
+[ ! -e "$tmp/git-fails" ] || { echo "fatal: unable to access GitHub" >&2; exit 128; }
 case \$1 in
   clone) for a; do dest=\$a; done; mkdir -p "\$dest/.git" "\$dest/plugins" && cp -R "$plugin" "\$dest/plugins/unio" &&
     cp -R "$here/../bin" "\$dest/bin" &&
@@ -527,7 +528,9 @@ types() {
 install_in() {
   dir=$1
   shift
-  (cd "$dir" && python3 -I "$here/pty_run.py" "$installer" "$tmp/answers" -- "$shell" -s -- "$@") > "$tmp/transcript"
+  # Every install keeps a clone now, so every run gets the fake git: a real
+  # one would reach GitHub.
+  (cd "$dir" && PATH=$tmp/git-bin:$PATH python3 -I "$here/pty_run.py" "$installer" "$tmp/answers" -- "$shell" -s -- "$@") > "$tmp/transcript"
   result=$?
   cat "$tmp/transcript" >> "$tmp/transcripts.log"
   cat "$tmp/transcript"
@@ -581,6 +584,14 @@ code=$?
 [ "$code" -eq 1 ] && has_text "$out" "Não foi possível instalar o plugin do Unio (Failed to add marketplace: network unreachable)" &&
   lacks "$out" "Cole o token" && [ ! -e "$conf/workspaces" ]; check "a failed plugin install stops the installer with claude's reason"
 rm -f "$tmp/claude-fails"
+home clone-fails
+types "$good"
+touch "$tmp/git-fails"
+out=$(install_in "$tmp/repo" --workspace org_test)
+code=$?
+rm -f "$tmp/git-fails"
+[ "$code" -eq 0 ] && [ "$(last_line "$out")" = "Conectado ao Unio." ] && has_text "$out" "Não foi possível baixar o Unio" &&
+  [ ! -e "$HOME/.local/bin/unio" ]; check "a failed clone still installs and connects the plugin, without the unio command"
 
 home fresh
 types "$good"
@@ -588,6 +599,8 @@ before=$(calls)
 out=$(install_in "$tmp/repo" --workspace org_test)
 code=$?
 [ "$code" -eq 0 ] && [ "$(last_line "$out")" = "Conectado ao Unio." ]; check "a first install ends with Conectado ao Unio."
+[ -f "$HOME/.local/share/unio/agent/bin/unio" ] && [ "$(readlink "$HOME/.local/bin/unio")" = "$HOME/.local/share/unio/agent/bin/unio" ] &&
+  has_text "$out" "Comando unio ligado em ~/.local/bin/unio."; check "a plugin install keeps a clone and links the unio command to it"
 has_text "$out" "Claude Code 2.1.308 encontrado." && has_text "$out" "Plugin do Unio instalado." &&
   grep -qx 'plugin install unio --marketplace HL-legaltech/unio-agent' "$tmp/claude-argv.log"; check "the installer checks Claude Code and installs the plugin from the marketplace"
 python3 -I -c '
@@ -732,7 +745,7 @@ has "$out" "Bearer $good" && has "$out" "codex/$version"; check "Codex: the help
 printf '\n[mcp_servers.unio]\n%s\n' "$helper_line" >> "$HOME/.codex/config.toml"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)
 grep -qx "\-C $HOME/.local/share/unio/agent pull --quiet --ff-only" "$tmp/git-argv.log" && has_text "$out" "A skill do Unio já está em ~/.agents/skills/unio." &&
-  has_text "$out" "O Codex já lê o token pelo helper do Unio" && lacks "$out" "Acrescente"; check "Codex, run again: the clone is pulled, the link and the config are kept"
+  has_text "$out" "O Codex já lê o token pelo helper do Unio" && lacks "$out" "Acrescente este bloco"; check "Codex, run again: the clone is pulled, the link and the config are kept"
 home codex-taken
 mkdir -p "$HOME/.local/share/unio/agent"
 out=$(PATH=$tmp/git-bin:$PATH install_in "$tmp/repo" --workspace org_test --client codex)

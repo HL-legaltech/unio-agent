@@ -22,7 +22,9 @@ is public: every file, commit and pull request here is visible to anyone.
 - `bin/unio` (POSIX `sh`) and `bin/unio.cmd` (Windows): the `unio` command
   people type, which runs from the clone it sits in. `unio runner …` is
   `runner/unio-runner`; text people read says `unio runner`, never
-  `unio-runner`. The `--runner` installs put it on the PATH.
+  `unio-runner`. Every install keeps the clone and links the command as
+  `~/.local/bin/unio`; on Windows only `install.ps1` puts it on the PATH,
+  by adding the clone's `bin` folder to the user `Path`.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.
@@ -135,6 +137,9 @@ No AI attribution. Stage named paths only.
 - `bin/unio.cmd` runs every command but `runner` as `bin/unio`, through Git
   for Windows' `sh.exe`, which is not on the PATH: it finds it from
   `where git`.
+- On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
+  `install.sh` keeps using a clone already at `~/.local/share/unio/agent`,
+  since a Codex config names it.
 - `bin/unio.cmd` stays ASCII with CRLF line ends: cmd reads it in the
   console's code page, and can miss a label in a file with bare LFs. The
   help's accents reach it only as data, under code page 65001.

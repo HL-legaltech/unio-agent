@@ -14,7 +14,9 @@
 #   --workspace  The workspace the token belongs to (its Clerk organization id),
 #                for a token pasted at a hidden prompt.
 #   --client     claude-code (default) installs the plugin; codex clones this
-#                repository and links the skill.
+#                repository and links the skill. Either way the clone stays,
+#                as the home of the unio command, which ~/.local/bin/unio
+#                links to.
 #   --renew      Only replaces the token: nothing is installed.
 #   --browser    Asks Unio for the token and waits while you approve it in the
 #                browser, where you also pick the workspace. The default
@@ -44,6 +46,13 @@ esac
 # plugin.json's minimumClaudeCode: the first release with install --marketplace.
 floor=2.1.292
 clone=$HOME/.local/share/unio/agent
+# On Windows the clone lives where install.ps1 puts it, so one clone serves
+# the unio command from either installer. A clone already at the old place
+# stays in use, since a Codex config names its helper.
+if [ "$os" = windows ] && [ ! -d "$clone/.git" ] && [ -n "${LOCALAPPDATA:-}" ] &&
+  w=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null) && [ -n "$w" ]; then
+  clone=$w/unio/agent
+fi
 
 say() { printf '%s\n' "$1"; }
 
@@ -377,6 +386,13 @@ link_command() {
   dir=$HOME/.local/bin
   link=$dir/unio
   [ -f "$target" ] || return 0
+  # Git Bash's ln -s copies the file, and a copy finds no clone beside it.
+  # install.ps1 puts the clone's bin folder on the user Path instead.
+  if [ "$os" = windows ]; then
+    command -v unio >/dev/null 2>&1 ||
+      say "O comando unio está em $(cygpath -w "$clone/bin")\\unio.cmd. Para usá-lo em qualquer terminal, instale pelo PowerShell, com o comando para Windows da página Agente de código: ele põe essa pasta no Path."
+    return 0
+  fi
   if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
     say "O comando unio já está em $(tilde "$link")."
   elif [ -e "$link" ] || [ -L "$link" ]; then
@@ -777,7 +793,11 @@ main() {
       need_claude || return 1
       install_plugin || return 1
       auto_update
+      # The unio command lives in a clone of this repository. Without it the
+      # plugin still works, so a failed clone stops nothing.
+      get_clone || true
     fi
+    link_command
   fi
 
   if [ -n "$browser" ]; then

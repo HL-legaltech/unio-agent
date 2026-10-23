@@ -42,6 +42,8 @@ The page fills in `--workspace`, the workspace the token belongs to. `--client c
 5. asks Unio whether it accepts the token, and tells a network failure apart from a refused token and from another workspace's token;
 6. only then saves it to `~/.config/unio/workspaces/<workspace>/token`, readable by you alone.
 
+Before it connects, it also keeps a clone of this repository, the home of the [`unio` command](#the-unio-command), and puts that command on your PATH.
+
 The first workspace on a computer serves every folder. For another one, it asks whether that workspace serves only the folder you ran it in (the default) or the whole computer, except the folders tied to another workspace. Each line it prints is in Portuguese, and the last one is `Conectado ao Unio.` when everything worked.
 
 To read the script before running it, open [install.sh](install.sh). It runs the same from a downloaded copy: `sh install.sh --workspace org_…`.
@@ -176,7 +178,7 @@ If the helper cannot learn the folder, it connects without a token rather than w
 
 ## Codex
 
-Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. By hand:
+Codex uses the same skill, the same header helper and the same token files, from a clone of this repository. The installer with `--client codex` does steps 1 and 3 below and prints the block of step 2 with your home folder in it; add that block yourself. On Windows it clones to `%LOCALAPPDATA%\unio\agent`, the clone `install.ps1` keeps, unless a clone is already at `~/.local/share/unio/agent`, and the block it prints names that folder. By hand:
 
 1. Clone it, and link the skill where Codex looks for skills:
 
@@ -250,7 +252,7 @@ claude plugin uninstall unio@unio
 claude plugin marketplace remove unio
 ```
 
-For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
+For Codex, remove the `[mcp_servers.unio]` block and `~/.agents/skills/unio`. Run `unio disconnect` for each workspace, then remove the clone (`~/.local/share/unio/agent`, or `%LOCALAPPDATA%\unio\agent` on Windows) and the command: `~/.local/bin/unio`, or the clone's `bin` folder in your user `Path`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
 
 ## Answering service
 
