@@ -14,6 +14,11 @@ is public: every file, commit and pull request here is visible to anyone.
   a token per workspace.
 - `tests/`: the plugin's scripts and the installer, run against a fake Unio
   API in a throwaway HOME.
+- `runner/`: the answering service (`unio-inbox`) and its setup
+  (`unio-runner`), which run on the computer of a person in the workspace;
+  see [runner/README.md](runner/README.md). It is not part of the plugin, so
+  a change there raises no plugin version. `install.sh --runner` and
+  `install.ps1` (Windows) install it.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.
@@ -58,6 +63,7 @@ python3 -I tests/check_fixture.py
 dash tests/run.sh
 bash tests/run.sh
 sh tests/check_versions.sh origin/main
+python3 -m unittest discover -s runner/tests -v
 ```
 
 - A change to a command or to the hook also needs a real run of each command
@@ -104,3 +110,7 @@ No AI attribution. Stage named paths only.
 - Text a person reads at runtime (hook messages, command output) is Brazilian
   Portuguese: sentence case, no em dash, no emoji. Repository files are in
   English.
+- `install.ps1` stays ASCII, with accents as `\u` escapes that its `Say`
+  turns back: Windows PowerShell 5.1 reads a file without a BOM in the
+  system's code page, and a BOM breaks `[scriptblock]::Create`. It runs in
+  the person's own session, so it never calls `exit`.

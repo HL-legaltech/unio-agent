@@ -225,6 +225,16 @@ claude plugin marketplace remove unio
 
 For Codex, remove the `[mcp_servers.unio]` block, `~/.agents/skills/unio` and `~/.local/share/unio/agent`. Deleting a token file in `~/.config/unio` does not revoke the token: revoke it in Unio, under Configurações > Pessoal > Agente de código.
 
+## Answering service
+
+The answering service answers for a workspace's agent, from the computer of a person in that workspace and on their Claude plan. A developer who administers the workspace generates its token in Unio, under Configurações > Sistema > Agentes, where the page also shows the install command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --runner --workspace org_…
+```
+
+On Windows, `install.ps1` does the same from PowerShell. See [runner/README.md](runner/README.md) for what it installs, its commands, and how to remove it.
+
 ## Security
 
 The token stays in `~/.config/unio/` with mode 600 and goes only to `https://api.unio.so`. The scripts never print it, never put it on a command line, and never copy it anywhere else. To report a vulnerability, see [SECURITY.md](SECURITY.md).
