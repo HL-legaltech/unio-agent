@@ -150,6 +150,12 @@ decides() {
     d=$(unio_agent_dir)
     printf "%s, %s, %s" "$m" "$d" "$(unio_workspace "$d")"' sh "$scripts/lib.sh"
 }
+# The browser opener runs in the background: wait up to 5 s for its log.
+opened() {
+  tries=0
+  while [ ! -s "$tmp/browser.log" ] && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
+  [ -s "$tmp/browser.log" ]
+}
 # Which fake token a header helper answer carries, by name, for check names.
 token_name() {
   case $1 in
@@ -794,7 +800,7 @@ code=$?
   has "$out" "Token salvo em ~/.config/unio/workspaces/org_test/token, para o workspace WorkspaceNameMarker" &&
   has "$out" "Ele vence em 30 dias\." && has "$out" "vale em todas as pastas deste computador"; check "browser: the first workspace's token is saved as the installer saves it, the computer's default"
 [ -z "$(find "$conf" -name '*.new')" ] && [ -z "$(find "$conf" -name 'token.new.*')" ]; check "browser: no temporary file is left"
-grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/browser.log"; check "browser: the page opens in a browser on this screen"
+opened && grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/browser.log"; check "browser: the page opens in a browser on this screen"
 grep -q '^/v1/agents/connect/start [0-9.]* {"client":"claude-code","host":"[A-Za-z0-9][A-Za-z0-9_-]*"}$' "$tmp/connect/log"; check "browser: start names the client and a host name"
 lacks "$out" "unio_" && lacks "$out" "FakeDeviceCode" &&
   ! grep -q -e "$good" -e FakeDeviceCode "$tmp/curl-argv.log"; check "browser: neither the token nor the device code is printed or on curl's command line"
@@ -809,9 +815,9 @@ gap=$(grep '^/v1/agents/connect/poll ' "$tmp/connect/log" | awk '{ t[NR] = $2 } 
   grep -q "^$tmp/repo2	org_Second\$" "$conf/projects" && has "$out" "vale só nesta pasta"; check "browser: a second workspace, with no terminal to ask, covers only this folder"
 if [ "$(uname -s)" = Darwin ]; then
   # A Mac has a screen whenever the session is not over SSH.
-  [ -e "$tmp/browser.log" ]; check "browser: on macOS the page opens with or without DISPLAY"
+  opened; check "browser: on macOS the page opens with or without DISPLAY"
 else
-  [ ! -e "$tmp/browser.log" ]; check "browser: without a display, no browser is started"
+  ! opened; check "browser: without a display, no browser is started"
 fi
 
 home browser-refused
