@@ -141,6 +141,13 @@ check() {
 has() { printf '%s' "$1" | grep -q -e "$2"; }
 lacks() { ! printf '%s' "$1" | grep -q -e "$2"; }
 has_line() { printf '%s\n' "$1" | grep -qxF -e "$2"; }
+# Which fake token a header helper answer carries, by name, for check names.
+token_name() {
+  case $1 in
+    *"Bearer $good"*) echo good ;; *"Bearer $other"*) echo other ;;
+    *"Bearer $second"*) echo second ;; *Bearer*) echo another ;; *) echo none ;;
+  esac
+}
 is_json() { printf '%s' "$1" | python3 -I -m json.tool >/dev/null 2>&1; }
 private() { [ -n "$(find "$1" -prune -perm 600 2>/dev/null)" ]; }
 calls() { wc -l < "$tmp/clients.log" 2>/dev/null | tr -d ' '; }
@@ -500,7 +507,7 @@ lacks "$report" "core folder:"; check "doctor checks the connection's folder onl
 mkdir -p "$tmp/mapped-a" "$tmp/mapped-b"
 printf '%s\torg_A\n%s\torg_B\n' "$tmp/mapped-a" "$tmp/mapped-b" > "$conf/projects"
 report=$(CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
-has "$report" "^ok core folder: a conexão com o Unio usa o workspace desta pasta"; check "doctor confirms the connection sees this folder"
+has "$report" "^ok core folder: a conexão com o Unio usa o workspace desta pasta"; check "doctor confirms the connection sees this folder (got: $(printf '%s\n' "$report" | grep -e 'core folder' -e 'core token' | tr '\n' ' '))"
 report=$(CLAUDECODE=1 agent "$tmp/mapped-b" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
 has "$report" "^bad core folder: .*mapped-b, de outro workspace"; check "doctor reports a connection that sees another workspace's folder"
 report=$(PATH=$tmp/no-ps:$PATH CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
@@ -651,7 +658,9 @@ has_text "$out" "Este computador já usa o Unio com outro workspace. Onde usar o
   [ "$(cat "$conf/default-workspace")" = org_test ]; check "a second workspace asks where it applies"
 printf '%s\torg_Second\n%s\torg_Second\n' "$tmp/repo2" "$tmp/linked-repo2" | cmp -s - "$conf/projects" &&
   has_text "$out" "O workspace org_Second vale só em $tmp/repo2 e nas pastas dentro dela."; check "answered 1, it maps this folder, by its real path and by the link it was reached through"
-has "$(headers "$tmp/repo2")" "Bearer $second" && has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's"
+in2=$(headers "$tmp/repo2")
+out2=$(headers "$tmp/elsewhere")
+has "$in2" "Bearer $second" && has "$out2" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's (got $(token_name "$in2"), $(token_name "$out2"))"
 has "$(CLAUDE_PROJECT_DIR=$tmp/repo2 doctor)" "^ok core token: .*(o token do workspace org_Second, ligado a esta pasta)"; check "doctor says a mapped folder's workspace is tied to the folder"
 types "$second" x ''
 out=$(install_in "$tmp/repo3" --workspace org_Second)
@@ -676,7 +685,7 @@ printf '%s\n' "$second" > "$conf/token"
 types "$good" 1
 out=$(install_in "$tmp/repo" --workspace org_test --renew)
 has_text "$out" "Onde usar o workspace org_test?" && [ ! -e "$conf/default-workspace" ] && has "$(headers "$tmp/elsewhere")" "Bearer $second" &&
-  has "$(headers "$tmp/repo")" "Bearer $good"; check "a computer token of another workspace counts as a first workspace"
+  has "$(headers "$tmp/repo")" "Bearer $good"; check "a computer token of another workspace counts as a first workspace (got $(token_name "$(headers "$tmp/elsewhere")"), $(token_name "$(headers "$tmp/repo")"))"
 
 home settings
 mkdir -p "$HOME/.claude"
