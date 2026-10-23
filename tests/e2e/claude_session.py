@@ -205,6 +205,13 @@ def main():
             entries, offset = read_log(log_file, offset)
             print("  ran %r in %s: exit %d in %.0fs, %d requests"
                   % (prompt, os.path.basename(folder), done.returncode, time.time() - started, len(entries)))
+            # The fake lets the first message go after 30 s without MCP, and
+            # some checks below hold vacuously when no MCP request came.
+            paths = [e.get("path") for e in entries]
+            first = paths.index("/v1/messages") if "/v1/messages" in paths else len(paths)
+            check("/v1/mcp" in paths[:first],
+                  "%s in %s: Claude Code reached the MCP server before its first message"
+                  % (prompt, os.path.basename(folder)), "requests: %s" % paths)
             return done, entries
 
         def texts(entries):

@@ -131,7 +131,6 @@ class Handler(BaseHTTPRequestHandler):
             EXPECT_MCP.set()
             return self.send_empty(204)
         if path == "/v1/mcp":
-            MCP_SEEN.set()
             return self.mcp(body)
         if path == "/v1/messages/count_tokens":
             return self.send_json(200, {"input_tokens": 10})
@@ -148,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
     def mcp(self, body):
         log({"method": "POST", "path": "/v1/mcp", "token": self.bearer(),
              "client": self.headers.get("X-Unio-Client"), "rpc": body.get("method")})
+        # After the log line, so the log shows it before the message it lets go.
+        MCP_SEEN.set()
         if self.bearer() not in TOKENS:
             return self.send_json(401, {"error": "Token de agente inválido."})
         if "id" not in body:
