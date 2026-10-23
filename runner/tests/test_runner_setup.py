@@ -8,8 +8,8 @@ import sys
 import unittest
 from unittest import mock
 
-from runner_support import (AGENT, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE, FakeApi,
-                            Sandbox, captured, closed_port_url, load_runner)
+from runner_support import (AGENT, BARRED, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
+                            FakeApi, Sandbox, captured, closed_port_url, load_runner)
 
 ur = load_runner()
 VERSION = (RUNNER_DIR / "VERSION").read_text(encoding="utf-8").strip()
@@ -68,15 +68,37 @@ class SetupWithoutService(Base):
 
     def test_each_refusal_says_why_and_saves_nothing(self):
         for token, reason in ((REVOKED, "O token foi recusado"), (OFF, "Os agentes estão desligados neste workspace"),
+                              (BARRED, "O Unio recusou o agente com este token."),
                               (SESSION, "Este não é um token do serviço de respostas"),
                               (OTHER, "Este token é do workspace org_Other, mas o comando é para o org_test.")):
             code, out = self.setup("--yes", token=token)
             self.assertEqual(code, 1, out)
             self.assertIn("O Unio não aceitou este token para o serviço de respostas. Nada foi salvo.", out)
             self.assertIn(reason, out)
+            if token != OFF:
+                self.assertNotIn("Os agentes estão desligados", out)
+            self.assertNotIn("O que a verificação encontrou", out)
             self.assertIsNone(self.token(), token)
             self.assertFalse((self.config / "repos.json").exists())
             self.assertNoTokenLeaked(out)
+
+    def test_a_runner_without_claude_code_saves_nothing(self):
+        code, out = self.setup("--yes", UNIO_INBOX_CLAUDE=str(self.box.root / "no-claude"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("O Unio aceitou o token, mas o serviço não consegue rodar neste computador. Nada foi salvo.", out)
+        self.assertIn("O serviço não encontrou o Claude Code.", out)
+        self.assertIsNone(self.token())
+
+    def test_a_problem_without_a_known_code_shows_as_written(self):
+        check = {"ok": False, "problems": ["a new problem", "Unio did not answer"],
+                 "codes": ["new_code", "unio_unreachable"]}
+        prof = ur.Profile("org_test", self.config, self.state, self.token_file)
+        text = ur.check_failure("org_test", check, prof)
+        self.assertEqual(text.splitlines(), [
+            "O Unio não aceitou este token para o serviço de respostas. Nada foi salvo.",
+            "O Unio não respondeu: confira a rede e rode o comando de novo.",
+            "O que a verificação encontrou:", "  - a new problem"])
+        self.assertIn("A verificação não disse o motivo.", ur.check_failure("org_test", {"ok": False}, prof))
 
     def test_a_refused_token_keeps_the_one_saved_before(self):
         self.assertEqual(self.setup("--yes")[0], 0)

@@ -366,35 +366,47 @@ def run_check(org, env):
     return data
 
 
-def check_failure(org, check, api, token):
-    """Why --check refused, in the person's words: the token's own answer from
-    /agents/me tells a revoked token, agents switched off, another workspace's
-    token and a person's token apart; anything else shows the check's problems."""
-    lines = ["O Unio não aceitou este token para o serviço de respostas. Nada foi salvo."]
-    status, me = agents_me(api, token) if token else (None, None)
-    data = me.get("data") if isinstance(me, dict) else None
-    if status == 0:
-        lines.append("O Unio não respondeu: confira a rede e rode o comando de novo.")
-    elif status == 401:
-        lines.append("O token foi recusado: ele pode ter sido revogado ou ter vencido. Gere outro em %s." % AGENTS_PAGE)
-    elif status == 403:
-        lines.append("Os agentes estão desligados neste workspace. Um administrador pode ligá-los em %s." % AGENTS_PAGE)
-    elif status == 200 and isinstance(data, dict):
-        owner = data["workspace"].get("clerkId") if isinstance(data.get("workspace"), dict) else None
-        purpose = data["token"].get("purpose") if isinstance(data.get("token"), dict) else None
-        if isinstance(owner, str) and ORG.match(owner) and owner != org:
-            lines.append("Este token é do workspace %s, mas o comando é para o %s. Use o token e o comando da mesma página."
-                         % (owner, org))
-        elif purpose != "runner":
-            lines.append("Este não é um token do serviço de respostas. Gere um em %s, em Serviço de respostas."
-                         % AGENTS_PAGE)
-    if len(lines) == 1:
-        problems = [clean(p, 200) for p in check.get("problems") or [] if isinstance(p, str) and p.strip()]
-        if problems:
-            lines.append("O que a verificação encontrou:")
-            lines.extend("  - " + p for p in problems)
-        else:
-            lines.append("A verificação não disse o motivo. Rode o comando de novo em instantes.")
+# What setup says for each code `unio-inbox --check` gives a problem.
+CHECK_REASONS = {
+    "unio_unreachable": "O Unio não respondeu: confira a rede e rode o comando de novo.",
+    "unio_error": "O Unio respondeu com um erro. Rode o comando de novo em instantes.",
+    "token_refused": "O token foi recusado: ele pode ter sido revogado ou ter vencido. Gere outro em {page}.",
+    "agents_off": "Os agentes estão desligados neste workspace. Um administrador pode ligá-los em {page}.",
+    "forbidden": "O Unio recusou o agente com este token. Confira em {page} se o token continua ativo.",
+    "not_runner_token": "Este não é um token do serviço de respostas. Gere um em {page}, em Serviço de respostas.",
+    "wrong_workspace": "Este token é do workspace {owner}, mas o comando é para o {org}. "
+                       "Use o token e o comando da mesma página.",
+    "claude_missing": "O serviço não encontrou o Claude Code. Confira a instalação e rode este comando de novo.",
+    "no_token": "O token não ficou salvo em {token}. Rode este comando de novo.",
+}
+
+
+def check_failure(org, check, prof):
+    """Why --check refused, in the person's words, from the code it gives each
+    problem; a problem without a code this file knows shows as the check wrote it."""
+    problems = check.get("problems") if isinstance(check.get("problems"), list) else []
+    codes = check.get("codes") if isinstance(check.get("codes"), list) else []
+    workspace = check.get("workspace") if isinstance(check.get("workspace"), dict) else {}
+    owner = clean(workspace.get("clerkId") or "?", 40)
+    reasons, others = [], []
+    for n in range(max(len(problems), len(codes))):
+        code = codes[n] if n < len(codes) else None
+        if code in CHECK_REASONS:
+            text = CHECK_REASONS[code].format(page=AGENTS_PAGE, org=org, owner=owner, token=tilde(prof.token))
+            if text not in reasons:
+                reasons.append(text)
+        elif n < len(problems) and isinstance(problems[n], str) and problems[n].strip():
+            others.append(clean(problems[n], 200))
+    if codes and all(code == "claude_missing" for code in codes):
+        lines = ["O Unio aceitou o token, mas o serviço não consegue rodar neste computador. Nada foi salvo."]
+    else:
+        lines = ["O Unio não aceitou este token para o serviço de respostas. Nada foi salvo."]
+    lines.extend(reasons)
+    if others:
+        lines.append("O que a verificação encontrou:")
+        lines.extend("  - " + p for p in others)
+    if not reasons and not others:
+        lines.append("A verificação não disse o motivo. Rode o comando de novo em instantes.")
     return "\n".join(lines)
 
 
@@ -1026,7 +1038,7 @@ def setup(opts):
         say("Conferindo o token com o Unio.")
         check = run_check(org, env)
         if not check["ok"]:
-            raise Stop(check_failure(org, check, effective_api(prof, api), token))
+            raise Stop(check_failure(org, check, prof))
         confirmed = True
     finally:
         if secret is not None and not confirmed:

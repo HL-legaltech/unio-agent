@@ -57,7 +57,8 @@ SESSION = fake_token("SessionFakeTokenNotASecret")
 OTHER = fake_token("OtherWorkspaceFakeTokenNotASecret")
 REVOKED = fake_token("RevokedFakeTokenNotASecret")
 OFF = fake_token("AgentsOffFakeTokenNotASecret")
-TOKENS = (RUNNER, SESSION, OTHER, REVOKED, OFF)
+BARRED = fake_token("BarredAgentFakeTokenNotASecret")
+TOKENS = (RUNNER, SESSION, OTHER, REVOKED, OFF, BARRED)
 
 WORKSPACE = "WorkspaceNameMarker"
 AGENT = "AgentNameMarker"
@@ -87,6 +88,7 @@ class FakeApi:
         OTHER: (200, me_body("org_Other", "runner")),
         REVOKED: (401, {"error": "Token inválido.", "code": "invalid_token"}),
         OFF: (403, {"error": "Agentes desligados.", "code": "agents_disabled"}),
+        BARRED: (403, {"error": "Sem permissão.", "code": "forbidden"}),
     }
 
     def __init__(self):
