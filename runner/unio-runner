@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """Sets up Unio's answering service (runner/unio-inbox) on this computer, one
-service per workspace, and manages it afterwards:
+service per workspace, and manages it afterwards. People run it as
+`unio runner`, through bin/unio:
 
-    unio-runner setup --workspace org_<id> [--api URL] [--token-stdin]
+    unio runner setup [--workspace org_<id>] [--api URL] [--token-stdin]
                       [--repos-json FILE] [--no-service] [--yes]
-    unio-runner status [--workspace org_<id>]
-    unio-runner start|stop|restart|logs|uninstall --workspace org_<id>
-    unio-runner update
+    unio runner status [--workspace org_<id>] [--json]
+    unio runner start|stop|restart [--workspace org_<id>]
+    unio runner logs [--workspace org_<id>] [-n N] [-f]
+    unio runner uninstall [--workspace org_<id>] [--yes]
+    unio runner update
+
+--workspace may be left out when this computer has one workspace's token.
+It exits 0 when done, 1 on a problem and 2 on a usage error, and without a
+terminal it asks nothing: what a question would settle must come as an option.
 
 unio-inbox owns where a workspace's profile lives (--print-paths) and whether
 it works (--check): this file asks it and never re-derives either, so the two
@@ -71,14 +78,14 @@ STATE_WORDS = {
     "unknown": "estado desconhecido",
 }
 
-USAGE = """Uso: unio-runner <comando> [opções]
+USAGE = """Uso: unio runner <comando> [opções]
 
 Liga e cuida do serviço de respostas do Unio neste computador: o programa que
 responde às menções ao agente do workspace com o Claude Code daqui, por conta
 do plano de quem o instala.
 
 Comandos:
-  setup --workspace org_...   Confere o computador, guarda o token do serviço,
+  setup                       Confere o computador, guarda o token do serviço,
                               pergunta os repositórios de cada time e liga o
                               serviço.
     --api URL                 Outro endereço da API do Unio
@@ -86,36 +93,48 @@ Comandos:
     --token-stdin             Lê o token da entrada padrão em vez de perguntar.
     --repos-json ARQUIVO      Usa os repositórios deste arquivo, sem perguntar.
     --no-service              Prepara o perfil sem instalar o serviço.
-    --yes                     Aceita a resposta padrão de cada pergunta.
-  status [--workspace org_...]
-                              Estado, versão, última linha do registro e
-                              atualização automática de cada serviço.
-  start --workspace org_...   Liga o serviço.
-  stop --workspace org_...    Para o serviço até o próximo start.
-  restart --workspace org_... Reinicia o serviço.
-  logs --workspace org_... [--lines N] [--follow]
-                              Mostra as últimas linhas do registro.
-  uninstall --workspace org_...
-                              Remove o serviço e o token deste computador.
+    --yes                     Mantém o token e os repositórios já salvos, sem
+                              perguntar.
+  status [--json]             Estado, versão, última linha do registro e
+                              atualização automática de cada serviço; com
+                              --json, o mesmo em JSON.
+  start                       Liga o serviço.
+  stop                        Para o serviço até o próximo start.
+  restart                     Reinicia o serviço.
+  logs [-n N] [-f]            Mostra as últimas N linhas do registro (40 sem
+                              -n); com -f, segue mostrando as novas. Também
+                              --lines N e --follow.
+  uninstall [--yes]           Remove o serviço e o token deste computador,
+                              depois de confirmar; --yes já confirma.
   update                      Atualiza o clone com git pull --ff-only. Um
                               serviço com atualização automática passa
                               sozinho para a versão nova entre uma resposta e
                               outra; os demais ligados são reiniciados.
+
+Todo comando, menos update, aceita --workspace org_... para escolher o
+workspace. Ele pode ficar de fora quando este computador tem o token de um só;
+status sem ele mostra todos.
+
+Sem um terminal, nenhum comando pergunta nada: diz a opção que falta.
+
+Sai com 0 quando dá certo, 1 quando há um problema e 2 quando o comando ou
+uma opção estão errados.
 """
 
 # For each command, its options and whether each takes a value.
 OPTIONS = {
     "setup": {"--workspace": True, "--api": True, "--token-stdin": False, "--repos-json": True,
               "--no-service": False, "--yes": False},
-    "status": {"--workspace": True},
+    "status": {"--workspace": True, "--json": False},
     "start": {"--workspace": True},
     "stop": {"--workspace": True},
     "restart": {"--workspace": True},
     "logs": {"--workspace": True, "--lines": True, "--follow": False},
-    "uninstall": {"--workspace": True},
+    "uninstall": {"--workspace": True, "--yes": False},
     "update": {},
 }
-NEEDS_WORKSPACE = ("setup", "start", "stop", "restart", "logs", "uninstall")
+# Short forms, for the commands whose long form they stand for.
+ALIASES = {"-n": "--lines", "-f": "--follow"}
 
 
 class Stop(Exception):
@@ -163,9 +182,19 @@ def shown(path):
 
 
 def self_command():
+    """How a person runs this file: `unio runner`, or the clone's bin/unio by
+    its path while the unio on PATH is another one or none, as right after
+    install.sh when ~/.local/bin is not on PATH yet."""
+    found = shutil.which("unio")
+    try:
+        ours = bool(found) and os.path.samefile(str(Path(found).resolve().parent), str(CLONE / "bin"))
+    except OSError:
+        ours = False
+    if ours:
+        return "unio runner"
     if os.name == "nt":
-        return '& "%s" "%s"' % (sys.executable, Path(__file__).resolve())
-    return "python3 " + shown(Path(__file__).resolve())
+        return '& "%s" runner' % (CLONE / "bin" / "unio.cmd")
+    return shown(CLONE / "bin" / "unio") + " runner"
 
 
 def foreground_command(org):
@@ -1077,11 +1106,38 @@ def version_key(text):
 
 
 def workspace_of(opts):
+    if "--workspace" not in opts:
+        return only_workspace()
     org = opts.get("--workspace")
     if not isinstance(org, str) or not ORG.match(org):
         raise Stop("O valor de --workspace não é um workspace do Unio (org_ seguido de letras e números). "
                    "Copie de novo o comando da página Agentes.", 2)
     return org
+
+
+def only_workspace():
+    """The workspace a command without --workspace is for: the only one this
+    computer has a token for. A profile without one is what uninstall left."""
+    orgs = [org for org in profiles() if profile(org).token.exists()]
+    if len(orgs) == 1:
+        return orgs[0]
+    if orgs:
+        raise Stop("Este computador tem o serviço de respostas de mais de um workspace: %s. Diga qual com "
+                   "--workspace." % ", ".join(orgs), 2)
+    raise Stop("Falta --workspace org_...: nenhum serviço de respostas está configurado neste computador. Copie o "
+               "comando da página %s, no Unio." % AGENTS_PAGE, 2)
+
+
+def unasked(opts, saved_token):
+    """The options that answer the questions setup would ask, for a run with
+    no terminal to ask them on: each missing one in the person's words."""
+    missing = []
+    if not opts.get("--token-stdin") and not (saved_token and opts.get("--yes")):
+        missing.append("--yes, para manter o token salvo, ou --token-stdin, para trocá-lo" if saved_token else
+                       "--token-stdin, com o token na entrada padrão")
+    if not (opts.get("--repos-json") or opts.get("--yes")):
+        missing.append("--repos-json ARQUIVO, com os repositórios de cada time, ou --yes, para manter os salvos")
+    return missing
 
 
 def read_token(opts, prof, old):
@@ -1091,9 +1147,6 @@ def read_token(opts, prof, old):
     if old is not None and (opts.get("--yes") or not ask_yes_no(
             "Já existe um token do serviço para %s neste computador. Trocar por outro? [s/N] " % prof.org)):
         return None
-    if not stdin_is_tty():
-        raise Stop("Este comando precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin. "
-                   "Nada foi salvo.")
     try:
         return prompt_secret("Cole o token do serviço de respostas: ").strip()
     except EOFError:
@@ -1111,17 +1164,21 @@ def setup(opts):
     given_repos = load_repos_json(opts["--repos-json"]) if opts.get("--repos-json") else None
     kind = None if opts.get("--no-service") else service_kind()
     if not opts.get("--no-service") and kind is None:
-        raise Stop("O unio-runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
+        raise Stop("O unio runner não sabe instalar serviços neste sistema. Rode setup com --no-service e deixe "
                    "o serviço rodando num terminal: %s" % foreground_command(org))
-
-    check_computer()
     env = child_env(api)
     prof = profile(org, env)
+    old = read_bytes(prof.token)
+    missing = unasked(opts, old is not None)
+    if missing and not stdin_is_tty():
+        raise Stop("\n".join(["Sem um terminal, setup não pergunta nada. Rode de novo com:"]
+                             + ["  " + text for text in missing] + ["Nada foi salvo."]), 2)
+
+    check_computer()
     private_dir(prof.config)
     # The runner's log and health name items and errors: for this user alone.
     private_dir(prof.state)
 
-    old = read_bytes(prof.token)
     secret = read_token(opts, prof, old)
     if secret is not None and not TOKEN.match(secret):
         raise Stop("Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo.")
@@ -1202,26 +1259,32 @@ def setup(opts):
 
 def status(opts):
     orgs = [workspace_of(opts)] if "--workspace" in opts else profiles()
-    if not orgs:
-        say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
-            "página %s, no Unio." % AGENTS_PAGE)
-        return 0
-    svc = service()
+    svc = service() if orgs else None
+    rows = []
     for org in orgs:
         prof = profile(org)
-        state = svc.state(org) if svc else "unknown"
         entries = read_entries(prof.log_file, 1)
-        say("%s: %s" % (org, STATE_WORDS[state]))
-        say("  versão: %s" % (running_version(prof) or "ainda não começou"))
+        rows.append((prof, {"workspace": org, "state": svc.state(org) if svc else "unknown",
+                            "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
+                            "token": prof.token.exists(), "lastLog": entries[-1] if entries else None}))
+    if opts.get("--json"):
+        say(json.dumps({"workspaces": [row for _, row in rows]}))
+        return 0
+    if not rows:
+        say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
+            "página %s, no Unio." % AGENTS_PAGE)
+    for prof, row in rows:
+        say("%s: %s" % (row["workspace"], STATE_WORDS[row["state"]]))
+        say("  versão: %s" % (row["version"] or "ainda não começou"))
         say("  atualização automática: %s" % autoupdate(prof))
-        say("  última linha do registro: %s" % (format_entry(entries[-1]) if entries else "nenhuma"))
+        say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
     return 0
 
 
 def installed_service(org):
     svc = service()
     if svc is None:
-        raise Stop("O unio-runner não sabe cuidar de serviços neste sistema.")
+        raise Stop("O unio runner não sabe cuidar de serviços neste sistema.")
     if svc.state(org) == "absent":
         raise Stop("Não há serviço instalado para %s. Rode primeiro: %s setup --workspace %s"
                    % (org, self_command(), org))
@@ -1281,7 +1344,15 @@ def uninstall(opts):
     org = workspace_of(opts)
     prof = profile(org)
     svc = service()
-    if svc and svc.state(org) != "absent":
+    installed = svc is not None and svc.state(org) != "absent"
+    if (installed or prof.token.exists()) and not opts.get("--yes"):
+        if not stdin_is_tty():
+            raise Stop("Sem um terminal, uninstall não pede confirmação: rode de novo com --yes para remover o "
+                       "serviço de %s." % org, 2)
+        if not ask_yes_no("Remover o serviço de respostas de %s deste computador e apagar o token dele? [s/N] "
+                          % org):
+            raise Stop("Nada foi removido.")
+    if installed:
         others = [o for o in profiles() if o != org and profile(o).token.exists()]
         svc.remove(org, last=not others)
         say("Serviço de %s removido." % org)
@@ -1359,7 +1430,7 @@ def parse_args(argv):
         return "help", {}
     command = argv[0]
     if command not in OPTIONS:
-        raise Stop("Comando desconhecido: %s. Rode unio-runner --help para ver os comandos." % clean(command, 40), 2)
+        raise Stop("Comando desconhecido: %s. Rode unio runner help." % clean(command, 40), 2)
     allowed = OPTIONS[command]
     opts = {}
     rest = list(argv[1:])
@@ -1367,21 +1438,20 @@ def parse_args(argv):
         arg = rest.pop(0)
         if arg in ("-h", "--help"):
             return "help", {}
-        name, eq, value = arg.partition("=")
+        typed, eq, value = arg.partition("=")
+        name = ALIASES[typed] if ALIASES.get(typed) in allowed else typed
         if name not in allowed:
-            raise Stop("Opção desconhecida para %s: %s." % (command, clean(name, 40)), 2)
+            raise Stop("Opção desconhecida para %s: %s." % (command, clean(typed, 40)), 2)
         if allowed[name]:
             if not eq:
                 if not rest:
-                    raise Stop("Falta o valor de %s." % name, 2)
+                    raise Stop("Falta o valor de %s." % typed, 2)
                 value = rest.pop(0)
             opts[name] = value
         elif eq:
-            raise Stop("%s não leva valor." % name, 2)
+            raise Stop("%s não leva valor." % typed, 2)
         else:
             opts[name] = True
-    if command in NEEDS_WORKSPACE and "--workspace" not in opts:
-        raise Stop("Falta --workspace org_..., o workspace do serviço.", 2)
     return command, opts
 
 

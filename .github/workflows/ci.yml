@@ -138,6 +138,10 @@ jobs:
       - name: Run the runner's tests
         run: python -m unittest discover -s runner/tests -v
 
+      - name: Lint bin/unio as POSIX sh
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh bin/unio
+
       - name: Verify the systemd unit setup writes
         if: runner.os == 'Linux'
         run: |
@@ -179,3 +183,34 @@ jobs:
             Write-Host "${shell}: $out"
             if ($out -notmatch 'org_ seguido de letras') { throw "$shell did not run install.ps1" }
           }
+
+      - name: Run bin/unio.cmd from PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\bin\unio.cmd bogus
+          if ($LASTEXITCODE -ne 2) { throw "unio.cmd bogus exited $LASTEXITCODE" }
+          $help = & .\bin\unio.cmd help | Out-String
+          if ($LASTEXITCODE -or $help -notmatch '(?m)^  runner ') { throw "unio.cmd help: $help" }
+          $version = (& .\bin\unio.cmd --version | Out-String).Trim()
+          if ($version -ne (Get-Content -Raw runner\VERSION).Trim()) { throw "unio.cmd --version: $version" }
+          & .\bin\unio.cmd runner --help
+          if ($LASTEXITCODE) { throw "unio.cmd runner --help exited $LASTEXITCODE" }
+
+      # Last, since it leaves a folder on this machine's user Path.
+      - name: Put a folder on the user's Path once, as install.ps1 -Runner does
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ([scriptblock]::Create((Get-Content -Raw install.ps1)))
+          $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+          $before = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          $kind = if ($null -ne $key.GetValue('Path')) { $key.GetValueKind('Path') } else { 'ExpandString' }
+          $folder = Join-Path $env:RUNNER_TEMP 'unio bin'
+          if (-not (Add-UserPath $folder)) { throw 'the first call did not add the folder' }
+          if (Add-UserPath "$folder\") { throw 'the second call added it again' }
+          $after = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          $expected = (@($before.TrimEnd(';'), $folder) | Where-Object { $_ }) -join ';'
+          if ($after -ne $expected) { throw "the user's Path is now: $after" }
+          if ($key.GetValueKind('Path') -ne $kind) { throw "the user's Path became $($key.GetValueKind('Path'))" }
+          if (-not (($env:Path -split ';') -contains $folder)) { throw "this session's Path lacks $folder" }

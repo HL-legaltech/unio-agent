@@ -244,7 +244,7 @@ The answering service answers for a workspace's agent, from the computer of a pe
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --runner --workspace org_…
 ```
 
-On Windows, `install.ps1` does the same from PowerShell. See [runner/README.md](runner/README.md) for what it installs, its commands, and how to remove it.
+On Windows, `install.ps1` does the same from PowerShell. Both also put the `unio` command on your PATH, so `unio runner status` shows how the service is doing. See [runner/README.md](runner/README.md) for what it installs, its commands, and how to remove it.
 
 ## Security
 

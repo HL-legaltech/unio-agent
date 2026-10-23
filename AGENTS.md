@@ -19,6 +19,10 @@ is public: every file, commit and pull request here is visible to anyone.
   see [runner/README.md](runner/README.md). It is not part of the plugin, so
   a change there raises no plugin version. `install.sh --runner` and
   `install.ps1` (Windows) install it.
+- `bin/unio` (POSIX `sh`) and `bin/unio.cmd` (Windows): the `unio` command
+  people type, which runs from the clone it sits in. `unio runner …` is
+  `runner/unio-runner`; text people read says `unio runner`, never
+  `unio-runner`. The `--runner` installs put it on the PATH.
 
 Merging to `main` is the release: Claude Code installs and updates the plugin
 from the default branch, and Codex clones pull it.
@@ -59,6 +63,7 @@ before opening one:
 claude plugin validate --strict .
 claude plugin validate --strict plugins/unio
 git ls-files -z '*.sh' | xargs -0 shellcheck -s sh
+shellcheck -s sh bin/unio
 python3 -I tests/check_fixture.py
 dash tests/run.sh
 bash tests/run.sh
@@ -123,6 +128,13 @@ No AI attribution. Stage named paths only.
 - Text a person reads at runtime (hook messages, command output) is Brazilian
   Portuguese: sentence case, no em dash, no emoji. Repository files are in
   English.
+- `unio help` prints the lines of `bin/unio` that start with `#:`, the one
+  table of commands, and `bin/unio.cmd` prints the same lines. A new command
+  adds its line there and a branch to each file; the table lists only
+  commands both files run.
+- `bin/unio.cmd` stays ASCII with CRLF line ends: cmd reads it in the
+  console's code page, and can miss a label in a file with bare LFs. The
+  help's accents reach it only as data, under code page 65001.
 - `install.ps1` stays ASCII, with accents as `\u` escapes that its `Say`
   turns back: Windows PowerShell 5.1 reads a file without a BOM in the
   system's code page, and a BOM breaks `[scriptblock]::Create`. It runs in

@@ -3,8 +3,8 @@ start/stop/restart, uninstall and update."""
 
 import json
 import os
+import re
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,14 +22,23 @@ class Arguments(unittest.TestCase):
                          ("setup", {"--workspace": "org_x", "--yes": True, "--api": "https://a.example/v1"}))
         self.assertEqual(ur.parse_args(["update"]), ("update", {}))
         self.assertEqual(ur.parse_args(["status"]), ("status", {}))
+        self.assertEqual(ur.parse_args(["status", "--json"]), ("status", {"--json": True}))
+        # --workspace is no longer the parser's to require: one profile stands for it.
+        self.assertEqual(ur.parse_args(["start"]), ("start", {}))
+        self.assertEqual(ur.parse_args(["logs", "-n", "5", "-f"]), ("logs", {"--lines": "5", "--follow": True}))
+        self.assertEqual(ur.parse_args(["logs", "-n=7"]), ("logs", {"--lines": "7"}))
+        self.assertEqual(ur.parse_args(["uninstall", "--yes"]), ("uninstall", {"--yes": True}))
         for argv in ([], ["-h"], ["--help"], ["help"], ["logs", "--help"]):
             self.assertEqual(ur.parse_args(argv)[0], "help", argv)
 
     def test_refusals_are_portuguese_and_exit_2(self):
-        for argv, text in ((["bogus"], "Comando desconhecido: bogus."),
+        for argv, text in ((["bogus"], "Comando desconhecido: bogus. Rode unio runner help."),
                            (["setup", "--workspace", "org_x", "--token", RUNNER], "Opção desconhecida para setup: --token."),
                            (["logs", "--workspace"], "Falta o valor de --workspace."),
-                           (["start"], "Falta --workspace org_..., o workspace do serviço."),
+                           (["logs", "-n"], "Falta o valor de -n."),
+                           (["logs", "-f=1"], "-f não leva valor."),
+                           (["status", "-n", "3"], "Opção desconhecida para status: -n."),
+                           (["start", "-f"], "Opção desconhecida para start: -f."),
                            (["setup", "--workspace", "org_x", "--yes=no"], "--yes não leva valor."),
                            (["update", "--workspace", "org_x"], "Opção desconhecida para update: --workspace.")):
             with self.assertRaises(ur.Stop) as caught:
@@ -42,9 +51,21 @@ class Arguments(unittest.TestCase):
         with captured() as out:
             self.assertEqual(ur.main(["--help"]), 0)
         text = out.getvalue()
-        self.assertTrue(text.startswith("Uso: unio-runner <comando> [opções]"))
+        self.assertTrue(text.startswith("Uso: unio runner <comando> [opções]"))
         for command in ("setup", "status", "start", "stop", "restart", "logs", "uninstall", "update"):
             self.assertIn("  " + command, text)
+        self.assertNotIn("unio-runner", text)
+
+    def test_people_are_told_unio_runner(self):
+        # unio-runner survives only as a name that is not a command: the
+        # systemd unit and its template, the task's template, the User-Agent.
+        source = ur.HERE.joinpath("unio-runner").read_text(encoding="utf-8")
+        named = [line.strip() for line in source.splitlines() if re.search(r"unio-runner(?![@-])", line)]
+        self.assertEqual(named, ['"Authorization": "Bearer " + token, "Accept": "application/json", '
+                                 '"User-Agent": "unio-runner"})'])
+        for template in ur.SERVICES.iterdir():
+            self.assertIsNone(re.search(r"unio-runner (setup|status|start|stop|restart|logs|uninstall|update)",
+                                        template.read_text(encoding="utf-8")), template.name)
 
     def test_api_addresses(self):
         self.assertEqual(ur.normalize_api("https://api.unio.so"), "https://api.unio.so/v1")
@@ -123,20 +144,116 @@ class Commands(unittest.TestCase):
         svc = mock.Mock()
         svc.state.return_value = "running"
         with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc):
-            self.assertEqual(ur.main(["uninstall", "--workspace", "org_test"]), 0)
+            self.assertEqual(ur.main(["uninstall", "--workspace", "org_test", "--yes"]), 0)
         svc.remove.assert_called_once_with("org_test", last=False)
         self.assertFalse(self.token_file.exists())
         self.assertTrue(self.box.paths("org_other")[2].exists())
         self.assertIn("Token apagado de", out.getvalue())
+        # One token left: the command needs no --workspace now.
         with self.box.inside(), captured(), mock.patch.object(ur, "service", lambda kind=None: svc):
-            self.assertEqual(ur.main(["uninstall", "--workspace", "org_other"]), 0)
+            self.assertEqual(ur.main(["uninstall", "--yes"]), 0)
         svc.remove.assert_called_with("org_other", last=True)
 
     def test_uninstall_without_anything_installed(self):
+        # Nothing to remove, nothing to confirm.
         code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
         self.assertEqual(code, 0, out)
         self.assertIn("Não havia serviço instalado para org_test.", out)
         self.assertIn("Não havia token do serviço salvo para org_test neste computador.", out)
+
+    def uninstall_asking(self, answer, tty=True):
+        svc = mock.Mock()
+        svc.state.return_value = "running"
+        asked = []
+
+        def prompt(text):
+            asked.append(text)
+            return answer
+
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc), \
+                mock.patch.object(ur, "prompt", prompt), mock.patch.object(ur, "stdin_is_tty", lambda: tty):
+            code = ur.main(["uninstall", "--workspace", "org_test"])
+        return code, out.getvalue(), asked, svc
+
+    def test_uninstall_asks_first(self):
+        self.make_profile()
+        code, out, asked, svc = self.uninstall_asking("")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(asked, ["Remover o serviço de respostas de org_test deste computador e apagar o token "
+                                 "dele? [s/N] "])
+        self.assertIn("Nada foi removido.", out)
+        svc.remove.assert_not_called()
+        self.assertTrue(self.token_file.exists())
+        code, out, _, svc = self.uninstall_asking("s")
+        self.assertEqual(code, 0, out)
+        svc.remove.assert_called_once()
+        self.assertFalse(self.token_file.exists())
+
+    def test_uninstall_without_a_terminal_needs_yes(self):
+        self.make_profile()
+        code, out, asked, svc = self.uninstall_asking("s", tty=False)
+        self.assertEqual(code, 2, out)
+        self.assertIn("rode de novo com --yes", out)
+        self.assertEqual(asked, [])
+        svc.remove.assert_not_called()
+        self.assertTrue(self.token_file.exists())
+
+    def test_the_only_workspace_needs_no_flag(self):
+        self.make_profile(lines=[{"at": "t1", "event": "poll", "listed": 1}])
+        # What uninstall leaves, a profile without a token, is not a choice.
+        self.make_profile("org_gone", token=False)
+        code, out = self.box.runner(["logs"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "t1 poll listed=1")
+
+    def test_several_workspaces_or_none_are_named(self):
+        code, out = self.box.runner(["logs"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("Falta --workspace org_...: nenhum serviço de respostas está configurado neste computador.", out)
+        self.make_profile("org_one")
+        self.make_profile("org_two")
+        for command in ("setup", "start", "stop", "restart", "logs", "uninstall"):
+            code, out = self.box.runner([command])
+            self.assertEqual(code, 2, out)
+            self.assertIn("mais de um workspace: org_one, org_two. Diga qual com --workspace.", out)
+
+    def test_status_json(self):
+        self.make_profile(lines=[{"at": "2026-10-23T11:00:00Z", "event": "start", "version": "2.0.0"},
+                                 {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}],
+                          env="UNIO_RUNNER_AUTOUPDATE=off\n")
+        self.make_profile("org_gone", token=False)
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual(code, 0, out)
+        # Without an env file, a runner updates itself when its clone is a git clone.
+        in_clone = (ur.CLONE / ".git").exists()
+        self.assertEqual(json.loads(out), {"workspaces": [
+            {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
+             "lastLog": None},
+            {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
+             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}}]})
+        code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
+        self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
+
+    def test_status_json_without_profiles(self):
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual((code, json.loads(out)), (0, {"workspaces": []}))
+
+    def test_logs_follow(self):
+        self.make_profile(lines=[{"at": "t0", "event": "poll"}])
+        log = self.state / "log.jsonl"
+        naps = []
+
+        def nap(seconds):
+            # The first nap sees a new line come in; the second is Ctrl-C.
+            naps.append(seconds)
+            if len(naps) > 1:
+                raise KeyboardInterrupt
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": "t1", "event": "claimed"}) + "\n")
+
+        with self.box.inside(), captured() as out, mock.patch.object(ur.time, "sleep", nap):
+            self.assertEqual(ur.main(["logs", "-f", "-n", "1"]), 0)
+        self.assertEqual(out.getvalue().splitlines()[:2], ["t0 poll", "t1 claimed"])
 
 
 class EnvFile(unittest.TestCase):

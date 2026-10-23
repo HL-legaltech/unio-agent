@@ -1,6 +1,6 @@
 # Answering service
 
-The answering service (`unio-inbox`) answers for a workspace's agent: when someone mentions the agent in a task or project comment, replies to it, or assigns it a task, the service runs a headless Claude Code session on the computer it is installed on and posts the answer in Unio. `unio-runner` sets it up as a service of that computer and manages it afterwards.
+The answering service (`unio-inbox`) answers for a workspace's agent: when someone mentions the agent in a task or project comment, replies to it, or assigns it a task, the service runs a headless Claude Code session on the computer it is installed on and posts the answer in Unio. `unio runner` sets it up as a service of that computer and manages it afterwards.
 
 It runs on the computer of a person in the workspace, with that person's Claude Code, and counts against their Claude plan. Each workspace that wants answers runs its own. It is not part of the Claude Code plugin in [`plugins/unio`](../plugins/unio).
 
@@ -26,7 +26,7 @@ On Windows, in PowerShell:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.ps1))) -Runner -Workspace org_…
 ```
 
-Both clone this repository (to `~/.local/share/unio/agent`, or `%LOCALAPPDATA%\unio\agent` on Windows), or update the clone already there, and run `unio-runner setup`, which:
+Both clone this repository (to `~/.local/share/unio/agent`, or `%LOCALAPPDATA%\unio\agent` on Windows), or update the clone already there, put the `unio` command on your PATH, and run `unio runner setup`, which:
 
 1. checks Python, Git, Claude Code and its sign-in, and whether `gh` is there;
 2. reads the token at a hidden prompt, so it never appears on screen or in the shell history;
@@ -35,26 +35,31 @@ Both clone this repository (to `~/.local/share/unio/agent`, or `%LOCALAPPDATA%\u
 5. installs and starts the service for this workspace;
 6. waits up to 60 seconds for the service's first start and ends with `Serviço de respostas ligado para <workspace>.`
 
-Every line it prints is in Portuguese. To read the scripts first, open [install.sh](../install.sh), [install.ps1](../install.ps1) and [unio-runner](unio-runner).
+Every line it prints is in Portuguese. To read the scripts first, open [install.sh](../install.sh), [install.ps1](../install.ps1), [bin/unio](../bin/unio) and [unio-runner](unio-runner).
 
 ## Commands
 
-Run `unio-runner` with the Python that installed it: `python3 ~/.local/share/unio/agent/runner/unio-runner <command>` on macOS and Linux, `py -3 "$env:LOCALAPPDATA\unio\agent\runner\unio-runner" <command>` in PowerShell.
+The service's commands are `unio runner <command>`. `unio` is [`bin/unio`](../bin/unio) in the clone (`bin\unio.cmd` on Windows): the installer links it as `~/.local/bin/unio` on macOS and Linux, and puts the clone's `bin` folder on your user `Path` on Windows. It never replaces a `~/.local/bin/unio` that is something else, and says when `~/.local/bin` is not on your `PATH`; the clone's own `~/.local/share/unio/agent/bin/unio` works either way. `unio help` lists the commands, and `unio --version` prints the runner's version.
 
 | Command | What it does |
 | --- | --- |
-| `setup --workspace org_…` | Everything above. `--api URL` points the service at another Unio API, `--token-stdin` reads the token from stdin, `--repos-json FILE` takes the repositories from a file (`{"ENG": ["owner/name"]}`), `--no-service` prepares the profile without installing the service, and `--yes` keeps the saved token and repositories without asking. Run it again to change the repositories or the token. |
-| `status [--workspace org_…]` | For each workspace on this computer: whether the service runs, the version it started with, whether it updates itself, and the last line of its log. |
-| `start`, `stop`, `restart --workspace org_…` | Start, stop or restart the service. A stopped service stays stopped, across logins and restarts, until `start`. |
-| `logs --workspace org_… [--lines N] [--follow]` | The last lines of the service's log. |
-| `uninstall --workspace org_…` | Stops and removes the service and deletes the token from this computer. The token stays valid in Unio until you revoke it on the Agentes page. |
+| `setup` | Everything above. `--api URL` points the service at another Unio API, `--token-stdin` reads the token from stdin, `--repos-json FILE` takes the repositories from a file (`{"ENG": ["owner/name"]}`), `--no-service` prepares the profile without installing the service, and `--yes` keeps the saved token and repositories without asking. Run it again to change the repositories or the token. |
+| `status [--json]` | For each workspace on this computer: whether the service runs, the version it started with, whether it updates itself, and the last line of its log. `--json` prints one object, `{"workspaces": [{"workspace", "state", "version", "autoUpdate", "token", "lastLog"}]}`, where `state` is `running`, `stopped`, `failed`, `absent` (no service installed) or `unknown`. |
+| `start`, `stop`, `restart` | Start, stop or restart the service. A stopped service stays stopped, across logins and restarts, until `start`. |
+| `logs [-n N] [-f]` | The last `N` lines of the service's log (40 by default), and with `-f` each new one as it comes. `--lines N` and `--follow` are the long forms. |
+| `uninstall [--yes]` | Stops and removes the service and deletes the token from this computer, once you confirm it (`--yes` confirms ahead). The token stays valid in Unio until you revoke it on the Agentes page. |
 | `update` | Pulls the clone (`git pull --ff-only`). A running service that updates itself moves to a newer version on its own once it finishes what it is doing, so no answer is cut off; a service with auto-update off, or one that failed, is restarted. |
+
+Every command but `update` takes `--workspace org_…`. It can be left out while this computer holds the token of one workspace only; with none or several, the command names them and stops. `status` without it shows every workspace.
+
+Run without a terminal, as from a script, a command never asks anything: it stops and names the option that answers the question, such as `--token-stdin`, `--repos-json` or `--yes`. Each command exits with 0 when it worked, 1 on a problem and 2 on a mistake in the command or its options.
 
 ## Where things live
 
 | | macOS and Linux | Windows |
 | --- | --- | --- |
 | The clone | `~/.local/share/unio/agent` | `%LOCALAPPDATA%\unio\agent` |
+| The `unio` command | `~/.local/bin/unio`, a link to the clone's `bin/unio` | the clone's `bin\unio.cmd`, its folder on the user `Path` |
 | A workspace's settings | `~/.config/unio/runners/<workspace>/` | `%APPDATA%\unio\runners\<workspace>\` |
 | Its log and work files | `~/.local/state/unio/runners/<workspace>/` | `%LOCALAPPDATA%\unio\runners\<workspace>\` |
 
@@ -72,7 +77,7 @@ The definitions come from the templates in [`services/`](services), and setup wr
 
 ## Updates
 
-The service keeps its clone up to date: at start and every 6 hours, between answers, it fetches `main` and, when `runner/VERSION` there is newer and the clone has no local changes, fast-forwards and exits so the service manager starts the new version. It does the same, between answers, as soon as the clone holds a newer version, after `unio-runner update` or another workspace's service moved it. `UNIO_RUNNER_AUTOUPDATE=off`, in the environment or the settings folder's `env`, turns that off; `unio-runner update` then updates by hand.
+The service keeps its clone up to date: at start and every 6 hours, between answers, it fetches `main` and, when `runner/VERSION` there is newer and the clone has no local changes, fast-forwards and exits so the service manager starts the new version. It does the same, between answers, as soon as the clone holds a newer version, after `unio runner update` or another workspace's service moved it. `UNIO_RUNNER_AUTOUPDATE=off`, in the environment or the settings folder's `env`, turns that off; `unio runner update` then updates by hand.
 
 ## Development
 
@@ -80,4 +85,4 @@ The service keeps its clone up to date: at start and every 6 hours, between answ
 python3 -m unittest discover -s runner/tests -v
 ```
 
-The tests use the standard library only and touch no real service manager, Claude Code or network. `unio-runner` always runs the real `unio-inbox` beside it; `tests/runner_support.py` puts a fake `claude`, `systemctl`, `loginctl`, `launchctl`, `plutil`, `schtasks` and `powershell` on `PATH` in a throwaway home, and the fake service managers start the real `unio-inbox` in the background and stop it again. A fake Unio API on 127.0.0.1 answers both scripts: the one in `runner_support.py` for setup, and the one in `tests/inbox_support.py`, with a fake `claude` that answers a mention, for the runner's own tests. CI runs them on Linux (Python 3.9 and 3.12), macOS and Windows, and also checks the generated definitions with `systemd-analyze verify`, `plutil -lint` and `schtasks /Create`.
+The tests use the standard library only and touch no real service manager, Claude Code or network. `unio-runner` always runs the real `unio-inbox` beside it; `tests/runner_support.py` puts a fake `claude`, `systemctl`, `loginctl`, `launchctl`, `plutil`, `schtasks` and `powershell` on `PATH` in a throwaway home, and the fake service managers start the real `unio-inbox` in the background and stop it again. A fake Unio API on 127.0.0.1 answers both scripts: the one in `runner_support.py` for setup, and the one in `tests/inbox_support.py`, with a fake `claude` that answers a mention, for the runner's own tests. They also run `bin/unio` through `sh`, and `bin\unio.cmd` on Windows. CI runs them on Linux (Python 3.9 and 3.12), macOS and Windows, and also checks the generated definitions with `systemd-analyze verify`, `plutil -lint` and `schtasks /Create`.

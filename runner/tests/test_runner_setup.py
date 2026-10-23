@@ -197,8 +197,31 @@ class SetupWithoutService(Base):
 
     def test_without_a_terminal_and_without_token_stdin(self):
         code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--yes"])
-        self.assertEqual(code, 1, out)
-        self.assertIn("precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin", out)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines(), ["Sem um terminal, setup não pergunta nada. Rode de novo com:",
+                                            "  --token-stdin, com o token na entrada padrão", "Nada foi salvo."])
+        # It stops before anything runs or is written.
+        self.assertEqual(self.box.logged(self.box.claude_log), [])
+        self.assertFalse(self.config.exists())
+
+    def test_without_a_terminal_every_question_names_its_option(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service"])
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines()[1:3], [
+            "  --token-stdin, com o token na entrada padrão",
+            "  --repos-json ARQUIVO, com os repositórios de cada time, ou --yes, para manter os salvos"])
+        self.assertEqual(self.setup("--repos-json", str(self.repos))[0], 0)
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--repos-json",
+                                     str(self.repos)])
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out.splitlines()[1], "  --yes, para manter o token salvo, ou --token-stdin, para trocá-lo")
+        self.assertEqual(self.token(), RUNNER)
+
+    def test_a_token_from_an_api_key_terminal_warns(self):
+        code, out = self.setup("--yes", FAKE_CLAUDE_AUTH="api_key", ANTHROPIC_API_KEY="not-a-key")
+        self.assertEqual(code, 0, out)
+        self.assertIn("O Claude Code está usando a ANTHROPIC_API_KEY deste terminal, que o serviço não recebe.", out)
+        self.assertNotIn("Claude Code conectado a uma conta.", out)
 
 
 class Questions(Base):
@@ -406,11 +429,17 @@ class ServiceEndToEnd(Base):
         self.assertEqual(self.box.runner(["stop", "--workspace", "org_test"])[0], 0)
         self.assertIn("org_test: parado", self.box.runner(["status", "--workspace", "org_test"])[1])
         self.assertEqual(self.box.runner(["start", "--workspace", "org_test"])[0], 0)
-        self.assertIn("org_test: ligado", self.box.runner(["status", "--workspace", "org_test"])[1])
-        self.assertEqual(self.box.runner(["restart", "--workspace", "org_test"])[0], 0)
+        code, out = self.box.runner(["status", "--json"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual([(w["workspace"], w["state"], w["version"]) for w in json.loads(out)["workspaces"]],
+                         [("org_test", "running", VERSION)])
+        # The only workspace on this computer needs no --workspace.
+        code, out = self.box.runner(["restart"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Serviço de org_test reiniciado.", out)
 
         # The real runner logged a start for setup, start and restart, from the profile's env file.
-        code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "1000"])
+        code, out = self.box.runner(["logs", "--workspace", "org_test", "-n", "1000"])
         self.assertEqual(code, 0, out)
         starts = [line for line in out.splitlines() if " start " in line]
         self.assertEqual(len(starts), 3, out)
@@ -420,6 +449,9 @@ class ServiceEndToEnd(Base):
             self.assertIn("api=%s" % self.api.url, line)
 
         code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("org_test: ligado", self.box.runner(["status"])[1])
+        code, out = self.box.runner(["uninstall", "--workspace", "org_test", "--yes"])
         self.assertEqual(code, 0, out)
         self.assertIn("Serviço de org_test removido.", out)
         self.assertIn("revogue-o em Configurações > Sistema > Agentes", out)
