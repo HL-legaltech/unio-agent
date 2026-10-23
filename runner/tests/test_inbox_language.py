@@ -2,7 +2,6 @@
 into the responder protocol."""
 import os
 import unittest
-from pathlib import Path
 
 from inbox_support import HomeCase, inbox
 
