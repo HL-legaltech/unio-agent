@@ -17,7 +17,7 @@
 root=$(unio_root)
 version=$(unio_version "$root")
 data=${CLAUDE_PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/unio-plugin}
-project=${CLAUDE_PROJECT_DIR:-$PWD}
+project=${CLAUDE_PROJECT_DIR:-$(pwd -P)}
 workspace=$(unio_workspace "$project")
 file=$(unio_token_file "$project")
 token=$(unio_read_token "$file")
