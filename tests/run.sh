@@ -24,7 +24,10 @@ refused=$(fake_token RevokedFakeTokenNotASecret)
 off=$(fake_token AgentsOffFakeTokenNotASecret)
 second=$(fake_token SecondWorkspaceFakeTokenNotASecret)
 
+# Physical: on macOS $TMPDIR is under /var, a link to /private/var, and the
+# scripts name folders as pwd -P does.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/unio-tests.XXXXXX")
+tmp=$(CDPATH='' cd -P -- "$tmp" && pwd -P)
 server=
 trap 'if [ -n "$server" ]; then kill "$server" 2>/dev/null; fi; rm -rf "$tmp"' EXIT
 trap 'exit 130' INT TERM HUP
@@ -97,12 +100,15 @@ case \$1 in
   *) exit 64 ;;
 esac
 EOF
-# xdg-open, as far as the browser approval calls it: it logs the URL.
-cat > "$tmp/bin/xdg-open" <<EOF
+# xdg-open (Linux) and open (macOS), as far as the browser approval calls
+# them: they log the URL.
+for opener in xdg-open open; do
+  cat > "$tmp/bin/$opener" <<EOF
 #!/bin/sh
-printf '%s\n' "\$*" >> "$tmp/xdg-open.log"
+printf '%s\n' "\$*" >> "$tmp/browser.log"
 EOF
-chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open"
+done
+chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open" "$tmp/bin/open"
 PATH=$tmp/bin:$PATH
 
 free_port() {
@@ -226,6 +232,9 @@ printf '%s' "$other" > "$conf/workspaces/org_A/token"
 printf '%s\torg_A\n%s\torg_C\n%s/\torg_B/../x\n' "$work/a" "$work" "$work/b" > "$conf/projects"
 out=$(headers "$work/a/sub")
 has "$out" "Bearer $other"; check "a folder mapped to a workspace sends that workspace's token"
+# shellcheck disable=SC2016 # the script's own expansions, in its shell
+seen=$(agent "$work/a" "$plugin" "$shell" -c '. "$1"; unio_agent_dir' sh "$scripts/lib.sh")
+[ "$seen" = "$work/a" ]; check "the helper reads its agent's own folder (got $seen)"
 out=$(CLAUDE_PROJECT_DIR=$work/a headers "$tmp/elsewhere")
 has "$out" "Bearer $other"; check "CLAUDE_PROJECT_DIR picks the folder before the working directory"
 out=$(headers "$work/ab")
@@ -747,7 +756,7 @@ approve_in() {
 }
 
 home browser
-rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+rm -f "$tmp/connect/log" "$tmp/browser.log"
 approval pending "approved $good"
 out=$(DISPLAY=:0 approve_in "$tmp/repo")
 code=$?
@@ -757,20 +766,25 @@ code=$?
   has "$out" "Token salvo em ~/.config/unio/workspaces/org_test/token, para o workspace WorkspaceNameMarker" &&
   has "$out" "Ele vence em 30 dias\." && has "$out" "vale em todas as pastas deste computador"; check "browser: the first workspace's token is saved as the installer saves it, the computer's default"
 [ -z "$(find "$conf" -name '*.new')" ] && [ -z "$(find "$conf" -name 'token.new.*')" ]; check "browser: no temporary file is left"
-grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/xdg-open.log"; check "browser: the page opens in a browser on this screen"
+grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/browser.log"; check "browser: the page opens in a browser on this screen"
 grep -q '^/v1/agents/connect/start [0-9.]* {"client":"claude-code","host":"[A-Za-z0-9][A-Za-z0-9_-]*"}$' "$tmp/connect/log"; check "browser: start names the client and a host name"
 lacks "$out" "unio_" && lacks "$out" "FakeDeviceCode" &&
   ! grep -q -e "$good" -e FakeDeviceCode "$tmp/curl-argv.log"; check "browser: neither the token nor the device code is printed or on curl's command line"
 has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "browser: the header helper sends the approved token"
 
-rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+rm -f "$tmp/connect/log" "$tmp/browser.log"
 approval slow_down "approved $second"
 out=$(approve_in "$tmp/repo2")
 gap=$(grep '^/v1/agents/connect/poll ' "$tmp/connect/log" | awk '{ t[NR] = $2 } END { printf "%d", t[NR] - t[NR - 1] }')
 [ "$(polls)" -eq 2 ] && [ "$gap" -ge 6 ]; check "browser: slow_down adds five seconds to the interval"
 [ "$(token_of org_Second)" = "$second" ] && [ "$(cat "$conf/default-workspace")" = org_test ] &&
   grep -q "^$tmp/repo2	org_Second\$" "$conf/projects" && has "$out" "vale só nesta pasta"; check "browser: a second workspace, with no terminal to ask, covers only this folder"
-[ ! -e "$tmp/xdg-open.log" ]; check "browser: without a display, no browser is started"
+if [ "$(uname -s)" = Darwin ]; then
+  # A Mac has a screen whenever the session is not over SSH.
+  [ -e "$tmp/browser.log" ]; check "browser: on macOS the page opens with or without DISPLAY"
+else
+  [ ! -e "$tmp/browser.log" ]; check "browser: without a display, no browser is started"
+fi
 
 home browser-refused
 approval denied
