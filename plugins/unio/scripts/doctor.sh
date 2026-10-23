@@ -64,11 +64,38 @@ if [ -z "$token" ]; then
     line bad "core token: falta $(unio_tilde "$file") ($why); rode /unio:connect"
   fi
 else
-  # -L judges a linked token by its target, as the helper reads it.
-  if [ -z "$(find -L "$file" -prune \( -perm -040 -o -perm -004 -o -perm -020 -o -perm -002 \) 2>/dev/null)" ]; then
+  # -L judges a linked token by its target, as the helper reads it. Windows
+  # guards the home folder with its own permissions, and Git Bash reports
+  # modes that chmod cannot change there.
+  if [ "$UNIO_OS" = windows ] ||
+    [ -z "$(find -L "$file" -prune \( -perm -040 -o -perm -004 -o -perm -020 -o -perm -002 \) 2>/dev/null)" ]; then
     line ok "core token: $(unio_tilde "$file") ($why)"
   else
     line warn "core token: $(unio_tilde "$file") pode ser lido ou alterado por outros usuários; rode chmod 600 nele"
+  fi
+fi
+
+# The header helper finds this session's folder on its own (unio_agent_dir).
+# That matters only where folders are tied to workspaces, and can be checked
+# only from inside a session.
+if [ "$kind" = claude-code ] && [ -n "${CLAUDECODE:-}" ] && unio_mapped ''; then
+  if [ "$UNIO_OS" = windows ]; then
+    seen=
+    case ${CLAUDE_PID:-} in
+      ''|*[!0-9]*) ;;
+      *) seen=$(head -n 1 "$(unio_session_file "$CLAUDE_PID")" 2>/dev/null) ;;
+    esac
+    fix="confira que o Git for Windows está instalado e que os hooks do Claude Code estão ligados, e abra uma sessão nova"
+  else
+    seen=$(unio_agent_dir)
+    fix="o comando ps precisa estar disponível (e o lsof, no macOS)"
+  fi
+  if [ -z "$seen" ]; then
+    line bad "core folder: a conexão com o Unio não consegue saber a pasta desta sessão e por isso conecta sem token, para não usar o workspace de outra pasta; $fix"
+  elif [ "$(unio_workspace "$seen")" != "$workspace" ]; then
+    line bad "core folder: a conexão com o Unio vê a pasta $(unio_tilde "$seen"), de outro workspace; abra o Claude Code na pasta do projeto"
+  else
+    line ok "core folder: a conexão com o Unio usa o workspace desta pasta"
   fi
 fi
 

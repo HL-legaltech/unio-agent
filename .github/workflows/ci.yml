@@ -57,3 +57,57 @@ jobs:
           else
             sh tests/check_versions.sh
           fi
+
+  scripts-macos:
+    # The scripts and the installer under macOS's own sh (bash 3.2 in POSIX
+    # mode) and BSD sed, awk, find and stty, which differ from Linux's.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the scripts against a fake API under sh
+        run: /bin/sh tests/run.sh
+
+      - name: Run the scripts against a fake API under bash
+        run: /bin/bash tests/run.sh
+
+  session:
+    # A real Claude Code session with the plugin, on each system the plugin
+    # supports, against fake Anthropic and Unio APIs on loopback: no secret
+    # is used and nothing leaves the runner. Only this proves that the hook,
+    # the commands and the MCP header helper run there.
+    name: session (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_VERSION: "2.1.309"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Claude Code (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+
+      - name: Install Claude Code (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1))) $env:CLAUDE_CODE_VERSION'
+
+      - name: Run a session (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: python3 -I tests/e2e/claude_session.py --claude "$HOME/.local/bin/claude"
+
+      - name: Run a session (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python -I tests/e2e/claude_session.py --claude "$env:USERPROFILE\.local\bin\claude.exe"

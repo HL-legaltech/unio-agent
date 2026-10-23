@@ -40,7 +40,22 @@ fresh() {
   [ "$(field version)" = "$version" ]
 }
 
+# Windows only: tells the header helper which folder this session works in
+# (unio_agent_dir), before anything slower runs.
+remember_folder() {
+  case ${CLAUDE_PID:-} in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "${CLAUDE_PROJECT_DIR:-}" ] || return 0
+  sessions=$UNIO_STATE/sessions
+  (umask 077 && mkdir -p "$sessions" &&
+    printf '%s\n' "$CLAUDE_PROJECT_DIR" > "$sessions/$CLAUDE_PID.tmp.$$" &&
+    mv -f "$sessions/$CLAUDE_PID.tmp.$$" "$sessions/$CLAUDE_PID") 2>/dev/null
+  return 0
+}
+
 refresh() {
+  if [ "$UNIO_OS" = windows ]; then
+    find "$UNIO_STATE/sessions" -type f -mtime +7 -exec rm -f {} + 2>/dev/null
+  fi
   if [ -z "$token" ]; then
     rm -f "$status"
     return 0
@@ -168,6 +183,8 @@ notice() {
 
 case ${1:-notice} in
   refresh) refresh ;;
-  *) notice ;;
+  *)
+    [ "$UNIO_OS" != windows ] || remember_folder
+    notice ;;
 esac
 exit 0

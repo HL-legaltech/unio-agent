@@ -5,6 +5,12 @@
 - O agente move o status de um projeto junto com o trabalho: Em andamento quando uma tarefa começa, Concluído quando todas terminam, e de volta a Em andamento se o trabalho recomeça.
 - Um status que uma pessoa escolheu à mão continua como está.
 
+## 1.2.1
+
+- As ferramentas do Unio passam a usar o token do workspace ligado à pasta da sessão. Antes, o Claude Code usava sempre o workspace padrão do computador, mesmo numa pasta de outro workspace.
+- No Windows, com o Git for Windows, o aviso de início de sessão, /unio:doctor e a conexão com o Unio funcionam, e a página de aprovação abre sozinha no navegador.
+- /unio:doctor confere se a conexão com o Unio vê o workspace desta pasta.
+
 ## 1.2.0
 
 - Conecte sem copiar token: /unio:connect mostra um comando que pede a conexão ao Unio. Você confere o código, escolhe o workspace e aprova no navegador, e o token vai direto para este computador.
