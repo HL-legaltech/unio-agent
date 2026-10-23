@@ -6,6 +6,8 @@
     unio-inbox --dry-run             list the pending items without claiming any
     unio-inbox --reviews --dry-run   list the project review candidates and which would run
     unio-inbox --needs --dry-run     list the tasks waiting on a person and what a check would do
+    unio-inbox --workspace org_<id> ...    any of the above with that workspace's profile
+    unio-inbox --workspace org_<id> --print-paths    the profile's folders and token file, as JSON
 
 Each item is claimed on the server (so no machine or restart handles it
 twice), marked with an eyes reaction, and answered by one headless Claude Code
@@ -43,6 +45,18 @@ list_comments on that task follows ~/.config/unio/needs.md and names the items
 done; the runner ticks them. Its writes go through the MCP endpoint, each
 against the task's updatedAt as read. UNIO_NEEDS=observe logs what it would do
 and writes nothing; off (the default) never looks.
+
+Profiles: with --workspace org_<id>, everything belongs to that workspace's
+profile, one per workspace on a computer (unio-runner sets them up):
+  <config>/unio/runners/<org>/    runner-token, repos.json and runner-id, as below;
+                                  env, KEY=VALUE lines read at start (the real
+                                  environment wins); and responder.md, reviewer.md
+                                  or needs.md to replace the protocol of that name
+                                  in protocol/ beside this file
+  <state>/unio/runners/<org>/     what ~/.local/state/unio/inbox/ holds below
+<config> is $XDG_CONFIG_HOME or ~/.config and <state> is $XDG_STATE_HOME or
+~/.local/state on Linux and macOS; on Windows they are %APPDATA% and %LOCALAPPDATA%.
+Without --workspace, the runner keeps its single-machine files:
 
 Files:
   ~/.config/unio/token            the agent token (unio-auth)
@@ -93,7 +107,7 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from zoneinfo import ZoneInfo
 
 if os.name == "nt":
@@ -591,16 +605,81 @@ def remove_project_dirs(cwd, prefix=False):
                 shutil.rmtree(d, ignore_errors=True)
 
 
+WORKSPACE_ID = re.compile(r"^org_[A-Za-z0-9]+$")
+# The protocols this runner ships; a profile's own copy of one wins.
+PROTOCOL_DIR = Path(__file__).resolve().parent / "protocol"
+ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Where a profile lives is decided before its env file is read, so the file cannot move it.
+PATH_KEYS = {"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "APPDATA", "LOCALAPPDATA"}
+
+
+def profile_dirs(workspace, env=os.environ, platform=None):
+    """(config, state) folders of a workspace's profile, as pure paths in the
+    system's own form; unio-runner asks for them with --print-paths rather
+    than computing them again."""
+    if platform_name(platform) == "windows":
+        home = PureWindowsPath(env.get("USERPROFILE") or str(Path.home()))
+        roaming = PureWindowsPath(env.get("APPDATA") or home / "AppData" / "Roaming")
+        local = PureWindowsPath(env.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        return roaming / "unio" / "runners" / workspace, local / "unio" / "runners" / workspace
+    home = PurePosixPath(str(Path.home()))
+    config = PurePosixPath(env.get("XDG_CONFIG_HOME") or home / ".config")
+    state = PurePosixPath(env.get("XDG_STATE_HOME") or home / ".local" / "state")
+    return config / "unio" / "runners" / workspace, state / "unio" / "runners" / workspace
+
+
+def read_env_file(path):
+    """A profile's env file as {KEY: VALUE}: one KEY=VALUE a line, '#' lines
+    are comments, and quotes around a whole value go."""
+    try:
+        text = Path(path).read_text(encoding="utf-8").lstrip("\ufeff")
+    except OSError:
+        return {}
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if ENV_KEY.match(key) and key not in PATH_KEYS:
+            values[key] = value
+    return values
+
+
+def apply_env_file(path, environ=os.environ):
+    """Sets each variable the env file holds and the environment does not: the
+    real environment wins. Returns the names it set, for the start line."""
+    taken = []
+    for key, value in read_env_file(path).items():
+        if key not in environ:
+            environ[key] = value
+            taken.append(key)
+    return taken
+
+
 class Config:
-    def __init__(self, env=os.environ):
+    def __init__(self, env=os.environ, workspace=None):
         home = Path.home()
-        self.config_dir = Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "unio"
-        self.state_dir = Path(env.get("XDG_STATE_HOME") or home / ".local/state") / "unio" / "inbox"
-        # A runner token of its own when one is stored; else the
-        # person's token, which the API admits only transitionally.
-        runner = self.config_dir / "runner-token"
-        self.token_file = runner if runner.exists() else self.config_dir / "token"
-        self.responder = self.config_dir / "responder.md"
+        self.workspace = workspace
+        # The env file's variables this process took, set by main().
+        self.env_keys = []
+        if workspace:
+            config_dir, state_dir = profile_dirs(workspace, env)
+            self.config_dir, self.state_dir = Path(config_dir), Path(state_dir)
+            # A profile answers for a whole workspace, which only a runner token may.
+            self.token_file = self.config_dir / "runner-token"
+            self.token_hint = f"run: unio-runner setup --workspace {workspace}"
+        else:
+            self.config_dir = Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "unio"
+            self.state_dir = Path(env.get("XDG_STATE_HOME") or home / ".local/state") / "unio" / "inbox"
+            # A runner token of its own when one is stored; else the
+            # person's token, which the API admits only transitionally.
+            runner = self.config_dir / "runner-token"
+            self.token_file = runner if runner.exists() else self.config_dir / "token"
+            self.token_hint = "run unio-auth"
+        self.responder = self.protocol("responder.md")
         self.repos_file = self.config_dir / "repos.json"
         self.runner_id_file = self.config_dir / "runner-id"
         self.api = (env.get("UNIO_API_URL") or "https://api.unio.so/v1").rstrip("/")
@@ -619,7 +698,7 @@ class Config:
             str(home / ".local/bin" / ("claude.exe" if os.name == "nt" else "claude"))
         self.gh = env.get("UNIO_INBOX_GH") or shutil.which("gh") or "gh"
         self.git = shutil.which("git") or "git"
-        self.reviewer = self.config_dir / "reviewer.md"
+        self.reviewer = self.protocol("reviewer.md")
         mode = (env.get("UNIO_REVIEW") or "off").strip().lower()
         self.review_mode = mode if mode in REVIEW_MODES else "off"
         self.review_tz = env.get("UNIO_REVIEW_TZ") or "America/Sao_Paulo"
@@ -630,7 +709,8 @@ class Config:
             # No zone database at all (Windows without the tzdata package, which
             # ZoneInfo reads by itself when installed): the machine's zone stands in.
             self.review_zone = datetime.now().astimezone().tzinfo
-            self.zone_note = f"no time zone database (pip install tzdata): {self.review_tz} is read as this machine's zone"
+            self.zone_note = (f"no time zone database (pip install tzdata): {self.review_tz} is read as "
+                              "this machine's zone")
         self.review_window_text = env.get("UNIO_REVIEW_WINDOW") or "06:30-09:00"
         self.review_window = parse_window(self.review_window_text)
         self.review_model = env.get("UNIO_REVIEW_MODEL") or self.model
@@ -664,7 +744,7 @@ class Config:
         self.review_backlog_per_day = 2
         # A project the candidates have not listed for this long is forgotten.
         self.review_forget_after = timedelta(days=30)
-        self.needs_protocol = self.config_dir / "needs.md"
+        self.needs_protocol = self.protocol("needs.md")
         needs = (env.get("UNIO_NEEDS") or "off").strip().lower()
         self.needs_mode = needs if needs in NEEDS_MODES else "off"
         interval, bad_interval = env_number(env, "UNIO_NEEDS_INTERVAL", 15, 1, 24 * 60)
@@ -685,6 +765,15 @@ class Config:
         self.needs_max_budget_usd = float(self.needs_max_budget)
         # A mention that arrives during a check waits at most this long (s).
         self.needs_timeout = 300.0
+
+    def protocol(self, name):
+        """A protocol file: in a profile, its own copy when it has one, else the
+        one shipped beside the runner; without a profile, the configuration
+        folder's, which must be there."""
+        own = self.config_dir / name
+        if self.workspace and not own.is_file():
+            return PROTOCOL_DIR / name
+        return own
 
     @property
     def mcp_url(self):
@@ -2782,7 +2871,7 @@ class Runner:
                 h.setdefault("orphans", []).append(left)
         token = self.cfg.token()
         if not token:
-            return self._poll_error(h, f"no token in {self.cfg.token_file} (run unio-auth)", dry_run)
+            return self._poll_error(h, f"no token in {self.cfg.token_file} ({self.cfg.token_hint})", dry_run)
         api = Api(self.cfg.api, token)
         try:
             status, data = self.list_inbox(api)
@@ -2881,7 +2970,8 @@ class Runner:
     def serve(self):
         self.state.ensure()
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
-                       reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode)
+                       reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode,
+                       workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None)
         if not sys.platform.startswith("linux"):
             self.state.log("memory_guard_off", detail=f"no /proc/meminfo on {platform_name()}: answers never wait "
                                                       "for memory here")
@@ -2992,7 +3082,7 @@ class Runner:
         if token:
             status, rows, enabled, error = self.fetch_candidates(Api(cfg.api, token))
         else:
-            status, rows, enabled, error = 0, [], False, f"no token in {cfg.token_file} (run unio-auth)"
+            status, rows, enabled, error = 0, [], False, f"no token in {cfg.token_file} ({cfg.token_hint})"
         block["route"] = status or None
         if status == 404:
             # Never through _poll_error: answers go on, and the service log says it once.
@@ -3236,7 +3326,7 @@ class Runner:
             return 1
         token = cfg.token()
         if not token:
-            print(f"unio-inbox: no token in {cfg.token_file} (run unio-auth)", file=sys.stderr)
+            print(f"unio-inbox: no token in {cfg.token_file} ({cfg.token_hint})", file=sys.stderr)
             return 1
         status, rows, enabled, error = self.fetch_candidates(Api(cfg.api, token))
         if status == 404:
@@ -3312,7 +3402,7 @@ class Runner:
         self.needs_pass_at = now
         token = cfg.token()
         if not token:
-            self._needs_error(h, f"no token in {cfg.token_file} (run unio-auth)", now, True, {})
+            self._needs_error(h, f"no token in {cfg.token_file} ({cfg.token_hint})", now, True, {})
             return
         self.needs_pass(Api(cfg.api, token), h, now, cfg.needs_mode)
 
@@ -3875,7 +3965,7 @@ class Runner:
             return 1
         token = cfg.token()
         if not token:
-            print(f"unio-inbox: no token in {cfg.token_file} (run unio-auth)", file=sys.stderr)
+            print(f"unio-inbox: no token in {cfg.token_file} ({cfg.token_hint})", file=sys.stderr)
             return 1
         h = self.state.health()
         result = self.needs_pass(Api(cfg.api, token), h, now, "dry")
@@ -4000,18 +4090,32 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="one poll, then exit")
     mode.add_argument("--dry-run", action="store_true", help="list pending items without claiming")
+    mode.add_argument("--print-paths", action="store_true",
+                      help="print the profile's config and state folders and its token file as JSON, then exit")
     ap.add_argument("--reviews", action="store_true",
                     help="with --dry-run: list the project review candidates and which would run")
     ap.add_argument("--needs", action="store_true",
                     help="with --dry-run: list the tasks waiting on a person and what a needs check would do")
+    ap.add_argument("--workspace", metavar="org_ID",
+                    help="the workspace whose profile to use; without it, the single-machine files")
     args = ap.parse_args(argv)
+    if args.workspace is not None and not WORKSPACE_ID.match(args.workspace):
+        ap.error("--workspace takes a workspace id such as org_2abc")
     if args.reviews and not args.dry_run:
         ap.error("--reviews goes with --dry-run")
     if args.needs and not args.dry_run:
         ap.error("--needs goes with --dry-run")
     if args.needs and args.reviews:
         ap.error("--needs and --reviews are two dry runs: pass one")
-    runner = Runner(Config())
+    if args.print_paths:
+        cfg = Config(os.environ, args.workspace)
+        print(json.dumps({"config": str(cfg.config_dir), "state": str(cfg.state_dir),
+                          "token": str(cfg.token_file)}))
+        return 0
+    env_keys = apply_env_file(Path(profile_dirs(args.workspace)[0]) / "env") if args.workspace else []
+    cfg = Config(os.environ, args.workspace)
+    cfg.env_keys = env_keys
+    runner = Runner(cfg)
     if args.dry_run:
         if args.reviews:
             return runner.review_dry_run()
