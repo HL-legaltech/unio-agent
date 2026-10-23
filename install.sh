@@ -278,6 +278,17 @@ auto_update() {
   return 0
 }
 
+# Links folder $2 to folder $1. On Windows Git Bash's ln -s copies the
+# folder, and the copy would never see a git pull, so there it is a
+# directory junction, which needs no administrator.
+link_dir() {
+  if [ "$os" = windows ]; then
+    MSYS_NO_PATHCONV=1 cmd.exe /c mklink /J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+  else
+    ln -s "$1" "$2"
+  fi
+}
+
 install_codex() {
   if ! command -v git >/dev/null 2>&1; then
     say "O comando git não está no PATH. Instale o Git e rode este comando de novo."
@@ -309,7 +320,7 @@ install_codex() {
   link=$HOME/.agents/skills/unio
   if [ -L "$link" ] && [ ! -e "$link" ]; then rm -f "$link"; fi
   if [ ! -e "$link" ]; then
-    if mkdir -p "$HOME/.agents/skills" && ln -s "$skill" "$link"; then
+    if mkdir -p "$HOME/.agents/skills" && link_dir "$skill" "$link"; then
       say "Skill do Unio ligada em $(tilde "$link")."
     else
       say "Não foi possível criar $(tilde "$link"). Crie um link para $(tilde "$skill") nesse lugar."
@@ -322,21 +333,31 @@ install_codex() {
 }
 
 # Codex runs the helper without a shell, so the block names the real home
-# folder instead of ~ or $HOME.
+# folder instead of ~ or $HOME. On Windows sh is not on the PATH Codex
+# sees, so the block names Git's own sh.exe, and both paths take the C:/
+# form Windows programs read.
 codex_config() {
   config=$HOME/.codex/config.toml
   if grep -q 'http_headers_helper.*mcp-headers\.sh' "$config" 2>/dev/null; then
     say "O Codex já lê o token pelo helper do Unio ($(tilde "$config"))."
     return 0
   fi
-  case $clone in
+  helper=$clone/plugins/unio/scripts/mcp-headers.sh
+  sh_path='sh'
+  if [ "$os" = windows ]; then
+    helper=$(cygpath -m "$helper")
+    sh_path=$(cygpath -m "$(command -v sh)")
+  fi
+  case $helper$sh_path in
     *[\'\"\\]*)
       say "O caminho da sua pasta pessoal tem aspas ou barra invertida: monte o bloco do Codex à mão, como no README (https://github.com/$marketplace#codex)."
       return 0 ;;
   esac
+  runner=$sh_path
+  [ "$os" != windows ] || runner="'$sh_path'"
   say "Acrescente este bloco a $(tilde "$config"), no lugar de qualquer [mcp_servers.unio] que já esteja lá:"
-  printf '\n[mcp_servers.unio]\nurl = "%s/mcp"\nhttp_headers_helper = "sh '\''%s'\'' codex"\n\n' \
-    "$(api)" "$clone/plugins/unio/scripts/mcp-headers.sh"
+  printf '\n[mcp_servers.unio]\nurl = "%s/mcp"\nhttp_headers_helper = "%s '\''%s'\'' codex"\n\n' \
+    "$(api)" "$runner" "$helper"
 }
 
 # POSTs the JSON on stdin to path $1 of the API, body to file $2, as lib.sh's
