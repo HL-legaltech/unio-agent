@@ -2593,6 +2593,9 @@ class Runner:
                     elif on_wait:
                         on_wait(s)
                 reader.join(timeout=10)
+                if not reader.is_alive():
+                    # Each session's pipe would otherwise stay open until the collector finds it.
+                    proc.stdout.close()
                 s.returncode = proc.returncode
             s.stderr_tail = (out / "stderr.txt").read_bytes()[-2000:].decode("utf-8", "replace")
             return s
