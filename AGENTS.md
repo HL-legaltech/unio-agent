@@ -132,6 +132,9 @@ No AI attribution. Stage named paths only.
   table of commands, and `bin/unio.cmd` prints the same lines. A new command
   adds its line there and a branch to each file; the table lists only
   commands both files run.
+- `bin/unio.cmd` runs every command but `runner` as `bin/unio`, through Git
+  for Windows' `sh.exe`, which is not on the PATH: it finds it from
+  `where git`.
 - `bin/unio.cmd` stays ASCII with CRLF line ends: cmd reads it in the
   console's code page, and can miss a label in a file with bare LFs. The
   help's accents reach it only as data, under code page 65001.

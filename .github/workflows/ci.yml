@@ -188,6 +188,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $connect = & .\bin\unio.cmd help connect | Out-String
+          if ($LASTEXITCODE -or $connect -notmatch '^Uso: unio connect') { throw "unio.cmd help connect: $connect" }
           & .\bin\unio.cmd bogus
           if ($LASTEXITCODE -ne 2) { throw "unio.cmd bogus exited $LASTEXITCODE" }
           $help = & .\bin\unio.cmd help | Out-String

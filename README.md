@@ -106,7 +106,8 @@ Where managed settings restrict marketplaces with `strictKnownMarketplaces`, add
 Without auto-update, a notice at the start of a session tells you once when a release is out, and the agent tells you when Unio reports your version behind. To update:
 
 - **In Claude Code:** run `/unio:update`, then `/reload-plugins`.
-- **From a shell:**
+- **From a terminal:** run `unio update`. It updates what this computer has: the plugin, the clone Codex and the `unio` command use, and the answering service. Then run `/reload-plugins` in each open session.
+- **From a shell, without the `unio` command:**
 
   ```sh
   claude plugin marketplace update unio
@@ -114,7 +115,7 @@ Without auto-update, a notice at the start of a session tells you once when a re
   ```
 
   Then run `/reload-plugins` in each open session. New sessions load the new version on their own.
-- **In Codex:** run `git -C ~/.local/share/unio/agent pull --ff-only`, then start a new Codex session.
+- **In Codex:** run `unio update`, or `git -C ~/.local/share/unio/agent pull --ff-only`, then start a new Codex session.
 
 When a version is below the minimum Unio accepts, every Unio tool but `get_me` refuses with `agent_client_outdated` until you update.
 
@@ -126,6 +127,21 @@ When a version is below the minimum Unio accepts, every Unio tool but `get_me` r
 | `/unio:doctor` | Checks the plugin, Claude Code, the token, Unio's answer, updates, Codex, and leftovers of a setup made by hand, and says how to fix each problem. It never shows the token. |
 | `/unio:update` | Installs the newest release now. |
 | `/unio:help` | What the plugin does, its commands and ready prompts, and what this release changed. |
+
+## The unio command
+
+The installers put a `unio` command on your PATH: [`bin/unio`](bin/unio) in the clone, linked as `~/.local/bin/unio` on macOS and Linux. On Windows they add the clone's `bin` folder to your user `Path`, and `unio` runs in PowerShell, cmd and Git Bash alike. It speaks Portuguese, works in any folder, and follows the same folder and token rules as the plugin.
+
+| Command | What it does |
+| --- | --- |
+| `unio connect` | Connects this computer to a workspace, approved in the browser. `--token --workspace org_…` reads a token from the page at a hidden prompt instead. |
+| `unio status` | Each connected workspace, whether Unio accepts its token and when it expires, the folders it serves, and what is installed. |
+| `unio doctor` | The same checks as `/unio:doctor`, for the current folder. `--codex` checks Codex instead; `--json` prints one item per check, for scripts. |
+| `unio update` | Installs the newest plugin, clone and answering service, as installed. |
+| `unio disconnect` | Deletes a workspace's token and folder lines from this computer (`--workspace org_…`, or the current folder's). The token stays valid in Unio until you revoke it. |
+| `unio runner` | The [answering service](#answering-service)'s commands. |
+
+`unio help <command>` and `unio <command> --help` show each command's options. The command exits with 0 when everything worked, 1 when something failed or is missing, and 2 for a usage error, and never waits for an answer without a terminal.
 
 ## Ready prompts
 
