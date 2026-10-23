@@ -37,7 +37,7 @@ class Kind(unittest.TestCase):
     def test_names(self):
         self.assertEqual(ur.unit_name("org_x"), "unio-runner@org_x.service")
         self.assertEqual(ur.launchd_label("org_x"), "so.unio.runner.org_x")
-        self.assertEqual(ur.task_name("org_x"), "\\Unio\\Runner org_x")
+        self.assertEqual(ur.task_name("org_x"), "Unio Runner org_x")
 
 
 class SystemdUnit(unittest.TestCase):
@@ -103,7 +103,7 @@ class TaskXml(unittest.TestCase):
     def test_task_runs_at_logon_and_comes_back(self):
         text, root = self.render()
         self.assertTrue(text.startswith('<?xml version="1.0" encoding="UTF-16"?>'))
-        self.assertEqual(self.find(root, "t:RegistrationInfo/t:URI"), "\\Unio\\Runner org_x")
+        self.assertEqual(self.find(root, "t:RegistrationInfo/t:URI"), "\\Unio Runner org_x")
         self.assertEqual(self.find(root, "t:Triggers/t:LogonTrigger/t:UserId"), "DESKTOP-1\\someone")
         self.assertEqual(self.find(root, "t:Triggers/t:LogonTrigger/t:Repetition/t:Interval"), "PT1M")
         self.assertEqual(self.find(root, "t:Principals/t:Principal/t:LogonType"), "InteractiveToken")
@@ -284,7 +284,7 @@ class LaunchdCommands(Base):
 
 
 class TaskCommands(Base):
-    NAME = "\\Unio\\Runner org_x"
+    NAME = "Unio Runner org_x"
 
     def test_install_creates_from_utf16_xml_and_runs(self):
         rec = Recorder()
@@ -315,7 +315,8 @@ class TaskCommands(Base):
         for number, state in (("4", "running"), ("3", "stopped"), ("1", "stopped"), ("-1", "absent")):
             svc.run = Recorder({("powershell",): (0, number + "\r\n", "")})
             self.assertEqual(svc.state("org_x"), state, number)
-            self.assertIn("'Runner org_x'", svc.run.calls[0][-1])
+            # At the root, where a standard user may register a task.
+            self.assertIn("-TaskPath '\\' -TaskName 'Unio Runner org_x'", svc.run.calls[0][-1])
         svc.run = Recorder({("powershell",): (127, "", "not found"), ("schtasks", "/Query"): (0, "", "")})
         self.assertEqual(svc.state("org_x"), "unknown")
         svc.run = Recorder({("powershell",): (127, "", "not found"), ("schtasks", "/Query"): (1, "", "ERROR")})

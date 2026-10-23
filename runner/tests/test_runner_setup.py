@@ -339,7 +339,7 @@ class ServiceEndToEnd(Base):
             self.assertIn(["plutil", "-lint", str(plist)], calls)
             self.assertIn(["launchctl", "bootstrap", "gui/%d" % os.getuid(), str(plist)], calls)
         else:
-            self.assertIn(["schtasks", "/Create", "/TN", "\\Unio\\Runner org_test", "/XML",
+            self.assertIn(["schtasks", "/Create", "/TN", "Unio Runner org_test", "/XML",
                            str(self.state / "task.xml"), "/F"], calls)
         for argv in calls:
             self.assertNotIn("unio-inbox.service", " ".join(argv))

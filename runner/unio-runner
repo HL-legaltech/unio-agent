@@ -611,7 +611,9 @@ def launchd_label(org):
 
 
 def task_name(org):
-    return "\\Unio\\Runner " + org
+    # At the library's root: a standard user may add a task there but not
+    # create a folder, as the per-user tasks of browsers and OneDrive show.
+    return "Unio Runner " + org
 
 
 def template(name):
@@ -659,7 +661,7 @@ def render_task(org, pythonw, inbox, user, workdir):
         raise ValueError("a quote in %r" % inbox)
     arguments = '-X utf8 "%s" --workspace %s' % (inbox, org)
     body = template("unio-runner-task.xml").substitute(
-        org=xml_escape(org), name=xml_escape(task_name(org)), user=xml_escape(user),
+        org=xml_escape(org), name=xml_escape("\\" + task_name(org)), user=xml_escape(user),
         command=xml_escape(str(pythonw)), arguments=xml_escape(arguments), workdir=xml_escape(str(workdir)))
     return '<?xml version="1.0" encoding="UTF-16"?>\n' + body
 
@@ -873,8 +875,8 @@ class Tasks:
 
     def state(self, org):
         # The state as a number: schtasks prints it in the system's language.
-        script = ("$t = Get-ScheduledTask -TaskPath '\\Unio\\' -TaskName 'Runner %s' -ErrorAction SilentlyContinue; "
-                  "if ($t) { [int]$t.State } else { -1 }" % org)
+        script = ("$t = Get-ScheduledTask -TaskPath '\\' -TaskName '%s' -ErrorAction SilentlyContinue; "
+                  "if ($t) { [int]$t.State } else { -1 }" % task_name(org))
         code, out, _ = self.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
         number = out.strip()
         if code == 0 and re.fullmatch(r"-?[0-9]+", number):

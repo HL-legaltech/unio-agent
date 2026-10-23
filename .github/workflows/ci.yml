@@ -109,11 +109,11 @@ jobs:
           $xml = Join-Path $env:RUNNER_TEMP 'unio-runner-task.xml'
           python runner/tests/runner_support.py render schtasks $xml
           if ($LASTEXITCODE) { exit 1 }
-          schtasks /Create /TN '\Unio\Runner org_ci' /XML $xml /F
+          schtasks /Create /TN 'Unio Runner org_ci' /XML $xml /F
           if ($LASTEXITCODE) { exit 1 }
-          schtasks /Query /TN '\Unio\Runner org_ci' /V /FO LIST
+          schtasks /Query /TN 'Unio Runner org_ci' /V /FO LIST
           if ($LASTEXITCODE) { exit 1 }
-          schtasks /Delete /TN '\Unio\Runner org_ci' /F
+          schtasks /Delete /TN 'Unio Runner org_ci' /F
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Run install.ps1 in Windows PowerShell and PowerShell 7
