@@ -2,12 +2,12 @@
 name: unio
 description: Track engineering work in Unio, the team's task tracker, through the `unio` MCP tools, acting as the workspace's agent. Use in the top-level session at the start of substantive work (the user pastes a Unio task link or a key such as ABC-12, or asks to build, fix, investigate, migrate or ship something that will become a commit or pull request), whenever the work changes phase (plan settled, pull request opened, review round, merged, deployed, blocked), when a new topic deserves its own task, when work is larger than one task and should be planned as a project with milestones, and whenever the user mentions Unio, a task (tarefa), a ticket, a card, a project (projeto) or a milestone (marco).
 metadata:
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Track the work in Unio
 
-This is version 1.2 of the Unio skill.
+This is version 1.3 of the Unio skill.
 
 Every substantive session belongs to one Unio task, and that task reads at
 any moment like a precise record: what the work is, where it stands, what
@@ -43,8 +43,8 @@ is what Codex and other clients do instead.
   <how> is, **Claude Code:** `/unio:update`, then `/reload-plugins`;
   **Elsewhere:** `git -C ~/.local/share/unio/agent pull --ff-only`, then a
   new session. Asked whether the skill is up to date, answer from
-  `skill.status`; without one, say Unio cannot tell and that this is version
-  1.1.
+  `skill.status`; without one, say Unio cannot tell and give the version
+  this file states.
 
 ## 1. When a session is tracked
 
@@ -147,7 +147,9 @@ from the latest `get_task` text, passing its `updatedAt` as
   starts, `review` while a pull request is open, `waiting` when blocked
   (section 5), `done` when merged and live with nothing left for a person
   (or the investigation concluded), `canceled`, `backlog` for later. A team
-  without a review lane stays in `in_progress`.
+  without a review lane stays in `in_progress`. When `update_task` answers
+  with `projectStatus`, the move left the task's project behind: set it in
+  the same step (section 10).
 
 ## 4. Comment at milestones, not as a log
 
@@ -349,6 +351,13 @@ ask first.
 - **Keep it true:** follow-ups go into its project and milestone; move tasks
   between milestones with `update_task`; add or re-date stages with
   `create_milestone` or `update_milestone`.
+- **Status follows the work.** When `get_project` gives `statusAdvice`, or
+  `update_task` gives `projectStatus`, set the project to the status it
+  names with `update_project`, unasked, and say so in one chat line: in
+  progress once a task began, completed once every task is done, in
+  progress again when work resumes. The server never advises against a
+  status a person chose (`status.held`), so apply it as given. Any other
+  status only when asked, and never `canceled` unasked.
 - **Updates:** `post_project_update` when the user asks, with the health
   they name. Unasked, only after your merged-and-live work moves the
   project: `get_project`, and post only when `sinceLastUpdate.tier` is
