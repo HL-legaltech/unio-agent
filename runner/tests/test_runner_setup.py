@@ -1,6 +1,6 @@
-"""unio-runner setup, run as a person runs it against the fakes in
-runner_support.py: the checks, the token, unio-inbox --check, the
-repositories and, on this system, the service."""
+"""unio-runner setup, run as a person runs it against the real unio-inbox
+and the fakes in runner_support.py: the checks, the token, unio-inbox
+--check, the repositories and, on this system, the service."""
 
 import json
 import os
@@ -8,10 +8,11 @@ import sys
 import unittest
 from unittest import mock
 
-from runner_support import (AGENT, OFF, OTHER, REVOKED, RUNNER, SESSION, TOKENS, WORKSPACE, FakeApi, Sandbox,
-                            captured, closed_port_url, load_runner)
+from runner_support import (AGENT, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE, FakeApi,
+                            Sandbox, captured, closed_port_url, load_runner)
 
 ur = load_runner()
+VERSION = (RUNNER_DIR / "VERSION").read_text(encoding="utf-8").strip()
 
 
 class Base(unittest.TestCase):
@@ -35,8 +36,8 @@ class Base(unittest.TestCase):
             return None
 
     def assertNoTokenLeaked(self, *outputs):
-        texts = list(outputs) + [p.read_text(encoding="utf-8") for p in (self.box.inbox_log, self.box.claude_log,
-                                                                          self.box.service_log) if p.exists()]
+        files = (self.box.claude_log, self.box.service_log, self.state / "log.jsonl")
+        texts = list(outputs) + [p.read_text(encoding="utf-8") for p in files if p.exists()]
         texts += [path for _, path in self.api.requests]
         for text in texts:
             for token in TOKENS:
@@ -60,7 +61,8 @@ class SetupWithoutService(Base):
                          {"PLA": ["octo-org/api"], "SUP": ["octo-org/help"]})
         self.assertIn("UNIO_API_URL=%s" % self.api.url, (self.config / "env").read_text(encoding="utf-8").splitlines())
         self.assertEqual([c for c in self.box.logged(self.box.claude_log)], [["--version"], ["auth", "status", "--json"]])
-        self.assertIn(["--workspace", "org_test", "--check"], self.box.logged(self.box.inbox_log))
+        # The workspace and agent names above came from unio-inbox --check, its only request.
+        self.assertEqual(self.api.requests, [("GET", "/v1/agents/me")])
         self.assertEqual(list(self.config.glob("*.new")), [])
         self.assertNoTokenLeaked(out)
 
@@ -323,7 +325,7 @@ class ServiceEndToEnd(Base):
         code, out = self.box.runner(["status"])
         self.assertEqual(code, 0, out)
         self.assertIn("org_test: ligado", out)
-        self.assertIn("  versão: 2.0.0", out)
+        self.assertIn("  versão: %s" % VERSION, out)
         self.assertIn("  atualização automática: ", out)
 
         self.assertEqual(self.box.runner(["stop", "--workspace", "org_test"])[0], 0)
@@ -332,10 +334,15 @@ class ServiceEndToEnd(Base):
         self.assertIn("org_test: ligado", self.box.runner(["status", "--workspace", "org_test"])[1])
         self.assertEqual(self.box.runner(["restart", "--workspace", "org_test"])[0], 0)
 
-        code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "2"])
+        # The real runner logged a start for setup, start and restart, from the profile's env file.
+        code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "1000"])
         self.assertEqual(code, 0, out)
-        self.assertEqual(sum(" start " in line for line in out.splitlines()), 2)
-        self.assertIn("version=2.0.0", out)
+        starts = [line for line in out.splitlines() if " start " in line]
+        self.assertEqual(len(starts), 3, out)
+        for line in starts:
+            self.assertIn("version=%s" % VERSION, line)
+            self.assertIn("workspace=org_test", line)
+            self.assertIn("api=%s" % self.api.url, line)
 
         code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
         self.assertEqual(code, 0, out)

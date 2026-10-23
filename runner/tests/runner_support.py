@@ -1,16 +1,18 @@
 """Shared pieces of unio-runner's tests: the script loaded as a module, a
 throwaway home with fake programs on PATH, and a fake Unio API.
 
-The fakes stand in for what unio-runner calls, so no test reaches a real
-service manager, a real Claude Code or the network:
+unio-runner always runs the real runner/unio-inbox beside it, for
+--print-paths, --check and the service itself. The fakes stand in for the
+rest, so no test reaches a real service manager, a real Claude Code or the
+network:
 
-- unio-inbox: --print-paths and --check exactly as the stage 6 contract
-  defines them, and a service run that logs a start line and exits, so
-  integrating the real runner is a drop-in;
+- the Unio API: GET /v1/agents/me by token, and an empty inbox and presence
+  for a runner the fake service managers start;
 - claude: --version and auth status --json;
 - systemctl, loginctl, launchctl, plutil, schtasks and powershell: each call
-  is logged, and one that starts a workspace's service runs the fake
-  unio-inbox as the service would.
+  is logged; one that starts a workspace's service starts the real
+  unio-inbox in the background as the service would, and one that stops it
+  ends that process.
 
 CI also renders the service definitions with this file, to check them with
 each system's own tool:
@@ -74,9 +76,10 @@ def me_body(org, purpose):
 
 
 class FakeApi:
-    """GET /v1/agents/me on 127.0.0.1, answering by bearer token. Each request
-    is recorded as (method, path), so a test can prove a token never reached a
-    URL and count the calls."""
+    """GET /v1/agents/me on 127.0.0.1, answering by bearer token, and for a
+    runner token the empty inbox and the presence a running unio-inbox calls.
+    Each request is recorded as (method, path), so a test can prove a token
+    never reached a URL and count the calls."""
 
     ANSWERS = {
         RUNNER: (200, me_body("org_test", "runner")),
@@ -94,11 +97,21 @@ class FakeApi:
             def log_message(self, *args):
                 pass
 
-            def do_GET(self):
-                api.requests.append(("GET", self.path))
+            def answer(self):
+                api.requests.append((self.command, self.path))
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
                 token = (self.headers.get("Authorization") or "")[len("Bearer "):]
                 status, body = api.ANSWERS.get(token, (401, {"error": "Token inválido."}))
-                if self.path != "/v1/agents/me":
+                route = (self.command, self.path.split("?", 1)[0])
+                if route == ("GET", "/v1/agents/me"):
+                    pass
+                elif status == 200 and route == ("GET", "/v1/agents/inbox"):
+                    body = {"data": []}
+                elif status == 200 and route[0] == "PUT" and route[1].startswith("/v1/agents/presence/"):
+                    body = {"data": {}}
+                else:
                     status, body = 404, {"error": "Não encontrado."}
                 data = json.dumps(body, separators=(",", ":")).encode()
                 self.send_response(status)
@@ -106,6 +119,8 @@ class FakeApi:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            do_GET = do_POST = do_PUT = do_DELETE = answer
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = "http://127.0.0.1:%d/v1" % self.server.server_address[1]
@@ -124,108 +139,6 @@ def closed_port_url():
         s.bind(("127.0.0.1", 0))
         return "http://127.0.0.1:%d/v1" % s.getsockname()[1]
 
-
-FAKE_INBOX = r'''"""The fake unio-inbox of unio-runner's tests (see runner_support.py)."""
-import json
-import os
-import re
-import shutil
-import sys
-import urllib.error
-import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
-
-
-def paths(org):
-    if os.name == "nt":
-        config = Path(os.environ["APPDATA"]) / "unio" / "runners" / org
-        state = Path(os.environ["LOCALAPPDATA"]) / "unio" / "runners" / org
-    else:
-        home = Path.home()
-        config = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "unio" / "runners" / org
-        state = Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state") / "unio" / "runners" / org
-    return config, state, config / "runner-token"
-
-
-def setting(config, key):
-    if os.environ.get(key):
-        return os.environ[key]
-    try:
-        lines = (config / "env").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for line in lines:
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            name, value = line.split("=", 1)
-            if name.strip() == key:
-                return value.strip()
-    return None
-
-
-def check(org):
-    config, _, token_file = paths(org)
-    problems, workspace, agent, language = [], None, None, None
-    try:
-        token = token_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        token = ""
-    if not token:
-        problems.append("the profile has no runner-token")
-    else:
-        api = (setting(config, "UNIO_API_URL") or "https://api.unio.so/v1").rstrip("/")
-        request = urllib.request.Request(api + "/agents/me", headers={"Authorization": "Bearer " + token})
-        data = None
-        try:
-            with urllib.request.urlopen(request, timeout=10) as reply:
-                data = json.loads(reply.read().decode("utf-8"))["data"]
-        except urllib.error.HTTPError as e:
-            problems.append("Unio answered HTTP %d" % e.code)
-        except (urllib.error.URLError, OSError):
-            problems.append("Unio did not answer")
-        if data:
-            workspace = {"clerkId": data["workspace"]["clerkId"], "name": data["workspace"]["name"]}
-            agent = {"name": data["agent"]["name"]}
-            language = data["writing"]["language"]
-            if data["token"]["purpose"] != "runner":
-                problems.append("not a runner token")
-            if workspace["clerkId"] != org:
-                problems.append("the token belongs to another workspace")
-    if not shutil.which("claude"):
-        problems.append("claude is not on PATH")
-    print(json.dumps({"ok": not problems, "workspace": workspace, "agent": agent, "language": language,
-                      "problems": problems}))
-    return 0 if not problems else 1
-
-
-def main(argv):
-    log = os.environ.get("FAKE_INBOX_LOG")
-    if log:
-        with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(argv) + "\n")
-    if len(argv) < 2 or argv[0] != "--workspace" or not re.match(r"^org_[A-Za-z0-9]+$", argv[1]):
-        print("usage: unio-inbox --workspace org_<id> [--print-paths | --check]", file=sys.stderr)
-        return 2
-    org, rest = argv[1], argv[2:]
-    if rest == ["--print-paths"]:
-        config, state, token = paths(org)
-        print(json.dumps({"config": str(config), "state": str(state), "token": str(token)}))
-        return 0
-    if rest == ["--check"]:
-        return check(org)
-    if rest:
-        return 2
-    _, state, _ = paths(org)
-    state.mkdir(parents=True, exist_ok=True)
-    with open(state / "log.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({"at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "start",
-                            "pid": os.getpid(), "version": "2.0.0"}) + "\n")
-    return 0
-
-
-sys.exit(main(sys.argv[1:]))
-'''
 
 FAKE_CLAUDE = r'''"""The fake claude of unio-runner's tests: FAKE_CLAUDE_AUTH is in (the
 default), out, or old for a CLI without auth status."""
@@ -250,27 +163,36 @@ sys.exit(1)
 '''
 
 FAKE_SERVICE = r'''"""The fake service managers of unio-runner's tests (see runner_support.py).
-FAKE_SERVICE_STATE holds each workspace's state: running, ready (installed,
-not running), stopped or disabled."""
+FAKE_SERVICE_STATE holds each workspace's state (running, ready: installed
+and not running, stopped or disabled) and the pid of the runner it started.
+Starting a service starts the real unio-inbox FAKE_SERVICE_INBOX names, in
+the background as the service would, and waits for its start line; ending
+one stops that process. `cleanup` ends every runner still running."""
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 tool, args = sys.argv[1], sys.argv[2:]
 with open(os.environ["FAKE_SERVICE_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps([tool] + args) + "\n")
+INBOX = os.environ["FAKE_SERVICE_INBOX"]
+WAIT = 60
 state_file = Path(os.environ["FAKE_SERVICE_STATE"])
 try:
-    state = json.loads(state_file.read_text(encoding="utf-8"))
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
 except (OSError, ValueError):
-    state = {}
+    saved = {}
+state = saved.get("services") or {}
+pids = saved.get("pids") or {}
 
 
 def save():
-    state_file.write_text(json.dumps(state), encoding="utf-8")
+    state_file.write_text(json.dumps({"services": state, "pids": pids}), encoding="utf-8")
 
 
 def org_in(text):
@@ -278,10 +200,104 @@ def org_in(text):
     return found.group(0) if found else None
 
 
+def log_file(org):
+    """The runner's log, where unio-inbox --print-paths puts it."""
+    done = subprocess.run([sys.executable, INBOX, "--workspace", org, "--print-paths"], stdin=subprocess.DEVNULL,
+                          capture_output=True, encoding="utf-8", check=True)
+    return Path(json.loads(done.stdout)["state"]) / "log.jsonl"
+
+
+def size(path):
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def logged_after(path, offset, event):
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            if json.loads(line).get("event") == event:
+                return True
+        except (ValueError, AttributeError):
+            continue
+    return False
+
+
+def wait_for(path, offset, event, running):
+    deadline = time.monotonic() + WAIT
+    while time.monotonic() < deadline and running() and not logged_after(path, offset, event):
+        time.sleep(0.2)
+
+
+def ours(pid):
+    """Whether pid is still a runner this fake started: on Linux its command
+    line names the runner (a reused pid, or a zombie, does not); elsewhere
+    the pid recorded moments ago is trusted."""
+    if not os.path.isdir("/proc/self"):
+        return True
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return os.fsencode(INBOX) in f.read()
+    except OSError:
+        return False
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return ours(pid)
+
+
 def start(org):
+    end(org)
+    log = log_file(org)
+    mark = size(log)
+    # A test's runner must never update the checkout the tests run from.
+    env = dict(os.environ, PYTHONUTF8="1", UNIO_RUNNER_AUTOUPDATE="off")
+    if os.name == "nt":
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+    else:
+        flags = {"start_new_session": True}
+    child = subprocess.Popen([sys.executable, INBOX, "--workspace", org], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, **flags)
     state[org] = "running"
+    pids[org] = child.pid
     save()
-    subprocess.run([sys.executable, os.environ["UNIO_RUNNER_INBOX"], "--workspace", org], check=False)
+    wait_for(log, mark, "start", lambda: child.poll() is None)
+
+
+def end(org):
+    pid = pids.pop(org, None)
+    save()
+    if pid is None:
+        return
+    log = log_file(org)
+    mark = size(log)
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if handle:
+            ctypes.windll.kernel32.WaitForSingleObject(handle, WAIT * 1000)
+            ctypes.windll.kernel32.CloseHandle(handle)
+        return
+    if not ours(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    wait_for(log, mark, "stop", lambda: alive(pid))
 
 
 def finish(code=0, out=None):
@@ -291,6 +307,10 @@ def finish(code=0, out=None):
 
 
 org = org_in(" ".join(args))
+if tool == "cleanup":
+    for name in list(pids):
+        end(name)
+    finish()
 if tool == "systemctl":
     args = [a for a in args if a != "--user"]
     verb = args[0]
@@ -307,6 +327,7 @@ if tool == "systemctl":
         finish()
     if verb == "disable":
         if "--now" in args and org in state:
+            end(org)
             state[org] = "stopped"
             save()
         finish()
@@ -325,6 +346,7 @@ if tool == "launchctl":
     if verb == "bootout":
         if state.get(org) != "running":
             finish(3, "Boot-out failed: 3: No such process")
+        end(org)
         state[org] = "stopped"
         save()
         finish()
@@ -348,6 +370,7 @@ if tool == "schtasks":
         start(org)
         finish()
     if verb == "/end":
+        end(org)
         state[org] = "ready" if state[org] == "running" else state[org]
         save()
         finish()
@@ -356,6 +379,7 @@ if tool == "schtasks":
         save()
         finish()
     if verb == "/delete":
+        end(org)
         del state[org]
         save()
         finish()
@@ -398,18 +422,18 @@ class Sandbox:
         self.lib = self.root / "lib"
         for folder in (self.home, self.bin, self.lib, self.root / "appdata", self.root / "localappdata"):
             folder.mkdir()
-        self.inbox = self.lib / "unio-inbox"
-        self.inbox.write_text(FAKE_INBOX, encoding="utf-8")
+        self.inbox = RUNNER_DIR / "unio-inbox"
         (self.lib / "claude.py").write_text(FAKE_CLAUDE, encoding="utf-8")
         (self.lib / "service.py").write_text(FAKE_SERVICE, encoding="utf-8")
         write_program(self.bin, "claude", str(self.lib / "claude.py"))
         for tool in SERVICE_TOOLS:
             write_program(self.bin, tool, str(self.lib / "service.py"), tool)
-        self.inbox_log = self.root / "inbox.log"
         self.claude_log = self.root / "claude.log"
         self.service_log = self.root / "service.log"
         self.service_state = self.root / "service-state.json"
         self.extra = {}
+        # Runs before the folder goes: a runner a fake service started writes in it.
+        test.addCleanup(self.stop_services)
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith(DROPPED)}
@@ -419,8 +443,7 @@ class Sandbox:
             "APPDATA": str(self.root / "appdata"),
             "LOCALAPPDATA": str(self.root / "localappdata"),
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
-            "UNIO_RUNNER_INBOX": str(self.inbox),
-            "FAKE_INBOX_LOG": str(self.inbox_log),
+            "FAKE_SERVICE_INBOX": str(self.inbox),
             "FAKE_CLAUDE_LOG": str(self.claude_log),
             "FAKE_SERVICE_LOG": str(self.service_log),
             "FAKE_SERVICE_STATE": str(self.service_state),
@@ -437,6 +460,12 @@ class Sandbox:
             [sys.executable, str(UNIO_RUNNER)] + list(args), input=input_text, capture_output=True,
             encoding="utf-8", errors="replace", env=self.env(**extra), timeout=180)
         return done.returncode, done.stdout + done.stderr
+
+    def stop_services(self):
+        """Ends every runner a fake service manager left running."""
+        if self.service_state.exists():
+            subprocess.run([sys.executable, str(self.lib / "service.py"), "cleanup"], stdin=subprocess.DEVNULL,
+                           capture_output=True, env=self.env(), timeout=180)
 
     @contextlib.contextmanager
     def inside(self, **extra):

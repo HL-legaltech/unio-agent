@@ -13,7 +13,7 @@ it works (--check): this file asks it and never re-derives either, so the two
 cannot disagree. The service runs `<python> runner/unio-inbox --workspace
 <org>` from the clone this file sits in, under systemd --user on Linux, a
 LaunchAgent on macOS and a Task Scheduler task on Windows; the definitions
-come from runner/services/. UNIO_RUNNER_INBOX points at another unio-inbox.
+come from runner/services/.
 
 Python 3.9 or later, standard library only. Everything it prints is Brazilian
 Portuguese, in install.sh's voice. A token never reaches argv or a log.
@@ -223,7 +223,7 @@ def read_bytes(path):
 
 
 def inbox_path():
-    return Path(os.environ.get("UNIO_RUNNER_INBOX") or HERE / "unio-inbox")
+    return HERE / "unio-inbox"
 
 
 def child_env(api=None):
