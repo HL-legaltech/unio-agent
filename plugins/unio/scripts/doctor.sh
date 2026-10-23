@@ -64,8 +64,11 @@ if [ -z "$token" ]; then
     line bad "core token: falta $(unio_tilde "$file") ($why); rode /unio:connect"
   fi
 else
-  # -L judges a linked token by its target, as the helper reads it.
-  if [ -z "$(find -L "$file" -prune \( -perm -040 -o -perm -004 -o -perm -020 -o -perm -002 \) 2>/dev/null)" ]; then
+  # -L judges a linked token by its target, as the helper reads it. Windows
+  # guards the home folder with its own permissions, and Git Bash reports
+  # modes that chmod cannot change there.
+  if [ "$UNIO_OS" = windows ] ||
+    [ -z "$(find -L "$file" -prune \( -perm -040 -o -perm -004 -o -perm -020 -o -perm -002 \) 2>/dev/null)" ]; then
     line ok "core token: $(unio_tilde "$file") ($why)"
   else
     line warn "core token: $(unio_tilde "$file") pode ser lido ou alterado por outros usuários; rode chmod 600 nele"
