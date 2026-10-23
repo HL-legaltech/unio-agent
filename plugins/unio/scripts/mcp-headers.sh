@@ -33,7 +33,7 @@ if [ "${UNIO_INBOX_RUN:-}" = 1 ]; then
 elif unio_mapped ''; then
   folder=${CLAUDE_PROJECT_DIR:-}
   [ -n "$folder" ] || folder=$(unio_agent_dir)
-  if [ -z "$folder" ] && [ "$(pwd -P)" != "$(unio_root)" ]; then folder=$(pwd -P); fi
+  if [ -z "$folder" ] && [ "$(pwd -P)" != "$(unio_root)" ]; then folder=$PWD; fi
   [ -z "$folder" ] || token=$(unio_read_token "$(unio_token_file "$folder")")
 else
   token=$(unio_read_token "$(unio_token_file '')")

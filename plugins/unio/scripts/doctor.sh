@@ -12,9 +12,7 @@
 . "$(dirname -- "$0")/lib.sh"
 
 case ${1:-} in codex) kind=codex ;; *) kind=claude-code ;; esac
-# pwd -P, never $PWD: macOS's sh keeps a $PWD inherited from whatever
-# started it, even when that is another folder.
-project=${CLAUDE_PROJECT_DIR:-$(pwd -P)}
+project=${CLAUDE_PROJECT_DIR:-$PWD}
 root=$(unio_root)
 version=$(unio_version "$root")
 cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude}

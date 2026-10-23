@@ -27,9 +27,8 @@ quote() {
 
 
 instructions() {
-  here=${CLAUDE_PROJECT_DIR:-$(pwd -P)}
-  workspace=$(unio_workspace "$here")
-  file=$(unio_token_file "$here")
+  workspace=$(unio_workspace "${CLAUDE_PROJECT_DIR:-$PWD}")
+  file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
   # The commands below are sh commands, which a Windows terminal runs only
   # in Git Bash.
   terminal="outro terminal"
