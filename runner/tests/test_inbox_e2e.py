@@ -3,6 +3,7 @@ a fake Unio API on 127.0.0.1, and a fake claude found on PATH that answers
 through the MCP server it is given."""
 import json
 import os
+import shutil
 import signal
 from pathlib import Path
 from unittest import mock
@@ -120,3 +121,44 @@ class Once(HomeCase):
                 self.assertIn(words, replies[0]["body"]["content"])
                 done = self.fake.seen("POST", "/v1/agents/inbox/complete")[-1]["body"]
                 self.assertEqual(done["note"], inbox.TOO_LARGE_NOTE)
+
+
+class OnceWithoutProfile(Once):
+    """The single-machine setup a runner before profiles used: the files in
+    ~/.config/unio, its own responder protocol used as it is, the state in
+    ~/.local/state/unio/inbox. Only the writing language is new there."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.config.parent)
+        self.legacy = self.home / ".config" / "unio"
+        self.legacy.mkdir(parents=True, exist_ok=True)
+        (self.legacy / "token").write_text(FakeUnio.SESSION + "\n", encoding="utf-8")
+        (self.legacy / "repos.json").write_text('{"ABC": []}', encoding="utf-8")
+        self.responder = self.legacy / "responder.md"
+        self.responder.write_text("# Our own protocol\n\n## The workspace\n\nOur teams.\n", encoding="utf-8")
+        self.state = self.home / ".local" / "state" / "unio" / "inbox"
+
+    def once(self):
+        with mock.patch.object(inbox, "desk_memory", return_value=None):
+            return inbox.main(["--once"])
+
+    def test_claims_reacts_answers_and_completes(self):
+        self.assertEqual(self.once(), 0)
+        session, = self.sessions()
+        argv = session["argv"]
+        self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1], str(self.responder))
+        self.assertEqual(session["protocol"], self.responder.read_text(encoding="utf-8"))
+        self.assertIn("Writing language: Brazilian Portuguese.", session["prompt"])
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["outcome"], "replied")
+        self.assertTrue((self.state / "health.json").is_file())
+        self.assertTrue((self.legacy / "runner-id").is_file())
+        self.assertFalse((self.home / ".config" / "unio" / "runners").exists())
+        self.assertFalse((self.home / ".local" / "state" / "unio" / "runners").exists())
+
+    def test_the_local_responder_is_still_required(self):
+        self.responder.unlink()
+        self.assertEqual(self.once(), 0)
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/claim"), [])
+        health = json.loads((self.state / "health.json").read_text(encoding="utf-8"))
+        self.assertEqual(health["backoffReason"], "responder_missing")
