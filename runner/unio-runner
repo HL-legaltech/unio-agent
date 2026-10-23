@@ -38,6 +38,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
@@ -648,21 +649,25 @@ def render_launchd(org, python, inbox, path, log):
         inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)))
 
 
-def render_task(org, pythonw, inbox, user, workdir):
+def render_task(org, pythonw, inbox, user, workdir, start):
     """The task's XML, to write as UTF-16 as Task Scheduler exports it.
 
-    RestartOnFailure covers a task that fails to start, but an exit code alone
-    may not count as a failure, so the logon trigger also repeats every
-    minute and IgnoreNew drops the repeat while the runner runs: after an exit
-    (75 once it has updated itself, or a crash) it starts again within a
-    minute. -X utf8 is PYTHONUTF8=1 without a console window for a wrapper."""
+    RestartOnFailure covers a task that fails to start, not an exit code, so
+    a trigger repeats every minute and IgnoreNew drops the repeat while the
+    runner runs: after an exit (75 once it has updated itself, or a crash) it
+    starts again within a minute. A repetition runs only once its trigger has
+    fired, and setup starts the task with /Run, not a logon, so a time trigger
+    from `start` (setup's local time) repeats from setup on; the logon trigger
+    starts it at each logon. -X utf8 is PYTHONUTF8=1 without a console
+    window for a wrapper."""
     plain(org, pythonw, inbox, user, workdir)
     if '"' in str(inbox):
         raise ValueError("a quote in %r" % inbox)
     arguments = '-X utf8 "%s" --workspace %s' % (inbox, org)
     body = template("unio-runner-task.xml").substitute(
         org=xml_escape(org), name=xml_escape("\\" + task_name(org)), user=xml_escape(user),
-        command=xml_escape(str(pythonw)), arguments=xml_escape(arguments), workdir=xml_escape(str(workdir)))
+        command=xml_escape(str(pythonw)), arguments=xml_escape(arguments), workdir=xml_escape(str(workdir)),
+        start=start.replace(microsecond=0, tzinfo=None).isoformat())
     return '<?xml version="1.0" encoding="UTF-16"?>\n' + body
 
 
@@ -847,7 +852,7 @@ class Tasks:
 
     def install(self, org, prof, python, inbox, path):
         xml = prof.state / "task.xml"
-        text = render_task(org, python, inbox, self.user or task_user(), prof.state)
+        text = render_task(org, python, inbox, self.user or task_user(), prof.state, datetime.now())
         write_atomic(xml, text.encode("utf-16"), mode=0o600)
         must(self.run(["schtasks", "/Create", "/TN", task_name(org), "/XML", xml, "/F"]),
              "criar a tarefa agendada %s" % task_name(org))
@@ -861,7 +866,7 @@ class Tasks:
         must(self.run(["schtasks", "/Run", "/TN", task_name(org)]), "iniciar %s" % task_name(org))
 
     def stop(self, org):
-        # The trigger repeats every minute, so only a disabled task stays stopped.
+        # The time trigger repeats every minute, so only a disabled task stays stopped.
         must(self.run(["schtasks", "/Change", "/TN", task_name(org), "/DISABLE"]), "desativar %s" % task_name(org))
         self.run(["schtasks", "/End", "/TN", task_name(org)])
 

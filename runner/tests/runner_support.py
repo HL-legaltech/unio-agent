@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -526,7 +527,7 @@ def render(kind, out):
                                  str(out.with_name("service.log"))).encode("utf-8")
     elif kind == "schtasks":
         data = ur.render_task("org_ci", ur.service_python("schtasks"), inbox, ur.task_user(),
-                              str(out.parent)).encode("utf-16")
+                              str(out.parent), datetime.now()).encode("utf-16")
     else:
         sys.exit("render systemd|launchd|schtasks <file>")
     out.write_bytes(data)

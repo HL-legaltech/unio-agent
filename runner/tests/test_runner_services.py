@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -92,7 +93,8 @@ class TaskXml(unittest.TestCase):
     def render(self, **kw):
         args = dict(org="org_x", pythonw="C:\\Python312\\pythonw.exe",
                     inbox="C:\\Users\\a b\\AppData\\Local\\unio\\agent\\runner\\unio-inbox",
-                    user="DESKTOP-1\\someone", workdir="C:\\Users\\a b\\AppData\\Local\\unio\\runners\\org_x")
+                    user="DESKTOP-1\\someone", workdir="C:\\Users\\a b\\AppData\\Local\\unio\\runners\\org_x",
+                    start=datetime(2026, 10, 23, 9, 41, 7, 512000))
         args.update(kw)
         text = ur.render_task(**args)
         return text, ET.fromstring(text.encode("utf-16"))
@@ -106,6 +108,13 @@ class TaskXml(unittest.TestCase):
         self.assertEqual(self.find(root, "t:RegistrationInfo/t:URI"), "\\Unio Runner org_x")
         self.assertEqual(self.find(root, "t:Triggers/t:LogonTrigger/t:UserId"), "DESKTOP-1\\someone")
         self.assertEqual(self.find(root, "t:Triggers/t:LogonTrigger/t:Repetition/t:Interval"), "PT1M")
+        # Setup starts the task with /Run, so a logon trigger's repetition would only
+        # begin at the next logon: this one repeats from setup on.
+        self.assertEqual(self.find(root, "t:Triggers/t:TimeTrigger/t:StartBoundary"), "2026-10-23T09:41:07")
+        self.assertEqual(self.find(root, "t:Triggers/t:TimeTrigger/t:Enabled"), "true")
+        self.assertEqual(self.find(root, "t:Triggers/t:TimeTrigger/t:Repetition/t:Interval"), "PT1M")
+        self.assertIsNone(root.find("t:Triggers/t:TimeTrigger/t:Repetition/t:Duration", TASK))
+        self.assertIsNone(root.find("t:Triggers/t:TimeTrigger/t:EndBoundary", TASK))
         self.assertEqual(self.find(root, "t:Principals/t:Principal/t:LogonType"), "InteractiveToken")
         self.assertEqual(self.find(root, "t:Settings/t:ExecutionTimeLimit"), "PT0S")
         self.assertEqual(self.find(root, "t:Settings/t:RestartOnFailure/t:Interval"), "PT1M")
@@ -294,6 +303,8 @@ class TaskCommands(Base):
         self.assertTrue(xml.read_bytes().startswith(b"\xff\xfe"))
         root = ET.fromstring(xml.read_bytes())
         self.assertEqual(root.find("t:Triggers/t:LogonTrigger/t:UserId", TASK).text, "PC\\someone")
+        start = datetime.fromisoformat(root.find("t:Triggers/t:TimeTrigger/t:StartBoundary", TASK).text)
+        self.assertLess(abs((datetime.now() - start).total_seconds()), 60)
         self.assertEqual(rec.calls, [["schtasks", "/Create", "/TN", self.NAME, "/XML", str(xml), "/F"],
                                      ["schtasks", "/Run", "/TN", self.NAME]])
 
