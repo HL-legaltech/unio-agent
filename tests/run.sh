@@ -107,7 +107,19 @@ cat > "$tmp/bin/xdg-open" <<EOF
 printf '%s\n' "\$*" >> "$tmp/xdg-open.log"
 EOF
 chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open"
-PATH=$tmp/bin:$PATH
+# A unio command installed on this computer would turn connect's and the
+# doctor's hints to it, so its folders leave the PATH; the checks that want
+# one put a fake first.
+clean_path=
+saved_ifs=$IFS
+IFS=:
+set -f
+for d in $PATH; do
+  [ -x "$d/unio" ] || clean_path=${clean_path:+$clean_path:}$d
+done
+set +f
+IFS=$saved_ifs
+PATH=$tmp/bin:$clean_path
 
 free_port() {
   python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
