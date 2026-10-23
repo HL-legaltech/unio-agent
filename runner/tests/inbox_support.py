@@ -1,5 +1,5 @@
 """What the runner's tests share: unio-inbox loaded as a module, a throwaway
-home for each test, and a fake Unio API on 127.0.0.1.
+home for each test, a fake Unio API on 127.0.0.1, and a fake claude.
 
 Stdlib only, like the runner, so the tests run on any Python 3.9 or later
 on Linux, macOS and Windows: python -m unittest discover -s runner/tests
@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -96,6 +97,8 @@ class FakeUnio:
         self.workspace = workspace
         self.language = language
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
+        # What GET /agents/inbox lists; a completed item leaves it.
+        self.items = []
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -138,9 +141,37 @@ class FakeUnio:
         }}
 
     def route(self, request):
-        """(status, body) for one request; the routes past /agents/me are added by the tests that need them."""
-        if request["method"] == "GET" and request["path"] == "/v1/agents/me":
+        """(status, body) for one request: the routes an inbox run calls."""
+        method, path = request["method"], request["path"]
+        if method == "GET" and path == "/v1/agents/me":
             return self.me(request["token"])
+        if request["token"] not in (self.RUNNER, self.SESSION, self.OTHER):
+            return 401, {"error": "Token de agente inválido.", "code": "invalid_agent_token"}
+        body = request["body"] if isinstance(request["body"], dict) else {}
+        if method == "GET" and path == "/v1/agents/inbox":
+            with self.lock:
+                return 200, {"data": list(self.items)}
+        if method == "POST" and path == "/v1/agents/inbox/claim":
+            return 200, {"data": {"key": body.get("key"), "claimId": "claim-0001-fake", "attempts": 0}}
+        if method == "POST" and path in ("/v1/agents/inbox/complete", "/v1/agents/inbox/fail",
+                                         "/v1/agents/inbox/release"):
+            if path.endswith("/complete"):
+                with self.lock:
+                    self.items = [i for i in self.items if i.get("key") != body.get("key")]
+            return 200, {"data": {"key": body.get("key"), "attempts": 1}}
+        if method == "POST" and path == "/v1/agents/inbox/progress":
+            return 200, {"data": {}}
+        if method in ("PUT", "DELETE") and path == "/v1/agents/reactions":
+            return 200, {"data": {}}
+        if method == "PUT" and path.startswith("/v1/agents/presence/"):
+            return 200, {"data": {}}
+        if method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/comments"):
+            return 201, {"data": {"id": "c-runner-reply"}}
+        if method == "POST" and path == "/v1/mcp":
+            name = ((body.get("params") or {}).get("name"))
+            answer = {"comment": {"id": "c-session-reply"}} if name == "create_comment" else {}
+            return 200, {"jsonrpc": "2.0", "id": body.get("id"),
+                         "result": {"content": [{"type": "text", "text": json.dumps(answer)}]}}
         return 404, {"error": "Não encontrado.", "code": "not_found"}
 
 
@@ -173,3 +204,103 @@ def _handler(fake):
         do_GET = do_POST = do_PUT = do_DELETE = handle_any
 
     return Handler
+
+
+FAKE_CLAUDE = r'''
+"""A stand-in for Claude Code, for the runner's tests. `auth status --json`
+says it is signed in. A session (-p) reads its prompt on stdin, writes what
+it was given as one JSON line to $FAKE_CLAUDE_LOG, makes the folder Claude
+Code keeps for its working folder, and prints a canned stream-json run:
+init, get_task, then a create_comment it really sends to the MCP server in
+its --mcp-config, then a result with the outcome line. FAKE_CLAUDE_MODE=
+too_large ends at the turn cap instead, having written nothing."""
+import json
+import os
+import re
+import sys
+import urllib.request
+
+args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}))
+    sys.exit(0)
+if args == ["--version"]:
+    print("2.1.300 (Claude Code)")
+    sys.exit(0)
+
+
+def value(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+prompt = sys.stdin.buffer.read().decode("utf-8")
+protocol_file = value("--append-system-prompt-file")
+with open(protocol_file, encoding="utf-8") as f:
+    protocol = f.read()
+with open(value("--mcp-config"), encoding="utf-8") as f:
+    unio = json.load(f)["mcpServers"]["unio"]
+with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": args, "cwd": os.getcwd(), "prompt": prompt, "protocol": protocol,
+                        "headers": sorted(unio["headers"])}) + "\n")
+slug = re.sub(r"[^a-zA-Z0-9]", "-", os.getcwd())
+os.makedirs(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", slug, "tool-results"), exist_ok=True)
+
+
+def emit(event):
+    sys.stdout.write(json.dumps(event) + "\n")
+    sys.stdout.flush()
+
+
+def use(n, name, arguments, ok, text):
+    emit({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": f"tu{n}", "name": name, "input": arguments}]}})
+    emit({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": f"tu{n}", "is_error": not ok,
+         "content": [{"type": "text", "text": text}]}]}})
+
+
+emit({"type": "system", "subtype": "init", "claude_code_version": "2.1.300",
+      "tools": ["Read", "Grep", "Glob", "mcp__unio__get_task", "mcp__unio__list_comments",
+                "mcp__unio__create_comment", "mcp__unio__add_reaction"],
+      "mcp_servers": [{"name": "unio", "status": "connected"}]})
+task = re.search(r"^Task: (\S+) \(id ([^)]+)\)", prompt, re.M)
+use(1, "mcp__unio__get_task", {"task": task.group(1)}, True, json.dumps({"id": task.group(2)}))
+if os.environ.get("FAKE_CLAUDE_MODE") == "too_large":
+    emit({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 30,
+          "total_cost_usd": 0.02, "errors": ["Reached maximum number of turns (30)"]})
+    sys.exit(1)
+comment = re.search(r"^Comment id: (\S+)", prompt, re.M).group(1)
+content = "Resposta de teste." if "Writing language: Brazilian Portuguese." in prompt else "Test answer."
+arguments = {"task": task.group(1), "content": content, "reply_to": comment}
+call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "create_comment", "arguments": arguments}}
+request = urllib.request.Request(unio["url"], data=json.dumps(call).encode(), method="POST",
+                                 headers={**unio["headers"], "Content-Type": "application/json",
+                                          "Accept": "application/json, text/event-stream"})
+with urllib.request.urlopen(request, timeout=20) as response:
+    answer = json.loads(response.read())
+text = answer["result"]["content"][0]["text"]
+use(2, "mcp__unio__create_comment", arguments, not answer["result"].get("isError"), text)
+emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "total_cost_usd": 0.0123,
+      "result": content + "\n{\"outcome\":\"replied\",\"note\":\"answered the question\"}"})
+'''
+
+
+def write_fake_claude(folder, windows=None):
+    """The fake claude in `folder`, as a program PATH finds: a sh launcher
+    named claude on POSIX, claude.cmd on Windows, where a Python script
+    cannot run by its name. Returns the launcher's path."""
+    windows = os.name == "nt" if windows is None else windows
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    script = folder / "fake_claude.py"
+    script.write_text(FAKE_CLAUDE.lstrip(), encoding="utf-8")
+    if windows:
+        launcher = folder / "claude.cmd"
+        launcher.write_bytes(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n'.encode("utf-8"))
+    else:
+        launcher = folder / "claude"
+        launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} \"$@\"\n",
+                            encoding="utf-8")
+        launcher.chmod(0o755)
+    return launcher
