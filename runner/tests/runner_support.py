@@ -540,11 +540,13 @@ def render(kind, out):
     ur = load_runner()
     out = Path(out)
     inbox = str(ur.HERE / "unio-inbox")
+    # As setup run with XDG folders writes it, a space in one to quote.
+    env = {"XDG_CONFIG_HOME": str(out.parent / "xdg config"), "XDG_STATE_HOME": str(out.parent / "xdg-state")}
     if kind == "systemd":
-        data = ur.render_systemd(sys.executable, inbox, ur.service_path()).encode("utf-8")
+        data = ur.render_systemd(sys.executable, inbox, ur.service_path(), env).encode("utf-8")
     elif kind == "launchd":
         data = ur.render_launchd("org_ci", sys.executable, inbox, ur.service_path(),
-                                 str(out.with_name("service.log"))).encode("utf-8")
+                                 str(out.with_name("service.log")), env).encode("utf-8")
     elif kind == "schtasks":
         data = ur.render_task("org_ci", ur.service_python("schtasks"), inbox, ur.task_user(),
                               str(out.parent), datetime.now()).encode("utf-16")

@@ -645,18 +645,24 @@ def systemd_quote(value, dollar=True):
     return '"%s"' % value
 
 
-def render_systemd(python, inbox, path):
-    plain(python, inbox, path)
+def render_systemd(python, inbox, path, env=None):
+    """`env` is service_env(): more variables for the service, after PATH."""
+    variables = [("PATH", path)] + sorted((env or {}).items())
+    plain(python, inbox, *(value for pair in variables for value in pair))
+    environment = "\n".join("Environment=" + systemd_quote("%s=%s" % pair, dollar=False) for pair in variables)
     return template("unio-runner@.service").substitute(
-        python=systemd_quote(python), inbox=systemd_quote(inbox),
-        path=systemd_quote("PATH=" + path, dollar=False), stop_wait=STOP_WAIT)
+        python=systemd_quote(python), inbox=systemd_quote(inbox), environment=environment, stop_wait=STOP_WAIT)
 
 
-def render_launchd(org, python, inbox, path, log):
-    plain(org, python, inbox, path, log)
+def render_launchd(org, python, inbox, path, log, env=None):
+    variables = sorted((env or {}).items())
+    plain(org, python, inbox, path, log, *(value for pair in variables for value in pair))
+    environment = "".join("\n\t\t<key>%s</key>\n\t\t<string>%s</string>" % (xml_escape(k), xml_escape(v))
+                          for k, v in variables)
     return template("so.unio.runner.plist").substitute(
         label=xml_escape(launchd_label(org)), org=xml_escape(org), python=xml_escape(str(python)),
-        inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)), stop_wait=STOP_WAIT)
+        inbox=xml_escape(str(inbox)), path=xml_escape(path), log=xml_escape(str(log)), stop_wait=STOP_WAIT,
+        environment=environment)
 
 
 def render_task(org, pythonw, inbox, user, workdir, start):
@@ -699,6 +705,17 @@ def service_path(environ=None):
     return os.pathsep.join(folders) or "/usr/local/bin:/usr/bin:/bin"
 
 
+def service_env(environ=None):
+    """The XDG folders setup ran with, for the service: unio-inbox finds the
+    profile through them, and a service manager's environment lacks the
+    terminal's. Absolute ones only, as the XDG rules say; Windows has none."""
+    environ = os.environ if environ is None else environ
+    if os.name == "nt":
+        return {}
+    return {key: environ[key] for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")
+            if environ.get(key) and os.path.isabs(environ[key])}
+
+
 def task_user(environ=None):
     environ = os.environ if environ is None else environ
     user = environ.get("USERNAME") or getpass.getuser()
@@ -730,8 +747,8 @@ class Systemd:
         return ("O systemd deste computador não aceita serviços do usuário (systemctl --user). "
                 "Rode o serviço num terminal que fique aberto: %s" % foreground_command(org))
 
-    def install(self, org, prof, python, inbox, path):
-        write_atomic(self.unit_file, render_systemd(python, inbox, path).encode("utf-8"), mode=0o644)
+    def install(self, org, prof, python, inbox, path, env=None):
+        write_atomic(self.unit_file, render_systemd(python, inbox, path, env).encode("utf-8"), mode=0o644)
         must(self.systemctl("daemon-reload"), "recarregar o systemd do usuário")
         must(self.systemctl("enable", unit_name(org)), "habilitar %s" % unit_name(org))
         must(self.systemctl("restart", unit_name(org)), "ligar %s" % unit_name(org))
@@ -799,10 +816,10 @@ class Launchd:
     def available(self):
         return True
 
-    def install(self, org, prof, python, inbox, path):
+    def install(self, org, prof, python, inbox, path, env=None):
         plist = self.plist(org)
         log = prof.state / "service.log"
-        write_atomic(plist, render_launchd(org, python, inbox, path, log).encode("utf-8"), mode=0o644)
+        write_atomic(plist, render_launchd(org, python, inbox, path, log, env).encode("utf-8"), mode=0o644)
         must(self.run(["plutil", "-lint", plist]), "validar %s" % tilde(plist))
         self.run(["launchctl", "bootout", self.target(org)])
         # A stop leaves the service disabled, and launchd refuses to load it so.
@@ -863,7 +880,7 @@ class Tasks:
     def available(self):
         return True
 
-    def install(self, org, prof, python, inbox, path):
+    def install(self, org, prof, python, inbox, path, env=None):
         xml = prof.state / "task.xml"
         text = render_task(org, python, inbox, self.user or task_user(), prof.state, datetime.now())
         write_atomic(xml, text.encode("utf-16"), mode=0o600)
@@ -1142,7 +1159,7 @@ def setup(opts):
     tail = LogTail(prof.log_file)
     tail.mark()
     say("Instalando o serviço %s." % svc.name(org))
-    svc.install(org, prof, service_python(kind), inbox_path(), service_path())
+    svc.install(org, prof, service_python(kind), inbox_path(), service_path(), env=service_env())
     for line in svc.hints():
         say(line)
     say("Esperando o serviço dar sinal (até %d s)." % START_WAIT)

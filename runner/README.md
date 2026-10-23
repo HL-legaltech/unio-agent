@@ -58,7 +58,7 @@ Run `unio-runner` with the Python that installed it: `python3 ~/.local/share/uni
 | A workspace's settings | `~/.config/unio/runners/<workspace>/` | `%APPDATA%\unio\runners\<workspace>\` |
 | Its log and work files | `~/.local/state/unio/runners/<workspace>/` | `%LOCALAPPDATA%\unio\runners\<workspace>\` |
 
-`XDG_CONFIG_HOME` and `XDG_STATE_HOME` move the first two on macOS and Linux. `unio-inbox --workspace <id> --print-paths` prints the exact folders; `unio-runner` asks it rather than working them out itself.
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` move the last two on macOS and Linux; setup writes the ones it ran with into the service's definition, so the service reads the same folders. `unio-inbox --workspace <id> --print-paths` prints the exact folders; `unio-runner` asks it rather than working them out itself.
 
 The settings folder holds `runner-token` (readable by you alone), `repos.json` (team identifier to repositories), `runner-id` (the service's identity on the agent's page), and optionally `env`, `KEY=VALUE` lines the service reads at start (a variable set in the service's own environment wins). `responder.md`, `reviewer.md` or `needs.md` there replace the protocol texts in [`protocol/`](protocol) for that workspace.
 

@@ -22,7 +22,7 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>${path}</string>
+		<string>${path}</string>${environment}
 		<key>PYTHONUTF8</key>
 		<string>1</string>
 		<key>PYTHONUNBUFFERED</key>

@@ -272,8 +272,9 @@ class FakeService:
     def unavailable(self, org):
         return "no service manager here"
 
-    def install(self, org, prof, python, inbox, path):
+    def install(self, org, prof, python, inbox, path, env=None):
         self.installed.append((org, python, str(inbox), path))
+        self.env = env
         if self.starts:
             prof.state.mkdir(parents=True, exist_ok=True)
             with open(prof.log_file, "a", encoding="utf-8") as f:
@@ -284,9 +285,9 @@ class FakeService:
 
 
 class SetupWithService(Base):
-    def run_setup(self, svc):
+    def run_setup(self, svc, **env):
         argv = ["setup", "--workspace", "org_test", "--api", self.api.url, "--token-stdin", "--yes"]
-        with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc), \
+        with self.box.inside(**env), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc), \
                 mock.patch.object(ur, "service_kind", lambda platform=None: "fake"), \
                 mock.patch.object(sys, "stdin", mock.Mock(read=lambda: RUNNER + "\n")):
             code = ur.main(argv)
@@ -300,6 +301,16 @@ class SetupWithService(Base):
         self.assertIn("a hint from the service manager", out)
         self.assertEqual(svc.installed, [("org_test", sys.executable, str(self.box.inbox), ur.service_path(
             dict(os.environ, PATH=self.box.env()["PATH"])))])
+        self.assertEqual(svc.env, {})
+
+    def test_the_service_gets_the_xdg_folders_setup_used(self):
+        # Setup saved the profile under them; without them the service would look in ~/.config.
+        folders = {"XDG_CONFIG_HOME": str(self.box.root / "xdg config"), "XDG_STATE_HOME": str(self.box.root / "xdg-state")}
+        svc = FakeService(self.box)
+        code, out = self.run_setup(svc, **folders)
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.box.root / "xdg config" / "unio" / "runners" / "org_test" / "runner-token").exists())
+        self.assertEqual(svc.env, {} if os.name == "nt" else folders)
 
     def test_a_runner_that_never_starts_is_reported(self):
         self.state.mkdir(parents=True)

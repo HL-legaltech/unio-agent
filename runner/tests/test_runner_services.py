@@ -52,6 +52,23 @@ class SystemdUnit(unittest.TestCase):
             self.assertIn(line, lines(text))
         self.assertNotIn("${", text)
 
+    def test_the_xdg_folders_setup_used_follow_path(self):
+        text = ur.render_systemd("/p", "/i", "/usr/bin", {"XDG_STATE_HOME": "/x/state", "XDG_CONFIG_HOME": "/x/my config"})
+        env = [line for line in lines(text) if line.startswith("Environment=")]
+        self.assertEqual(env[:3], ['Environment="PATH=/usr/bin"', 'Environment="XDG_CONFIG_HOME=/x/my config"',
+                                   'Environment="XDG_STATE_HOME=/x/state"'])
+        self.assertEqual([line for line in lines(ur.render_systemd("/p", "/i", "/usr/bin"))
+                          if line.startswith("Environment=")][1:], ["Environment=PYTHONUTF8=1",
+                                                                     "Environment=PYTHONUNBUFFERED=1"])
+        with self.assertRaises(ValueError):
+            ur.render_systemd("/p", "/i", "/usr/bin", {"XDG_CONFIG_HOME": "/x\nExecStartPre=/bin/false"})
+
+    def test_service_env_takes_absolute_xdg_folders(self):
+        env = {"XDG_CONFIG_HOME": os.path.abspath("c"), "XDG_STATE_HOME": "relative", "XDG_DATA_HOME": "/d",
+               "PATH": "/usr/bin"}
+        self.assertEqual(ur.service_env(env), {} if os.name == "nt" else {"XDG_CONFIG_HOME": os.path.abspath("c")})
+        self.assertEqual(ur.service_env({}), {})
+
     def test_values_are_escaped_for_systemd(self):
         text = ur.render_systemd('/p/100%/py"t\\$HOME', "/i", "/a$b:/c%d")
         self.assertIn('ExecStart="/p/100%%/py\\"t\\\\$$HOME" "/i" --workspace %i', lines(text))
@@ -82,6 +99,15 @@ class LaunchdPlist(unittest.TestCase):
         self.assertEqual(data["StandardOutPath"], "/Users/a b/state/service.log")
         self.assertEqual(data["StandardErrorPath"], "/Users/a b/state/service.log")
         self.assertNotIn("${", text)
+
+    def test_the_xdg_folders_setup_used(self):
+        text = ur.render_launchd("org_x", "/p", "/i", "/usr/bin", "/l",
+                                 {"XDG_CONFIG_HOME": "/Users/a b/cfg", "XDG_STATE_HOME": "/s&t"})
+        env = plistlib.loads(text.encode("utf-8"))["EnvironmentVariables"]
+        self.assertEqual(env, {"PATH": "/usr/bin", "XDG_CONFIG_HOME": "/Users/a b/cfg", "XDG_STATE_HOME": "/s&t",
+                               "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"})
+        self.assertEqual(set(plistlib.loads(ur.render_launchd("org_x", "/p", "/i", "/usr/bin", "/l").encode("utf-8"))
+                             ["EnvironmentVariables"]), {"PATH", "PYTHONUTF8", "PYTHONUNBUFFERED"})
 
     def test_xml_characters_survive(self):
         text = ur.render_launchd("org_x", "/p/<py>&", "/i", "/a&b", "/l")
@@ -185,10 +211,12 @@ class SystemdCommands(Base):
     def test_install_writes_the_template_and_starts_the_instance(self):
         rec = Recorder()
         svc = ur.Systemd(home=self.home, run_command=rec)
-        svc.install("org_x", self.prof, "/usr/bin/python3", "/c/runner/unio-inbox", "/usr/bin:/bin")
+        svc.install("org_x", self.prof, "/usr/bin/python3", "/c/runner/unio-inbox", "/usr/bin:/bin",
+                    env={"XDG_CONFIG_HOME": "/x/c"})
         unit = self.home / ".config" / "systemd" / "user" / "unio-runner@.service"
         self.assertIn('ExecStart="/usr/bin/python3" "/c/runner/unio-inbox" --workspace %i',
                       unit.read_text(encoding="utf-8").splitlines())
+        self.assertIn('Environment="XDG_CONFIG_HOME=/x/c"', unit.read_text(encoding="utf-8").splitlines())
         self.assertEqual(rec.calls, [["systemctl", "--user", "daemon-reload"],
                                      ["systemctl", "--user", "enable", "unio-runner@org_x.service"],
                                      ["systemctl", "--user", "restart", "unio-runner@org_x.service"]])
@@ -248,9 +276,11 @@ class LaunchdCommands(Base):
 
     def test_install_lints_then_loads_the_agent(self):
         rec = Recorder()
-        self.svc(rec).install("org_x", self.prof, "/usr/bin/python3", "/c/runner/unio-inbox", "/usr/bin:/bin")
+        self.svc(rec).install("org_x", self.prof, "/usr/bin/python3", "/c/runner/unio-inbox", "/usr/bin:/bin",
+                              env={"XDG_STATE_HOME": "/x/s"})
         plist = self.home / "Library" / "LaunchAgents" / "so.unio.runner.org_x.plist"
         data = plistlib.loads(plist.read_bytes())
+        self.assertEqual(data["EnvironmentVariables"]["XDG_STATE_HOME"], "/x/s")
         self.assertEqual(data["StandardOutPath"], str(self.prof.state / "service.log"))
         self.assertEqual(rec.calls, [["plutil", "-lint", str(plist)],
                                      ["launchctl", "bootout", "gui/501/so.unio.runner.org_x"],
