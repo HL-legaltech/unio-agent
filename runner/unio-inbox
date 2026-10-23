@@ -57,6 +57,11 @@ profile, one per workspace on a computer (unio-runner sets them up):
   <state>/unio/runners/<org>/     what ~/.local/state/unio/inbox/ holds below
 <config> is $XDG_CONFIG_HOME or ~/.config and <state> is $XDG_STATE_HOME or
 ~/.local/state on Linux and macOS; on Windows they are %APPDATA% and %LOCALAPPDATA%.
+A profile's service keeps itself current: this file lives in a clone of its
+repository, and at start and every 6 h, between polls, the runner fetches main;
+when main's runner/VERSION is higher and the clone is a clean main, it
+fast-forwards and exits with status 75 for the service manager to start the new
+code. UNIO_RUNNER_AUTOUPDATE=off turns that off.
 Without --workspace, the runner keeps its single-machine files:
 
 Files:
@@ -77,6 +82,7 @@ any 24 h), UNIO_INBOX_HOURLY_SESSIONS (20), UNIO_INBOX_MODEL, UNIO_INBOX_CLAUDE
 and UNIO_INBOX_GH (the executables; default: claude and gh on PATH).
 UNIO_INBOX_WEB (off, search or on; default off): search lets an inbox run use web
 search, on also lets it read the pages it finds.
+UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
 UNIO_REVIEW (off, observe or on; default off), UNIO_REVIEW_WINDOW (06:30-09:00),
 UNIO_REVIEW_TZ (America/Sao_Paulo) and UNIO_REVIEW_MODEL (default: the inbox's).
 UNIO_NEEDS (off, observe or on; default off), UNIO_NEEDS_INTERVAL (15 min between
@@ -683,6 +689,113 @@ def apply_env_file(path, environ=os.environ):
             environ[key] = value
             taken.append(key)
     return taken
+
+
+# Profile mode's self-update: how often the clone is compared with main, and the
+# exit status that asks the service manager to start the runner again (EX_TEMPFAIL).
+UPDATE_EVERY = timedelta(hours=6)
+RESTART_EXIT = 75
+# The clone this file runs from: runner/unio-inbox is two levels below its root.
+CLONE_ROOT = Path(__file__).resolve().parent.parent
+SEMVER = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?$")
+
+
+def parse_version(text):
+    """(major, minor, patch) of "2.0.0" (or of "1.7", patch 0), or None."""
+    m = SEMVER.match(str(text or "").strip())
+    return tuple(int(part or 0) for part in m.groups()) if m else None
+
+
+def newer(candidate, current):
+    """Whether version `candidate` is above `current`; never when either is unreadable."""
+    a, b = parse_version(candidate), parse_version(current)
+    return a is not None and b is not None and a > b
+
+
+def autoupdate_on(env=os.environ):
+    return (env.get("UNIO_RUNNER_AUTOUPDATE") or "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+class UpdateError(Exception):
+    pass
+
+
+class Updater:
+    """A profile's runner keeps itself current from the clone it runs from.
+    check() is called between polls, never during a session: it fetches
+    origin main and, when main's runner/VERSION is above this process's and
+    the clone is main with no local change, fast-forwards it. The caller then
+    exits with RESTART_EXIT. Failures are logged and wait for the next check."""
+
+    def __init__(self, root, git, log, version=VERSION):
+        self.root = Path(root)
+        self.git = git
+        self.log = log
+        self.version = version
+        self.next_at = None
+        self.skipped = set()
+
+    def disk_version(self):
+        try:
+            return (self.root / "runner" / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    def due(self, now):
+        """At start, every UPDATE_EVERY, and as soon as the clone holds a newer
+        runner than this process: another profile's runner, or unio-runner
+        update, may have moved the clone they share."""
+        return self.next_at is None or now >= self.next_at or newer(self.disk_version(), self.version)
+
+    def check(self, now):
+        """(from, to) when the clone now holds a newer runner, else None. Never raises."""
+        self.next_at = now + UPDATE_EVERY
+        try:
+            return self._check()
+        except UpdateError as e:
+            self.log("update_failed", error=short(e, 300))
+        except Exception as e:  # an update must never stop the answers
+            self.log("update_failed", error=f"runner: {type(e).__name__}: {short(e, 300)}")
+        return None
+
+    def _check(self):
+        on_disk = self.disk_version()
+        if newer(on_disk, self.version):
+            return self.version, on_disk
+        if not (self.root / ".git").exists():
+            return self._skip("not_a_clone", f"{self.root} is not a git clone")
+        code, branch = self._git("symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1))
+        if code or branch != "main":
+            return self._skip("branch", f"the clone is on {branch or 'a detached HEAD'}, not main")
+        if self._git("status", "--porcelain", "--untracked-files=no")[1]:
+            return self._skip("local_changes", "the clone has local changes")
+        self._git("fetch", "--quiet", "origin", "main", timeout=120)
+        fetched = self._git("rev-parse", "--verify", "FETCH_HEAD^{commit}")[1]
+        remote = self._git("show", f"{fetched}:runner/VERSION")[1].strip()
+        if not newer(remote, self.version):
+            return None
+        if self._git("merge-base", "--is-ancestor", "HEAD", fetched, ok=(0, 1))[0]:
+            return self._skip("diverged", "the clone has commits main does not")
+        self._git("merge", "--ff-only", "--quiet", fetched, timeout=120)
+        return self.version, remote
+
+    def _skip(self, reason, detail):
+        """Logged once per reason: the clone stays as it is, and so does the next check's answer."""
+        if reason not in self.skipped:
+            self.skipped.add(reason)
+            self.log("update_skipped", reason=reason, detail=detail)
+        return None
+
+    def _git(self, *args, timeout=60, ok=(0,)):
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        try:
+            p = text_run([self.git, "-C", str(self.root), "-c", f"core.hooksPath={os.devnull}", *args],
+                         timeout=timeout, env=env)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise UpdateError(f"git {args[0]}: {short(e, 200)}") from None
+        if p.returncode not in ok:
+            raise UpdateError(f"git {args[0]}: exit {p.returncode}: {short(p.stderr or p.stdout, 300)}")
+        return p.returncode, p.stdout.strip()
 
 
 class Config:
@@ -3079,18 +3192,27 @@ class Runner:
                     self.needs_tick()
             return listed
 
-    def serve(self):
+    def serve(self, updater=None):
+        """Poll until stopped. Returns the exit status: 0, or RESTART_EXIT once
+        `updater` brought newer code into the clone."""
         self.state.ensure()
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
                        reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode,
-                       workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None)
+                       workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None,
+                       autoUpdate=("on" if updater else "off") if self.cfg.workspace else None)
         if not sys.platform.startswith("linux"):
             self.state.log("memory_guard_off", detail=f"no /proc/meminfo on {platform_name()}: answers never wait "
                                                       "for memory here")
         if self.cfg.zone_note:
             self.state.log("zone_fallback", detail=self.cfg.zone_note)
         self.presence.start()
+        moved = None
         while not stopping.is_set():
+            if updater and updater.due(utcnow()):
+                moved = self.update(updater)
+                if moved:
+                    self.state.log("updated", **{"from": moved[0], "to": moved[1]})
+                    break
             try:
                 self.locked_poll()
             except Exception as e:  # the service outlives any one bad poll
@@ -3099,11 +3221,19 @@ class Runner:
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
                 self.save(h)
             stopping.wait(self.cfg.interval)
-        self.presence.close(ended=True)
+        # A restart for an update keeps the row online: the new process takes it over within seconds.
+        self.presence.close(ended=not moved)
         with file_lock(self.state.lock_file) as held:
             if held:
                 self.save(self.state.health())
-        self.state.log("stop", pid=os.getpid())
+        self.state.log("stop", pid=os.getpid(), exit=RESTART_EXIT if moved else None)
+        return RESTART_EXIT if moved else 0
+
+    def update(self, updater):
+        """An update check under the poll lock, so no --once run of this
+        profile is in a session meanwhile; skipped while one is."""
+        with file_lock(self.state.lock_file) as held:
+            return updater.check(utcnow()) if held else None
 
     def review_tick(self):
         """After a poll that listed nothing: inside the look window, a candidates
@@ -4301,8 +4431,8 @@ def main(argv=None):
             print("unio-inbox: another poll is running", file=sys.stderr)
             return 3
         return 0 if listed is not None else 1
-    runner.serve()
-    return 0
+    updater = Updater(CLONE_ROOT, cfg.git, runner.state.log) if args.workspace and autoupdate_on() else None
+    return runner.serve(updater)
 
 
 if __name__ == "__main__":
