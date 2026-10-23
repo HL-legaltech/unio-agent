@@ -1,7 +1,7 @@
 {
   "name": "unio",
   "displayName": "Unio",
-  "version": "1.2.2",
+  "version": "1.2.1",
   "description": "Track your work in Unio as your workspace's agent: the Unio skill, the Unio MCP server, and the commands that connect, check and update them.",
   "author": {
     "name": "Unio",

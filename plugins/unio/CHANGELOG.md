@@ -1,9 +1,5 @@
 # Changelog
 
-## 1.2.2
-
-- No macOS, /unio:doctor, /unio:connect e o aviso de início de sessão passam a olhar sempre a pasta real da sessão, mesmo quando o Claude Code é aberto por um editor.
-
 ## 1.2.1
 
 - As ferramentas do Unio passam a usar o token do workspace ligado à pasta da sessão. Antes, o Claude Code usava sempre o workspace padrão do computador, mesmo numa pasta de outro workspace.
