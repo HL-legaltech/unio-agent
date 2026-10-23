@@ -1,0 +1,351 @@
+"""unio-runner setup, run as a person runs it against the fakes in
+runner_support.py: the checks, the token, unio-inbox --check, the
+repositories and, on this system, the service."""
+
+import json
+import os
+import sys
+import unittest
+from unittest import mock
+
+from runner_support import (AGENT, OFF, OTHER, REVOKED, RUNNER, SESSION, TOKENS, WORKSPACE, FakeApi, Sandbox,
+                            captured, closed_port_url, load_runner)
+
+ur = load_runner()
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.box = Sandbox(self)
+        self.api = FakeApi()
+        self.addCleanup(self.api.close)
+        self.config, self.state, self.token_file = self.box.paths()
+        self.repos = self.box.root / "repos.json"
+        self.repos.write_text(json.dumps({"PLA": ["octo-org/api"], "SUP": "octo-org/help"}), encoding="utf-8")
+
+    def setup(self, *args, token=RUNNER, **env):
+        """setup without a service, the token piped in."""
+        argv = ["setup", "--workspace", "org_test", "--api", self.api.url, "--token-stdin", "--no-service"]
+        return self.box.runner(argv + list(args), input_text=token + "\n", **env)
+
+    def token(self):
+        try:
+            return self.token_file.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def assertNoTokenLeaked(self, *outputs):
+        texts = list(outputs) + [p.read_text(encoding="utf-8") for p in (self.box.inbox_log, self.box.claude_log,
+                                                                          self.box.service_log) if p.exists()]
+        texts += [path for _, path in self.api.requests]
+        for text in texts:
+            for token in TOKENS:
+                self.assertNotIn(token, text)
+            self.assertNotIn("unio_", text)
+
+
+class SetupWithoutService(Base):
+    def test_saves_the_token_the_repositories_and_the_api(self):
+        code, out = self.setup("--repos-json", str(self.repos))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], "Perfil do serviço de respostas pronto para %s." % WORKSPACE)
+        self.assertIn("Claude Code 2.1.309 encontrado.", out)
+        self.assertIn("Claude Code conectado a uma conta.", out)
+        self.assertIn("Token aceito: %s, no workspace %s." % (AGENT, WORKSPACE), out)
+        self.assertEqual(self.token(), RUNNER)
+        if os.name != "nt":
+            self.assertEqual(self.token_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.config.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(json.loads((self.config / "repos.json").read_text(encoding="utf-8")),
+                         {"PLA": ["octo-org/api"], "SUP": ["octo-org/help"]})
+        self.assertIn("UNIO_API_URL=%s" % self.api.url, (self.config / "env").read_text(encoding="utf-8").splitlines())
+        self.assertEqual([c for c in self.box.logged(self.box.claude_log)], [["--version"], ["auth", "status", "--json"]])
+        self.assertIn(["--workspace", "org_test", "--check"], self.box.logged(self.box.inbox_log))
+        self.assertEqual(list(self.config.glob("*.new")), [])
+        self.assertNoTokenLeaked(out)
+
+    def test_each_refusal_says_why_and_saves_nothing(self):
+        for token, reason in ((REVOKED, "O token foi recusado"), (OFF, "Os agentes estão desligados neste workspace"),
+                              (SESSION, "Este não é um token do serviço de respostas"),
+                              (OTHER, "Este token é do workspace org_Other, mas o comando é para o org_test.")):
+            code, out = self.setup("--yes", token=token)
+            self.assertEqual(code, 1, out)
+            self.assertIn("O Unio não aceitou este token para o serviço de respostas. Nada foi salvo.", out)
+            self.assertIn(reason, out)
+            self.assertIsNone(self.token(), token)
+            self.assertFalse((self.config / "repos.json").exists())
+            self.assertNoTokenLeaked(out)
+
+    def test_a_refused_token_keeps_the_one_saved_before(self):
+        self.assertEqual(self.setup("--yes")[0], 0)
+        code, out = self.setup("--yes", token=REVOKED)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.token(), RUNNER)
+
+    def test_no_answer_from_unio(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--api", closed_port_url(), "--token-stdin",
+                                     "--no-service", "--yes"], input_text=RUNNER + "\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("O Unio não respondeu: confira a rede", out)
+        self.assertIsNone(self.token())
+        self.assertFalse((self.config / "env").exists())
+
+    def test_a_malformed_token_is_never_sent(self):
+        code, out = self.setup("--yes", token="unio_short")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Isso não é um token do Unio (unio_ seguido de 46 letras e números). Nada foi salvo.", out)
+        self.assertEqual(self.api.requests, [])
+        self.assertIsNone(self.token())
+
+    def test_claude_signed_out_stops_before_the_token(self):
+        code, out = self.setup("--yes", FAKE_CLAUDE_AUTH="out")
+        self.assertEqual(code, 1, out)
+        self.assertIn("não está conectado a uma conta", out)
+        self.assertEqual(self.api.requests, [])
+        self.assertFalse(self.config.exists())
+
+    def test_a_cli_without_auth_status_only_warns(self):
+        code, out = self.setup("--yes", FAKE_CLAUDE_AUTH="old")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Não foi possível confirmar que o Claude Code está conectado a uma conta", out)
+
+    def test_refuses_inside_claude_code(self):
+        code, out = self.setup("--yes", CLAUDECODE="1")
+        self.assertEqual(code, 1, out)
+        self.assertIn("fora do Claude Code", out)
+        self.assertEqual(self.box.logged(self.box.claude_log), [])
+
+    def test_missing_git_or_claude(self):
+        for missing, text in (("git", "O comando git não está no PATH."),
+                              ("claude", "O comando claude não está no PATH.")):
+            which = lambda name, *a, **k: None if name == missing else "/usr/bin/" + name
+            with self.box.inside(), mock.patch.object(ur.shutil, "which", which):
+                with self.assertRaises(ur.Stop) as caught:
+                    ur.check_computer()
+            self.assertIn(text, caught.exception.message)
+
+    def test_token_stdin_needs_the_repositories_or_yes(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--token-stdin"], input_text=RUNNER)
+        self.assertEqual(code, 2, out)
+        self.assertIn("passe também --repos-json ou --yes", out)
+
+    def test_bad_arguments(self):
+        for args, text in ((["--api", "ftp://example"], "O valor de --api"),
+                           (["--workspace", "org_a-b"], "não é um workspace do Unio")):
+            argv = ["setup", "--workspace", "org_test", "--yes", "--no-service"] + args
+            code, out = self.box.runner(argv)
+            self.assertEqual(code, 2, out)
+            self.assertIn(text, out)
+
+    def test_bad_repositories_file_stops_before_anything(self):
+        self.repos.write_text(json.dumps({"PLA": ["not a repo"]}), encoding="utf-8")
+        code, out = self.setup("--repos-json", str(self.repos))
+        self.assertEqual(code, 2, out)
+        self.assertIn("O arquivo de --repos-json precisa ser um objeto JSON", out)
+        self.assertEqual(self.api.requests, [])
+        self.assertEqual(self.box.logged(self.box.claude_log), [])
+
+    def test_yes_keeps_the_saved_token_and_repositories(self):
+        self.assertEqual(self.setup("--repos-json", str(self.repos))[0], 0)
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--yes"])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Cole o token", out)
+        self.assertEqual(self.token(), RUNNER)
+        self.assertEqual(json.loads((self.config / "repos.json").read_text(encoding="utf-8")),
+                         {"PLA": ["octo-org/api"], "SUP": ["octo-org/help"]})
+
+    def test_without_a_terminal_and_without_token_stdin(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--no-service", "--yes"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("precisa de um terminal para ler o token sem mostrá-lo, ou de --token-stdin", out)
+
+
+class Questions(Base):
+    """The interactive steps, in this process, with the person's answers."""
+
+    def run_setup(self, answers, secret=RUNNER, args=()):
+        asked = []
+
+        def prompt(text):
+            asked.append(text)
+            return answers.pop(0) if answers else None
+
+        secrets = []
+
+        def prompt_secret(text):
+            secrets.append(text)
+            return secret
+
+        argv = ["setup", "--workspace", "org_test", "--api", self.api.url, "--no-service"] + list(args)
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "prompt", prompt), \
+                mock.patch.object(ur, "prompt_secret", prompt_secret), mock.patch.object(ur, "stdin_is_tty", lambda: True):
+            code = ur.main(argv)
+        return code, out.getvalue(), asked, secrets
+
+    def saved_repos(self):
+        return json.loads((self.config / "repos.json").read_text(encoding="utf-8"))
+
+    def test_asks_each_team_until_the_answer_is_valid(self):
+        code, out, asked, secrets = self.run_setup(
+            ["octo-org/api, https://github.com/octo-org/web.git", "not a repo", "octo-org/help octo-org/help"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(secrets, ["Cole o token do serviço de respostas: "])
+        self.assertEqual(asked, ["Time Platform (PLA) [Enter para nenhum]: ", "Time Support (SUP) [Enter para nenhum]: ",
+                                 "Time Support (SUP) [Enter para nenhum]: "])
+        self.assertIn("not, a, repo: use o formato dono/nome", out)
+        self.assertEqual(self.saved_repos(), {"PLA": ["octo-org/api", "octo-org/web"], "SUP": ["octo-org/help"]})
+        self.assertNoTokenLeaked(out)
+
+    def test_enter_keeps_a_dash_clears_and_other_teams_stay(self):
+        self.config.mkdir(parents=True)
+        (self.config / "repos.json").write_text(json.dumps({"PLA": ["a/b"], "SUP": ["c/d"], "OLD": ["e/f"]}),
+                                                encoding="utf-8")
+        code, out, asked, _ = self.run_setup(["", "-"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(asked[0], "Time Platform (PLA) [Enter mantém a/b; - para nenhum]: ")
+        self.assertEqual(self.saved_repos(), {"PLA": ["a/b"], "OLD": ["e/f"]})
+
+    def test_a_saved_token_is_replaced_only_when_asked(self):
+        self.assertEqual(self.run_setup([""] * 2)[0], 0)
+        code, out, asked, secrets = self.run_setup(["", "", ""], secret=OTHER)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(asked[0].startswith("Já existe um token do serviço para org_test neste computador."))
+        self.assertEqual(secrets, [])
+        self.assertEqual(self.token(), RUNNER)
+        code, out, _, secrets = self.run_setup(["s"], secret=OTHER)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(len(secrets), 1)
+        self.assertIn("Este token é do workspace org_Other", out)
+        self.assertEqual(self.token(), RUNNER)
+
+    def test_ctrl_c_at_the_prompt_saves_nothing(self):
+        def interrupted(text):
+            raise KeyboardInterrupt
+
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "prompt_secret", interrupted), \
+                mock.patch.object(ur, "stdin_is_tty", lambda: True):
+            code = ur.main(["setup", "--workspace", "org_test", "--api", self.api.url, "--no-service"])
+        self.assertEqual(code, 130)
+        self.assertIn("Cancelado.", out.getvalue())
+        self.assertIsNone(self.token())
+
+
+class FakeService:
+    """A service manager that starts the runner (or not) when installed."""
+
+    kind = "fake"
+
+    def __init__(self, box, starts=True, available=True):
+        self.box, self.starts, self.is_available = box, starts, available
+        self.installed = []
+
+    def name(self, org):
+        return "fake@" + org
+
+    def available(self):
+        return self.is_available
+
+    def unavailable(self, org):
+        return "no service manager here"
+
+    def install(self, org, prof, python, inbox, path):
+        self.installed.append((org, python, str(inbox), path))
+        if self.starts:
+            prof.state.mkdir(parents=True, exist_ok=True)
+            with open(prof.log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": "2026-10-23T12:00:00Z", "event": "start", "version": "2.0.0"}) + "\n")
+
+    def hints(self, user=None):
+        return ["a hint from the service manager"]
+
+
+class SetupWithService(Base):
+    def run_setup(self, svc):
+        argv = ["setup", "--workspace", "org_test", "--api", self.api.url, "--token-stdin", "--yes"]
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc), \
+                mock.patch.object(ur, "service_kind", lambda platform=None: "fake"), \
+                mock.patch.object(sys, "stdin", mock.Mock(read=lambda: RUNNER + "\n")):
+            code = ur.main(argv)
+        return code, out.getvalue()
+
+    def test_waits_for_the_runner_to_start(self):
+        svc = FakeService(self.box)
+        code, out = self.run_setup(svc)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], "Serviço de respostas ligado para %s." % WORKSPACE)
+        self.assertIn("a hint from the service manager", out)
+        self.assertEqual(svc.installed, [("org_test", sys.executable, str(self.box.inbox), ur.service_path(
+            dict(os.environ, PATH=self.box.env()["PATH"])))])
+
+    def test_a_runner_that_never_starts_is_reported(self):
+        self.state.mkdir(parents=True)
+        (self.state / "log.jsonl").write_text(json.dumps({"at": "2026-10-22T00:00:00Z", "event": "start"}) + "\n",
+                                              encoding="utf-8")
+        with mock.patch.object(ur, "START_WAIT", 0):
+            code, out = self.run_setup(FakeService(self.box, starts=False))
+        self.assertEqual(code, 1, out)
+        self.assertIn("O serviço foi instalado, mas não deu sinal em 0 s.", out)
+        self.assertIn("logs --workspace org_test", out)
+
+    def test_no_service_manager(self):
+        code, out = self.run_setup(FakeService(self.box, available=False))
+        self.assertEqual(code, 1, out)
+        self.assertIn("no service manager here", out)
+
+
+@unittest.skipUnless(ur.service_kind() is not None, "no service manager unio-runner knows on this system")
+class ServiceEndToEnd(Base):
+    """Setup and every command after it, with this system's own service
+    manager faked on PATH."""
+
+    def test_setup_and_manage_the_service(self):
+        code, out = self.box.runner(["setup", "--workspace", "org_test", "--api", self.api.url, "--token-stdin",
+                                     "--repos-json", str(self.repos)], input_text=RUNNER + "\n")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], "Serviço de respostas ligado para %s." % WORKSPACE)
+        calls = self.box.logged(self.box.service_log)
+        kind = ur.service_kind()
+        if kind == "systemd":
+            self.assertIn(["systemctl", "--user", "restart", "unio-runner@org_test.service"], calls)
+            unit = (self.box.home / ".config" / "systemd" / "user" / "unio-runner@.service").read_text(encoding="utf-8")
+            self.assertIn('--workspace %i', unit)
+            self.assertIn("loginctl enable-linger", out)
+        elif kind == "launchd":
+            plist = self.box.home / "Library" / "LaunchAgents" / "so.unio.runner.org_test.plist"
+            self.assertIn(["plutil", "-lint", str(plist)], calls)
+            self.assertIn(["launchctl", "bootstrap", "gui/%d" % os.getuid(), str(plist)], calls)
+        else:
+            self.assertIn(["schtasks", "/Create", "/TN", "\\Unio\\Runner org_test", "/XML",
+                           str(self.state / "task.xml"), "/F"], calls)
+        for argv in calls:
+            self.assertNotIn("unio-inbox.service", " ".join(argv))
+
+        code, out = self.box.runner(["status"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("org_test: ligado", out)
+        self.assertIn("  versão: 2.0.0", out)
+        self.assertIn("  atualização automática: ", out)
+
+        self.assertEqual(self.box.runner(["stop", "--workspace", "org_test"])[0], 0)
+        self.assertIn("org_test: parado", self.box.runner(["status", "--workspace", "org_test"])[1])
+        self.assertEqual(self.box.runner(["start", "--workspace", "org_test"])[0], 0)
+        self.assertIn("org_test: ligado", self.box.runner(["status", "--workspace", "org_test"])[1])
+        self.assertEqual(self.box.runner(["restart", "--workspace", "org_test"])[0], 0)
+
+        code, out = self.box.runner(["logs", "--workspace", "org_test", "--lines", "2"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sum(" start " in line for line in out.splitlines()), 2)
+        self.assertIn("version=2.0.0", out)
+
+        code, out = self.box.runner(["uninstall", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Serviço de org_test removido.", out)
+        self.assertIn("revogue-o em Configurações > Sistema > Agentes", out)
+        self.assertIsNone(self.token())
+        self.assertTrue((self.config / "repos.json").exists())
+        self.assertIn("org_test: sem serviço instalado", self.box.runner(["status"])[1])
+        self.assertNoTokenLeaked(out)
+
+
+if __name__ == "__main__":
+    unittest.main()
