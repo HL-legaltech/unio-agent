@@ -12,6 +12,9 @@ credential is needed.
   logs the bearer token and X-Unio-Client of each request.
 - GET /v1/agents/me answers the plugin's scripts by token, like
   tests/fake_api.py, with the workspace given on the command line.
+- POST /control/expect-mcp makes the next /v1/messages wait (up to 30 s)
+  for an MCP request, so a session cannot end before Claude Code connects
+  to Unio: in print mode it does not wait for the connection itself.
 
 Every request becomes one JSON line in the log file.
 
@@ -27,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT_FILE, LOG = sys.argv[1:3]
 TOKENS = dict(arg.split("=", 1) for arg in sys.argv[3:])
 LOCK = threading.Lock()
+MCP_SEEN = threading.Event()
+EXPECT_MCP = threading.Event()
 
 
 def log(entry):
@@ -110,11 +115,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         body = self.read_body()
+        if path == "/control/expect-mcp":
+            MCP_SEEN.clear()
+            EXPECT_MCP.set()
+            return self.send_empty(204)
         if path == "/v1/mcp":
+            MCP_SEEN.set()
             return self.mcp(body)
         if path == "/v1/messages/count_tokens":
             return self.send_json(200, {"input_tokens": 10})
         if path == "/v1/messages":
+            if EXPECT_MCP.is_set():
+                MCP_SEEN.wait(30)
+                EXPECT_MCP.clear()
             log({"method": "POST", "path": path, "stream": bool(body.get("stream")),
                  "text": message_text(body)})
             return self.message(body)

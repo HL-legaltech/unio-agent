@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -188,6 +189,7 @@ def main():
 
         def run(folder, prompt):
             nonlocal offset
+            urllib.request.urlopen(urllib.request.Request(base + "/control/expect-mcp", data=b"", method="POST"))
             started = time.time()
             done = subprocess.run(
                 [args.claude, "-p", "--plugin-dir", plugin, "--output-format", "json", prompt],
