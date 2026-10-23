@@ -54,11 +54,20 @@ class Once(HomeCase):
 
     @contextlib.contextmanager
     def small_machine(self):
-        """Linux with 4 GiB, 3 of them available, and no swap, as many small servers are."""
+        """Linux with 4 GiB, 3 of them available, and no swap, as many small servers are.
+        Only the memory guard is told it runs on Linux: sys.platform patched for
+        the whole run would, on Windows, also move the profile to ~/.config and
+        keep shutil.which from finding claude.cmd."""
         meminfo = self.tmp / "meminfo"
         meminfo.write_text("MemTotal: 4194304 kB\nMemAvailable: 3145728 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
                            encoding="utf-8")
-        with mock.patch.object(inbox.sys, "platform", "linux"), mock.patch.object(inbox, "MEMINFO", str(meminfo)), \
+        guard = inbox.desk_memory
+
+        def on_linux(floor=None):
+            with mock.patch.object(inbox.sys, "platform", "linux"):
+                return guard(floor)
+
+        with mock.patch.object(inbox, "desk_memory", on_linux), mock.patch.object(inbox, "MEMINFO", str(meminfo)), \
                 mock.patch.object(inbox, "DESK_FILE", self.tmp / "no-desk.json"):
             yield
 
