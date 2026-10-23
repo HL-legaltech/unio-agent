@@ -14,7 +14,9 @@ credential is needed.
   tests/fake_api.py, with the workspace given on the command line.
 - POST /control/expect-mcp makes the next /v1/messages wait (up to 30 s)
   for an MCP request, so a session cannot end before Claude Code connects
-  to Unio: in print mode it does not wait for the connection itself.
+  to Unio: in print mode it does not wait for the connection itself. It
+  first waits out the connections the previous session left open, so none
+  of their requests counts as this session's.
 
 Every request becomes one JSON line in the log file.
 
@@ -32,6 +34,8 @@ TOKENS = dict(arg.split("=", 1) for arg in sys.argv[3:])
 LOCK = threading.Lock()
 MCP_SEEN = threading.Event()
 EXPECT_MCP = threading.Event()
+OPEN = threading.Condition()
+open_connections = 0
 
 
 def log(entry):
@@ -116,6 +120,10 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self.read_body()
         if path == "/control/expect-mcp":
+            # A request of the previous session still in a handler could set
+            # MCP_SEEN after the clear below; only this connection may be open.
+            with OPEN:
+                OPEN.wait_for(lambda: open_connections <= 1, timeout=10)
             MCP_SEEN.clear()
             EXPECT_MCP.set()
             return self.send_empty(204)
@@ -191,8 +199,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class Server(ThreadingHTTPServer):
+    """Counts the connections still being handled."""
+
+    def process_request(self, request, client_address):
+        global open_connections
+        with OPEN:
+            open_connections += 1
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        global open_connections
+        super().shutdown_request(request)
+        with OPEN:
+            open_connections -= 1
+            OPEN.notify_all()
+
+
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Server(("127.0.0.1", 0), Handler)
     with open(PORT_FILE + ".tmp", "w", encoding="utf-8") as out:
         out.write(str(server.server_address[1]))
     # Renamed into place, so the driver never reads half a number.
