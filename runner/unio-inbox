@@ -163,17 +163,36 @@ PRESENCE_SPACING = 11
 PROGRESS_SPACING = 3
 STATUS_TIMEOUT = 3
 TOO_LARGE_NOTE = "too large to answer automatically"
-TOO_LARGE_REPLY = ("**This request is too large to answer automatically.** "
-                   "Ask a narrower question, or take it to a coding session.")
+# The writing languages GET /agents/me can name. What the runner posts itself
+# comes in each of them; anything else it gets is read as English.
+LANGUAGE_NAMES = {"en": "English", "pt-BR": "Brazilian Portuguese"}
+TOO_LARGE_REPLY = {
+    "en": ("**This request is too large to answer automatically.** "
+           "Ask a narrower question, or take it to a coding session."),
+    "pt-BR": ("**Este pedido é grande demais para uma resposta automática.** "
+              "Faça uma pergunta mais específica ou leve-o para uma sessão de código."),
+}
 # Instead of TOO_LARGE_REPLY, or of silence, when a run made a project and stopped
 # before answering: whoever asked would otherwise not know it exists.
-PROJECT_MADE_REPLY = ("**Created {projects}, but the rest of this request could not be finished "
-                      "automatically.** Check the project before asking again.")
-FINAL_REPLY = "**This request could not be handled automatically.** {reason}"
-FAILURE_REASONS = {
-    "error": "Three attempts failed with an error.",
-    "no_answer": "Three attempts ended without an answer.",
+PROJECT_MADE_REPLY = {
+    "en": ("**Created {projects}, but the rest of this request could not be finished "
+           "automatically.** Check the project before asking again."),
+    "pt-BR": ("**Criei {projects}, mas o restante deste pedido não pôde ser concluído "
+              "automaticamente.** Confira o projeto antes de pedir de novo."),
 }
+PROJECTS_AND = {"en": " and ", "pt-BR": " e "}
+FINAL_REPLY = {
+    "en": "**This request could not be handled automatically.** {reason}",
+    "pt-BR": "**Não foi possível atender este pedido automaticamente.** {reason}",
+}
+FAILURE_REASONS = {
+    "en": {"error": "Three attempts failed with an error.",
+           "no_answer": "Three attempts ended without an answer."},
+    "pt-BR": {"error": "As três tentativas falharam com um erro.",
+              "no_answer": "As três tentativas terminaram sem resposta."},
+}
+# The responder's line the runner replaces with the agent's teams (workspace_section).
+WORKSPACE_MARKER = "<!-- unio-inbox: the workspace -->"
 FAIL_NOTES = {"error": "the run failed with an error", "no_answer": "the run ended without an answer"}
 # What a failed receipt says, for anyone who reads the item; the raw detail
 # (exit status, stderr, the model's unposted text) stays in log.jsonl and the run.
@@ -1491,8 +1510,68 @@ def made_project(content):
     return f"[{name.replace('[', '(').replace(']', ')')}]({url})"
 
 
-def project_note(s):
-    return PROJECT_MADE_REPLY.format(projects=" and ".join(s.projects)) if s.projects else None
+def project_note(s, language="en"):
+    if not s.projects:
+        return None
+    return PROJECT_MADE_REPLY[language].format(projects=PROJECTS_AND[language].join(s.projects))
+
+
+def writing_language(me):
+    """The agent's writing language from GET /agents/me (writing.language):
+    a key of LANGUAGE_NAMES, English when it names none of them."""
+    writing = me.get("writing") if isinstance(me, dict) else None
+    language = writing.get("language") if isinstance(writing, dict) else None
+    return language if language in LANGUAGE_NAMES else "en"
+
+
+def language_line(language):
+    """Every prompt names the writing language, and this line outranks the
+    protocol: a configuration folder's older copy may still say English."""
+    return (f"Writing language: {LANGUAGE_NAMES.get(language, 'English')}. Write everything you post in it, "
+            "whatever language people wrote in; this line wins over any other language rule. Needs <first name>, "
+            "Waiting on, Sessions and Needs action stay in English.")
+
+
+def one_line(text, limit):
+    return printable(short(text, limit))
+
+
+def workspace_section(teams, repos_for):
+    """The responder's "## The workspace": each team the agent works in, with
+    its description when the API gives one, and the repositories repos.json
+    maps to it. Admins wrote the names and descriptions, so each is one
+    short line."""
+    lines = ["## The workspace", ""]
+    rows = [t for t in teams or [] if isinstance(t, dict) and isinstance(t.get("identifier"), str)
+            and t["identifier"].strip()]
+    if rows:
+        lines += ["The teams you work in, what each works on, and the repositories you may read for it:", ""]
+    else:
+        lines.append("The list of your teams could not be read just now; the item names its own team.")
+    for team in rows:
+        ident = one_line(team["identifier"], 20)
+        entry = f"- **{one_line(team.get('name') or ident, 80)} ({ident}):**"
+        if isinstance(team.get("description"), str) and team["description"].strip():
+            entry += f" {one_line(team['description'], 300).rstrip('.')}."
+        repos = repos_for(team["identifier"])
+        if repos:
+            names = ", ".join(f"`{r}`" for r in repos)
+            entry += f" {'Repositories' if len(repos) > 1 else 'Repository'} {names}."
+        else:
+            entry += " No repository."
+        lines.append(entry)
+    lines += ["", "Check anything more specific in the repository before you state it."]
+    return "\n".join(lines)
+
+
+def fill_protocol(text, section):
+    """The protocol with its WORKSPACE_MARKER line replaced by `section`; one
+    without the marker (a profile's own text) as it is."""
+    lines = text.splitlines(keepends=True)
+    for n, line in enumerate(lines):
+        if line.strip() == WORKSPACE_MARKER:
+            lines[n] = section + line[len(line.rstrip("\r\n")):]
+    return "".join(lines)
 
 
 def item_subject(item):
@@ -1515,7 +1594,7 @@ def reaction_target(item):
             {"reactableType": "task", "reactableId": (item.get("task") or {}).get("id")})
 
 
-def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off"):
+def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", language="en"):
     on_project = item_subject(item) == "project"
     project = item.get("project") if on_project else None
     task = {} if on_project else item.get("task") or {}
@@ -1553,6 +1632,7 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off"):
     lines.append({"off": "Web research: not available in this run.",
                   "search": "Web research: WebSearch only (search results, not whole pages).",
                   "on": "Web research: WebSearch and WebFetch."}[web if web in WEB_TOOLS else "off"])
+    lines.append(language_line(language))
     if comment:
         lines += [
             f"Comment id: {comment.get('id')} (answer it with "
@@ -1734,7 +1814,7 @@ def prompt_fact(value, fallback="unknown"):
     return text if PROMPT_FACT.match(text) else fallback
 
 
-def build_review_prompt(row):
+def build_review_prompt(row, language="en"):
     """The project's id and the server's numbers. No name or title reaches the
     prompt: people wrote those, and the session reads them through get_project."""
     f = prompt_fact
@@ -1759,6 +1839,7 @@ def build_review_prompt(row):
     ]
     if row.get("nextSameHealthAt"):
         lines.append(f"An update that keeps the current health is refused until {f(row.get('nextSameHealthAt'))}.")
+    lines.append(language_line(language))
     lines += ["", "Review this project under your protocol and end with the JSON outcome line."]
     return "\n".join(lines) + "\n"
 
@@ -2061,7 +2142,7 @@ def slugify_task_name(name):
     return re.sub(r"-{2,}", "-", text).strip("-") or "task"
 
 
-def build_needs_prompt(view, items, facts, today, zone, url=None):
+def build_needs_prompt(view, items, facts, today, zone, url=None, language="en"):
     """The task's open items, numbered as the verdict names them, and what
     GitHub says about the pull requests it links. The title and the items were
     written by people: they reach the prompt only between the untrusted markers."""
@@ -2075,6 +2156,7 @@ def build_needs_prompt(view, items, facts, today, zone, url=None):
         f"URL: {url or 'not known here; get_task gives it'}",
         f"Team: {f(view.get('teamKey'), 'none')}",
         f"Status: {f(view.get('status'))} ({f(view.get('statusCategory'), 'no category')})",
+        language_line(language),
     ]
     if facts:
         lines.append("GitHub, as the runner read it just now:")
@@ -2182,6 +2264,10 @@ class Runner:
         # A check that failed for the machine's sake holds the next one this long, charging no task.
         self.needs_judge_hold = None
         self._workspace = None
+        # The teams GET /agents/me listed, for the responder's workspace section.
+        self._team_rows = None
+        # The agent's writing language, read with the teams; English until then.
+        self.language = "en"
 
     @staticmethod
     def session_env():
@@ -2195,7 +2281,7 @@ class Runner:
             h["presence"] = status
         self.state.save_health(h)
 
-    def claude_args(self, mcp_path, snapshots):
+    def claude_args(self, mcp_path, snapshots, protocol=None):
         # The prompt goes in on stdin: --add-dir, --tools and the other list
         # options take every following word, a trailing prompt included.
         args = [
@@ -2205,7 +2291,7 @@ class Runner:
             "--tools", ",".join(["Read", "Grep", "Glob", *self.cfg.web_tools]),
             "--allowedTools", ",".join(["mcp__unio__*", *self.cfg.web_tools]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
-            "--append-system-prompt-file", str(self.cfg.responder),
+            "--append-system-prompt-file", str(protocol or self.cfg.responder),
             "--max-turns", str(self.cfg.max_turns), "--max-budget-usd", self.cfg.max_budget,
         ]
         if self.cfg.model:
@@ -2345,7 +2431,7 @@ class Runner:
             headers["X-Unio-Inbox-Item"] = str(item.get("key"))
             if claim.get("claimId"):
                 headers["X-Unio-Inbox-Claim"] = claim["claimId"]
-            argv, timeout = self.claude_args(mcp_path, snapshots), self.cfg.timeout
+            argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
             required = PROJECT_REQUIRED_TOOLS if item_subject(item) == "project" else REQUIRED_TOOLS
             s = Session(required=required, builtin=BUILTIN_TOOLS | set(self.cfg.web_tools))
         config = {"mcpServers": {"unio": {"type": "http", "url": self.cfg.mcp_url, "headers": headers}}}
@@ -2393,6 +2479,20 @@ class Runner:
         finally:
             mcp_path.unlink(missing_ok=True)
             remove_project_dirs(work)
+
+    def responder_file(self, out):
+        """The responder protocol a run reads: the configured file, or, when it
+        holds the workspace marker, a copy beside the run's prompt with the
+        section written from the agent's teams."""
+        try:
+            text = self.cfg.responder.read_text(encoding="utf-8")
+        except OSError:
+            return self.cfg.responder
+        if WORKSPACE_MARKER not in text:
+            return self.cfg.responder
+        path = out / "responder.md"
+        path.write_text(fill_protocol(text, workspace_section(self._team_rows, self.cfg.repos_for)), encoding="utf-8")
+        return path
 
     @staticmethod
     def _read(proc, s, transcript):
@@ -2640,7 +2740,8 @@ class Runner:
 
     def agent_teams(self, api):
         """"Name (KEY)" for each team the agent is in, refreshed every TEAMS_REFRESH;
-        the last list (or None) when the API cannot say."""
+        the last list (or None) when the API cannot say. The same answer
+        gives the writing language and the rows for the workspace section."""
         now = utcnow()
         if self._teams_at and now - self._teams_at < TEAMS_REFRESH:
             return self._teams
@@ -2652,9 +2753,11 @@ class Runner:
         teams = me.get("teams") if isinstance(me, dict) else None
         if isinstance(me, dict) and isinstance(me.get("workspace"), dict):
             self._workspace = me["workspace"]
+        if isinstance(me, dict):
+            self.language = writing_language(me)
         if isinstance(teams, list):
-            self._teams = [f"{t.get('name')} ({t.get('identifier')})" for t in teams
-                           if isinstance(t, dict) and t.get("identifier")]
+            self._team_rows = [t for t in teams if isinstance(t, dict) and t.get("identifier")]
+            self._teams = [f"{t.get('name')} ({t.get('identifier')})" for t in self._team_rows]
             self._teams_at = now
         return self._teams
 
@@ -2722,8 +2825,9 @@ class Runner:
                 s, v = Session(), Verdict("release", reason="memory_pressure", error=low, detail=low,
                                           retry=now + MEMORY_PAUSE, pause=now + MEMORY_PAUSE)
             else:
-                s = self.run_session(item, build_prompt(item, snapshots, attempt, rerun, self.agent_teams(api),
-                                                        self.cfg.web),
+                teams = self.agent_teams(api)
+                s = self.run_session(item, build_prompt(item, snapshots, attempt, rerun, teams, self.cfg.web,
+                                                        self.language),
                                      snapshots, out, claim, on_wait)
                 v = self.classify(s)
         except Exception as e:  # a runner bug must still spend the attempt, or the item loops forever
@@ -2762,7 +2866,7 @@ class Runner:
             outcome = written_outcome(s.succeeded)
             note_error = None
             if not s.succeeded & COMMENT_WRITES:
-                note = project_note(s) or TOO_LARGE_REPLY
+                note = project_note(s, self.language) or TOO_LARGE_REPLY[self.language]
                 note_error = self.reply(api, item, note, f"unio-inbox:note:{key}:{claim['claimId']}")
             self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE,
                           error=v.error, noteError=note_error)
@@ -2772,7 +2876,8 @@ class Runner:
             note_error = None
             # However the run ended, whoever asked hears that the project exists.
             if not s.succeeded & COMMENT_WRITES and project_note(s):
-                note_error = self.reply(api, item, project_note(s), f"unio-inbox:note:{key}:{claim['claimId']}")
+                note_error = self.reply(api, item, project_note(s, self.language),
+                                        f"unio-inbox:note:{key}:{claim['claimId']}")
             self.complete(api, item, claim, h, base, stats, v.outcome, v.note, claimedOutcome=v.claimed,
                           error=v.error, reason=v.reason, noteError=note_error)
             if v.pause:
@@ -2789,8 +2894,8 @@ class Runner:
         reply_error = None
         if final:
             self.unmark(api, item)
-            reply_error = self.reply(api, item, FINAL_REPLY.format(reason=FAILURE_REASONS[public]),
-                                     f"unio-inbox:final:{key}")
+            final_reply = FINAL_REPLY[self.language].format(reason=FAILURE_REASONS[self.language][public])
+            reply_error = self.reply(api, item, final_reply, f"unio-inbox:final:{key}")
         self.state.log("item", **base, **stats, result="failed", cause=v.cause, error=v.error, final=final or None,
                        failError=None if st == 200 else describe(st, d), replyError=reply_error)
         return "continue"
@@ -3251,7 +3356,8 @@ class Runner:
                 next_ack[0] = time.monotonic() + cfg.interval
 
         try:
-            s = self.run_session(None, build_review_prompt(row), [], out, {}, on_wait, review=pid)
+            self.agent_teams(api)
+            s = self.run_session(None, build_review_prompt(row, self.language), [], out, {}, on_wait, review=pid)
             v = self._ended(s, utcnow(), cfg.review_timeout)
         except Exception as e:  # failed below, so a runner bug cannot loop on one project
             s = Session(REVIEW_TOOLS, set(REVIEW_TOOLS), REVIEW_STEPS)
@@ -3846,8 +3952,9 @@ class Runner:
         now = utcnow()
         zone = cfg.needs_zone
         items = open_items(row["sections"])
+        url = self.task_url(api, view)
         prompt = build_needs_prompt(view, items, row["check"]["facts"], f"{now.astimezone(zone):%Y-%m-%d}",
-                                    getattr(zone, "key", "local time"), self.task_url(api, view))
+                                    getattr(zone, "key", "local time"), url, self.language)
         entry = data["tasks"].setdefault(view["id"], {})
         before = {k: entry.get(k) for k in ("lastJudgedAt", "fingerprint")}
         # Charged before it runs, so a task that kills the runner cannot keep it in a loop.
