@@ -48,8 +48,8 @@ class ProfilePaths(HomeCase):
     def test_linux_and_macos(self):
         for platform in ("linux", "darwin"):
             config, state = inbox.profile_dirs("org_abc", {}, platform)
-            self.assertEqual(config, PurePosixPath(self.home, ".config/unio/runners/org_abc"))
-            self.assertEqual(state, PurePosixPath(self.home, ".local/state/unio/runners/org_abc"))
+            self.assertEqual(config, PurePosixPath(str(self.home), ".config/unio/runners/org_abc"))
+            self.assertEqual(state, PurePosixPath(str(self.home), ".local/state/unio/runners/org_abc"))
             config, state = inbox.profile_dirs("org_abc", {"XDG_CONFIG_HOME": "/x/c", "XDG_STATE_HOME": "/x/s"},
                                                platform)
             self.assertEqual(config, PurePosixPath("/x/c/unio/runners/org_abc"))

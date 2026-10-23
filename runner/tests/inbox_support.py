@@ -243,7 +243,7 @@ with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"argv": args, "cwd": os.getcwd(), "prompt": prompt, "protocol": protocol,
                         "headers": sorted(unio["headers"])}) + "\n")
 slug = re.sub(r"[^a-zA-Z0-9]", "-", os.getcwd())
-os.makedirs(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", slug, "tool-results"), exist_ok=True)
+os.makedirs(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", slug), exist_ok=True)
 
 
 def emit(event):

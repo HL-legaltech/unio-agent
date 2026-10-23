@@ -86,7 +86,12 @@ class ProcessGroups(unittest.TestCase):
         self.fail("the session's own child outlived it")
 
 
+# Windows has no zone database of its own, and CI's Python there has no tzdata package.
+HAS_ZONES = inbox._zone("UTC") is not None
+
+
 class Zones(HomeCase):
+    @unittest.skipUnless(HAS_ZONES, "no time zone database on this machine")
     def test_a_zone_name_is_read(self):
         cfg = inbox.Config(dict(os.environ, UNIO_REVIEW_TZ="UTC"))
         self.assertIsNone(cfg.zone_note)
@@ -99,6 +104,7 @@ class Zones(HomeCase):
         self.assertIn("tzdata", cfg.zone_note)
         self.assertIsNone(cfg.review_error)
 
+    @unittest.skipUnless(HAS_ZONES, "no time zone database on this machine")
     def test_a_bad_zone_name_is_still_an_error(self):
         cfg = inbox.Config(dict(os.environ, UNIO_REVIEW="observe", UNIO_REVIEW_TZ="Nowhere/Never"))
         self.assertIn("not a time zone", cfg.review_error or "")
@@ -160,12 +166,17 @@ class ProjectCleanup(HomeCase):
         self.assertTrue((target / "keep").exists())
 
     def test_cut_long_names(self):
-        deep = self.runs / ("k" * 120) / ("w" * 100) / "work"
-        deep.mkdir(parents=True)
+        # Just past 200 characters, so the path stays under Windows' 260 where it has no long paths.
+        part = max(1, (215 - len(str(self.runs))) // 2)
+        deep = self.runs / ("k" * part) / ("w" * part) / "work"
         slug = self.slug(deep)
         self.assertGreater(len(slug), 200)
-        cut = self.make(slug[:200] + "-1a2b3c")
-        uncut = self.make(slug[:199] + "x")
+        try:
+            deep.mkdir(parents=True)
+            cut = self.make(slug[:200] + "-1a2b3c")
+            uncut = self.make(slug[:199] + "x")
+        except OSError:
+            self.skipTest("this system cannot hold paths that long here")
         inbox.remove_project_dirs(deep)
         self.assertFalse(cut.exists())
         self.assertTrue(uncut.exists())
