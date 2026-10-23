@@ -67,7 +67,7 @@ waits an hour before the same move is tried again. UNIO_STATUS=observe logs
 what it would set; off (the default) never asks.
 
 Profiles: with --workspace org_<id>, everything belongs to that workspace's
-profile, one per workspace on a computer (unio-runner sets them up):
+profile, one per workspace on a computer (`unio runner setup` sets them up):
   <config>/unio/runners/<org>/    runner-token, repos.json and runner-id, as below;
                                   env, KEY=VALUE lines read at start (the real
                                   environment wins); and responder.md, reviewer.md
@@ -867,7 +867,7 @@ class Config:
             self.config_dir, self.state_dir = Path(config_dir), Path(state_dir)
             # A profile answers for a whole workspace, which only a runner token may.
             self.token_file = self.config_dir / "runner-token"
-            self.token_hint = f"run: unio-runner setup --workspace {workspace}"
+            self.token_hint = f"run: unio runner setup --workspace {workspace}"
         else:
             self.config_dir = Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "unio"
             self.state_dir = Path(env.get("XDG_STATE_HOME") or home / ".local/state") / "unio" / "inbox"
