@@ -152,8 +152,8 @@ unio_token_file() {
 }
 
 # The process id of the coding agent this script serves: its nearest
-# ancestor that is not a shell. Claude Code starts the header helper through
-# sh -c; Codex starts it directly.
+# ancestor that is neither a shell nor git, which runs the header helper for
+# Claude Code (see .mcp.json); Codex starts it directly.
 unio_agent_pid() {
   pid=$PPID
   hops=0
@@ -164,7 +164,7 @@ unio_agent_pid() {
     name=${name##*/}
     case ${name#-} in
       '') return 1 ;;
-      sh|bash|dash|zsh|ksh|mksh|ash|busybox|env|timeout|nice) ;;
+      sh|bash|dash|zsh|ksh|mksh|ash|busybox|env|timeout|nice|git) ;;
       *) printf '%s' "$pid"; return 0 ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -187,7 +187,7 @@ unio_windows_agent() {
     for ($i = 0; $i -lt 8; $i++) {
       $w = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
       if (-not $w) { exit 1 }
-      if ($w.Name -notmatch "^(sh|bash|dash|zsh|env|timeout|cmd|powershell|pwsh|conhost)(\.exe)?$") {
+      if ($w.Name -notmatch "^(sh|bash|dash|zsh|env|timeout|git|cmd|powershell|pwsh|conhost)(\.exe)?$") {
         $start = [int64]($w.CreationDate.ToUniversalTime() - [datetime]"1970-01-01").TotalSeconds
         Write-Output "$($w.ProcessId) $start $($w.Name)"
         exit 0
