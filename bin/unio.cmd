@@ -24,6 +24,13 @@ setlocal EnableDelayedExpansion
 exit /b 2
 
 :runner
+rem Everything after the first word, quoted as it was typed. A bare unio
+rem runner shows the runner's help, as unio help runner does.
+set "unio_args=%*"
+set "unio_args=%unio_args:*runner=%"
+if not defined unio_args set "unio_args= --help"
+
+:start_runner
 if not exist "%unio_root%\runner\unio-runner" goto :no_runner
 rem Only a run that exits 0 proves an interpreter: the python.exe Windows
 rem ships is a Microsoft Store alias that opens the Store.
@@ -31,13 +38,14 @@ set "unio_python="
 py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
 if not defined unio_python python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
 if not defined unio_python goto :no_python
-rem Everything after the first word, quoted as it was typed.
-set "unio_args=%*"
-set "unio_args=%unio_args:*runner=%"
 %unio_python% -X utf8 "%unio_root%\runner\unio-runner"%unio_args%
 exit /b %errorlevel%
 
 :help
+if /i "%~2"=="runner" (
+  set "unio_args= --help"
+  goto :start_runner
+)
 set "unio_cp="
 for /f "tokens=2 delims=:." %%c in ('chcp') do set "unio_cp=%%c"
 chcp 65001 >nul 2>nul

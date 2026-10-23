@@ -39,7 +39,7 @@ Every line it prints is in Portuguese. To read the scripts first, open [install.
 
 ## Commands
 
-The service's commands are `unio runner <command>`. `unio` is [`bin/unio`](../bin/unio) in the clone (`bin\unio.cmd` on Windows): the installer links it as `~/.local/bin/unio` on macOS and Linux, and puts the clone's `bin` folder on your user `Path` on Windows. It never replaces a `~/.local/bin/unio` that is something else, and says when `~/.local/bin` is not on your `PATH`; the clone's own `~/.local/share/unio/agent/bin/unio` works either way. `unio help` lists the commands, and `unio --version` prints the runner's version.
+The service's commands are `unio runner <command>`. `unio` is [`bin/unio`](../bin/unio) in the clone (`bin\unio.cmd` on Windows): the installer links it as `~/.local/bin/unio` on macOS and Linux, and puts the clone's `bin` folder on your user `Path` on Windows. It never replaces a `~/.local/bin/unio` that is something else, and says when `~/.local/bin` is not on your `PATH`; the clone's own `~/.local/share/unio/agent/bin/unio` works either way. `unio help` lists the commands, `unio help runner` or a bare `unio runner` the runner's own, and `unio --version` prints the runner's version.
 
 | Command | What it does |
 | --- | --- |

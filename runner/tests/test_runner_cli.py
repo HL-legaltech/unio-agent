@@ -72,6 +72,13 @@ class PosixCommand(unittest.TestCase):
             self.assertEqual((code, out, err), (0, help_text(), ""), args)
         self.assertTrue(help_text().startswith("Uso: unio <comando> [opções]\n"))
 
+    def test_help_runner_is_the_runners_own(self):
+        runner_help = self.unio("runner", "--help")
+        self.assertEqual(runner_help[0], 0)
+        self.assertTrue(runner_help[1].startswith("Uso: unio runner <comando> [opções]"))
+        for args in (["help", "runner"], ["-h", "runner"], ["--help", "runner"], ["runner"]):
+            self.assertEqual(self.unio(*args), runner_help, args)
+
     def test_version_is_the_runners(self):
         self.assertEqual(self.unio("--version"), (0, VERSION + "\n", ""))
 
@@ -144,6 +151,12 @@ class WindowsCommand(unittest.TestCase):
             self.assertEqual(code, 0, args)
             self.assertTrue(out.startswith("Uso: unio <comando>"), out)
             self.assertEqual(commands_in(out), ["runner"])
+
+    def test_help_runner_is_the_runners_own(self):
+        for args in (["help", "runner"], ["runner"]):
+            code, out, _ = self.unio(*args)
+            self.assertEqual(code, 0, args)
+            self.assertTrue(out.startswith("Uso: unio runner <comando> [opções]"), out)
 
     def test_version_is_the_runners(self):
         code, out, _ = self.unio("--version")
