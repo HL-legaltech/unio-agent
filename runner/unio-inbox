@@ -112,6 +112,7 @@ import shlex
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -1022,7 +1023,10 @@ def env_number(env, name, default, minimum, maximum, integer=False):
 
 
 class ApiUnreachable(Exception):
-    pass
+    def __init__(self, message, untrusted=False):
+        super().__init__(message)
+        # TLS refused the server's certificate: this Python trusts no CA that signed it.
+        self.untrusted = untrusted
 
 
 class Api:
@@ -1049,7 +1053,9 @@ class Api:
         except urllib.error.HTTPError as e:
             return e.code, self._json(e.read())
         except (urllib.error.URLError, OSError) as e:
-            raise ApiUnreachable(f"{self.base} unreachable: {getattr(e, 'reason', e)}") from None
+            reason = getattr(e, "reason", e)
+            raise ApiUnreachable(f"{self.base} unreachable: {reason}",
+                                 untrusted=isinstance(reason, ssl.SSLCertVerificationError)) from None
 
     def settle(self, method, path, body, idempotency_key, timeout=20):
         """Writes that must land: a lost one leaves the item claimed for 15 minutes."""
@@ -4437,7 +4443,7 @@ def check_profile(cfg):
             status, data = Api(cfg.api, token).call("GET", "/agents/me", timeout=20)
         except ApiUnreachable as e:
             status, data = 0, None
-            problem("unio_unreachable", str(e))
+            problem("tls_untrusted" if e.untrusted else "unio_unreachable", str(e))
         me = unwrap(data) if status == 200 else None
         if status == 401:
             problem("token_refused", "Unio refused the token: it was revoked, has expired, or its issuer may no "

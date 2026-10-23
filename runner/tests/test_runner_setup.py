@@ -97,8 +97,20 @@ class SetupWithoutService(Base):
         self.assertEqual(text.splitlines(), [
             "O Unio não aceitou este token para o serviço de respostas. Nada foi salvo.",
             "O Unio não respondeu: confira a rede e rode o comando de novo.",
-            "O que a verificação encontrou:", "  - a new problem"])
+            "O que a verificação encontrou:", "  - a new problem", "  - Unio did not answer"])
         self.assertIn("A verificação não disse o motivo.", ur.check_failure("org_test", {"ok": False}, prof))
+
+    def test_an_untrusted_certificate_names_the_fix(self):
+        # python.org's Python on a Mac before Install Certificates, or a network that inspects HTTPS.
+        error = ("https://api.unio.so/v1 unreachable: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                 "unable to get local issuer certificate (_ssl.c:1006)")
+        prof = ur.Profile("org_test", self.config, self.state, self.token_file)
+        lines = ur.check_failure("org_test", {"ok": False, "problems": [error], "codes": ["tls_untrusted"]},
+                                 prof).splitlines()
+        self.assertEqual(lines[0], "Não foi possível conferir o token com o Unio. Nada foi salvo.")
+        self.assertIn("Install Certificates.command", lines[1])
+        self.assertNotIn("confira a rede", "\n".join(lines))
+        self.assertEqual(lines[2:], ["O que a verificação encontrou:", "  - " + error[:200]])
 
     def test_a_refused_token_keeps_the_one_saved_before(self):
         self.assertEqual(self.setup("--yes")[0], 0)
@@ -110,7 +122,10 @@ class SetupWithoutService(Base):
         code, out = self.box.runner(["setup", "--workspace", "org_test", "--api", closed_port_url(), "--token-stdin",
                                      "--no-service", "--yes"], input_text=RUNNER + "\n")
         self.assertEqual(code, 1, out)
+        self.assertIn("Não foi possível conferir o token com o Unio. Nada foi salvo.", out)
         self.assertIn("O Unio não respondeu: confira a rede", out)
+        # What the network said, which the reason alone would hide.
+        self.assertIn("/v1 unreachable: ", out)
         self.assertIsNone(self.token())
         self.assertFalse((self.config / "env").exists())
 

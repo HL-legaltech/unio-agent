@@ -1,9 +1,14 @@
 """--check: what unio-runner asks before it installs a service."""
+import contextlib
+import io
 import json
 import os
 import socket
+import ssl
 import sys
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from inbox_support import FakeUnio, HomeCase, inbox
 
@@ -72,6 +77,20 @@ class Check(HomeCase):
             port = s.getsockname()[1]
         os.environ["UNIO_API_URL"] = f"http://127.0.0.1:{port}/v1"
         self.assertEqual(self.check(FakeUnio.RUNNER)["codes"], ["unio_unreachable"])
+
+    def test_an_untrusted_certificate(self):
+        # As urllib reports a CA this Python does not trust (python.org's on a Mac, before
+        # Install Certificates): its own code, so setup names the fix rather than the network.
+        self.profile("org_test", FakeUnio.RUNNER)
+        refused = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                                                  "unable to get local issuer certificate (_ssl.c:1006)")
+        out = io.StringIO()
+        with mock.patch.object(inbox.urllib.request, "urlopen", side_effect=urllib.error.URLError(refused)), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(inbox.check_profile(inbox.Config(dict(os.environ), "org_test")), 1)
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["codes"], ["tls_untrusted"])
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", result["problems"][0])
 
     def test_env_file_names_the_api(self):
         config = self.profile("org_test", FakeUnio.RUNNER)

@@ -385,6 +385,10 @@ def run_check(org, env):
 # What setup says for each code `unio-inbox --check` gives a problem.
 CHECK_REASONS = {
     "unio_unreachable": "O Unio não respondeu: confira a rede e rode o comando de novo.",
+    "tls_untrusted": "Este Python não confia no certificado do Unio, então não consegue falar com ele. No Mac, "
+                     "com o Python do python.org, rode o Install Certificates.command da pasta do Python, em "
+                     "Aplicativos. Numa rede que inspeciona HTTPS, instale o certificado dela. Depois rode este "
+                     "comando de novo.",
     "unio_error": "O Unio respondeu com um erro. Rode o comando de novo em instantes.",
     "token_refused": "O token foi recusado: ele pode ter sido revogado ou ter vencido. Gere outro em {page}.",
     "agents_off": "Os agentes estão desligados neste workspace. Um administrador pode ligá-los em {page}.",
@@ -395,6 +399,11 @@ CHECK_REASONS = {
     "claude_missing": "O serviço não encontrou o Claude Code. Confira a instalação e rode este comando de novo.",
     "no_token": "O token não ficou salvo em {token}. Rode este comando de novo.",
 }
+
+
+# Codes for which Unio was never reached: the check's own words, the error
+# behind them, show too.
+CHECK_NETWORK = ("unio_unreachable", "tls_untrusted")
 
 
 def check_failure(org, check, prof):
@@ -411,10 +420,13 @@ def check_failure(org, check, prof):
             text = CHECK_REASONS[code].format(page=AGENTS_PAGE, org=org, owner=owner, token=tilde(prof.token))
             if text not in reasons:
                 reasons.append(text)
-        elif n < len(problems) and isinstance(problems[n], str) and problems[n].strip():
-            others.append(clean(problems[n], 200))
+        detail = problems[n] if n < len(problems) and isinstance(problems[n], str) and problems[n].strip() else None
+        if detail and (code in CHECK_NETWORK or code not in CHECK_REASONS):
+            others.append(clean(detail, 200))
     if codes and all(code == "claude_missing" for code in codes):
         lines = ["O Unio aceitou o token, mas o serviço não consegue rodar neste computador. Nada foi salvo."]
+    elif codes and all(code in CHECK_NETWORK + ("claude_missing",) for code in codes):
+        lines = ["Não foi possível conferir o token com o Unio. Nada foi salvo."]
     else:
         lines = ["O Unio não aceitou este token para o serviço de respostas. Nada foi salvo."]
     lines.extend(reasons)
