@@ -24,7 +24,10 @@ refused=$(fake_token RevokedFakeTokenNotASecret)
 off=$(fake_token AgentsOffFakeTokenNotASecret)
 second=$(fake_token SecondWorkspaceFakeTokenNotASecret)
 
+# Physical: on macOS $TMPDIR is under /var, a link to /private/var, and the
+# scripts name folders as pwd -P does.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/unio-tests.XXXXXX")
+tmp=$(CDPATH='' cd -P -- "$tmp" && pwd -P)
 server=
 trap 'if [ -n "$server" ]; then kill "$server" 2>/dev/null; fi; rm -rf "$tmp"' EXIT
 trap 'exit 130' INT TERM HUP
@@ -101,12 +104,15 @@ case \$1 in
   *) exit 64 ;;
 esac
 EOF
-# xdg-open, as far as the browser approval calls it: it logs the URL.
-cat > "$tmp/bin/xdg-open" <<EOF
+# xdg-open (Linux) and open (macOS), as far as the browser approval calls
+# them: they log the URL.
+for opener in xdg-open open; do
+  cat > "$tmp/bin/$opener" <<EOF
 #!/bin/sh
-printf '%s\n' "\$*" >> "$tmp/xdg-open.log"
+printf '%s\n' "\$*" >> "$tmp/browser.log"
 EOF
-chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open"
+done
+chmod +x "$tmp/bin/curl" "$tmp/bin/claude" "$tmp/git-bin/git" "$tmp/bin/xdg-open" "$tmp/bin/open"
 # A unio command installed on this computer would turn connect's and the
 # doctor's hints to it, so its folders leave the PATH; the checks that want
 # one put a fake first.
@@ -151,6 +157,28 @@ check() {
 has() { printf '%s' "$1" | grep -q -e "$2"; }
 lacks() { ! printf '%s' "$1" | grep -q -e "$2"; }
 has_line() { printf '%s\n' "$1" | grep -qxF -e "$2"; }
+# What the header helper would decide in agent folder $1: whether a folder is
+# mapped, the agent's folder, and its workspace. For check names only.
+decides() {
+  # shellcheck disable=SC2016 # the script's own expansions, in its shell
+  agent "$1" "$plugin" "$shell" -c '. "$1"
+    if unio_mapped ""; then m=mapped; else m=unmapped; fi
+    d=$(unio_agent_dir)
+    printf "%s, %s, %s" "$m" "$d" "$(unio_workspace "$d")"' sh "$scripts/lib.sh"
+}
+# The browser opener runs in the background: wait up to 5 s for its log.
+opened() {
+  tries=0
+  while [ ! -s "$tmp/browser.log" ] && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
+  [ -s "$tmp/browser.log" ]
+}
+# Which fake token a header helper answer carries, by name, for check names.
+token_name() {
+  case $1 in
+    *"Bearer $good"*) echo good ;; *"Bearer $other"*) echo other ;;
+    *"Bearer $second"*) echo second ;; *Bearer*) echo another ;; *) echo none ;;
+  esac
+}
 is_json() { printf '%s' "$1" | python3 -I -m json.tool >/dev/null 2>&1; }
 private() { [ -n "$(find "$1" -prune -perm 600 2>/dev/null)" ]; }
 calls() { wc -l < "$tmp/clients.log" 2>/dev/null | tr -d ' '; }
@@ -242,6 +270,9 @@ printf '%s' "$other" > "$conf/workspaces/org_A/token"
 printf '%s\torg_A\n%s\torg_C\n%s/\torg_B/../x\n' "$work/a" "$work" "$work/b" > "$conf/projects"
 out=$(headers "$work/a/sub")
 has "$out" "Bearer $other"; check "a folder mapped to a workspace sends that workspace's token"
+# shellcheck disable=SC2016 # the script's own expansions, in its shell
+seen=$(agent "$work/a" "$plugin" "$shell" -c '. "$1"; unio_agent_dir' sh "$scripts/lib.sh")
+[ "$seen" = "$work/a" ]; check "the helper reads its agent's own folder (got $seen)"
 out=$(CLAUDE_PROJECT_DIR=$work/a headers "$tmp/elsewhere")
 has "$out" "Bearer $other"; check "CLAUDE_PROJECT_DIR picks the folder before the working directory"
 out=$(headers "$work/ab")
@@ -430,7 +461,9 @@ mkdir -p "$work/r" "$work/o" "$conf/workspaces/org_R" "$conf/workspaces/org_O"
 printf '%s' "$refused" > "$conf/workspaces/org_R/token"
 printf '%s' "$off" > "$conf/workspaces/org_O/token"
 printf '%s\torg_R\n%s\torg_O\n' "$work/r" "$work/o" > "$conf/projects"
-CLAUDE_PROJECT_DIR=$work/r refresh
+# In a subshell: bash in POSIX mode, which macOS's sh is, keeps an
+# assignment written before a function call after the call returns.
+(CLAUDE_PROJECT_DIR=$work/r refresh)
 out=$(CLAUDE_PROJECT_DIR=$work/r notice)
 user=$(hook "$out" user)
 model=$(hook "$out" model)
@@ -441,7 +474,7 @@ printf '%s' "$good" > "$conf/workspaces/org_R/token"
 expire status-org_R
 user=$(hook "$(CLAUDE_PROJECT_DIR=$work/r notice)" user)
 lacks "$user" "recusou"; check "a new token silences the old refusal"
-CLAUDE_PROJECT_DIR=$work/o refresh
+(CLAUDE_PROJECT_DIR=$work/o refresh)
 out=$(CLAUDE_PROJECT_DIR=$work/o notice)
 has "$(hook "$out" user)" "desligados no workspace org_O" && has "$(hook "$out" model)" "switched off"; check "agents switched off are reported, naming the workspace"
 mkdir -p "$work/m"
@@ -515,7 +548,8 @@ lacks "$report" "core folder:"; check "doctor checks the connection's folder onl
 mkdir -p "$tmp/mapped-a" "$tmp/mapped-b"
 printf '%s\torg_A\n%s\torg_B\n' "$tmp/mapped-a" "$tmp/mapped-b" > "$conf/projects"
 report=$(CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
-has "$report" "^ok core folder: a conexão com o Unio usa o workspace desta pasta"; check "doctor confirms the connection sees this folder"
+got=$(printf '%s\n' "$report" | grep -e 'core folder' -e 'core token' | tr '\n' ' ')
+has "$report" "^ok core folder: a conexão com o Unio usa o workspace desta pasta"; check "doctor confirms the connection sees this folder (got: $got)"
 report=$(CLAUDECODE=1 agent "$tmp/mapped-b" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
 has "$report" "^bad core folder: .*mapped-b, de outro workspace"; check "doctor reports a connection that sees another workspace's folder"
 report=$(PATH=$tmp/no-ps:$PATH CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
@@ -678,7 +712,15 @@ has_text "$out" "Este computador já usa o Unio com outro workspace. Onde usar o
   [ "$(cat "$conf/default-workspace")" = org_test ]; check "a second workspace asks where it applies"
 printf '%s\torg_Second\n%s\torg_Second\n' "$tmp/repo2" "$tmp/linked-repo2" | cmp -s - "$conf/projects" &&
   has_text "$out" "O workspace org_Second vale só em $tmp/repo2 e nas pastas dentro dela."; check "answered 1, it maps this folder, by its real path and by the link it was reached through"
-has "$(headers "$tmp/repo2")" "Bearer $second" && has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's"
+in2=$(headers "$tmp/repo2")
+out2=$(headers "$tmp/elsewhere")
+got="$(token_name "$in2"), $(token_name "$out2"); $(decides "$tmp/repo2")"
+if ! has "$in2" "Bearer $second"; then
+  # The helper's own trace, without any line that holds a token.
+  got="$got; trace: $(agent "$tmp/repo2" "$plugin" "$shell" -x "$scripts/mcp-headers.sh" claude-code 2>&1 >/dev/null |
+    grep -v -e unio_ -e Bearer | grep -e 'folder=' -e 'want=' -e 'path=' -e 'org=' -e 'pid=' -e 'PWD' | tail -n 25 | tr '\n' '|')"
+fi
+has "$in2" "Bearer $second" && has "$out2" "Bearer $good"; check "the mapped folder sends the second workspace's token, other folders the first's (got $got)"
 has "$(CLAUDE_PROJECT_DIR=$tmp/repo2 doctor)" "^ok core token: .*(o token do workspace org_Second, ligado a esta pasta)"; check "doctor says a mapped folder's workspace is tied to the folder"
 types "$second" x ''
 out=$(install_in "$tmp/repo3" --workspace org_Second)
@@ -702,8 +744,9 @@ home legacy-other
 printf '%s\n' "$second" > "$conf/token"
 types "$good" 1
 out=$(install_in "$tmp/repo" --workspace org_test --renew)
+got="$(token_name "$(headers "$tmp/elsewhere")"), $(token_name "$(headers "$tmp/repo")"); $(decides "$tmp/repo")"
 has_text "$out" "Onde usar o workspace org_test?" && [ ! -e "$conf/default-workspace" ] && has "$(headers "$tmp/elsewhere")" "Bearer $second" &&
-  has "$(headers "$tmp/repo")" "Bearer $good"; check "a computer token of another workspace counts as a first workspace"
+  has "$(headers "$tmp/repo")" "Bearer $good"; check "a computer token of another workspace counts as a first workspace (got $got)"
 
 home settings
 mkdir -p "$HOME/.claude"
@@ -860,7 +903,7 @@ approve_in() {
 }
 
 home browser
-rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+rm -f "$tmp/connect/log" "$tmp/browser.log"
 approval pending "approved $good"
 out=$(DISPLAY=:0 approve_in "$tmp/repo")
 code=$?
@@ -870,20 +913,25 @@ code=$?
   has "$out" "Token salvo em ~/.config/unio/workspaces/org_test/token, para o workspace WorkspaceNameMarker" &&
   has "$out" "Ele vence em 30 dias\." && has "$out" "vale em todas as pastas deste computador"; check "browser: the first workspace's token is saved as the installer saves it, the computer's default"
 [ -z "$(find "$conf" -name '*.new')" ] && [ -z "$(find "$conf" -name 'token.new.*')" ]; check "browser: no temporary file is left"
-grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/xdg-open.log"; check "browser: the page opens in a browser on this screen"
+opened && grep -qx 'https://unio.so/app/connect?code=BCDF-GHJK' "$tmp/browser.log"; check "browser: the page opens in a browser on this screen"
 grep -q '^/v1/agents/connect/start [0-9.]* {"client":"claude-code","host":"[A-Za-z0-9][A-Za-z0-9_-]*"}$' "$tmp/connect/log"; check "browser: start names the client and a host name"
 lacks "$out" "unio_" && lacks "$out" "FakeDeviceCode" &&
   ! grep -q -e "$good" -e FakeDeviceCode "$tmp/curl-argv.log"; check "browser: neither the token nor the device code is printed or on curl's command line"
 has "$(headers "$tmp/elsewhere")" "Bearer $good"; check "browser: the header helper sends the approved token"
 
-rm -f "$tmp/connect/log" "$tmp/xdg-open.log"
+rm -f "$tmp/connect/log" "$tmp/browser.log"
 approval slow_down "approved $second"
 out=$(approve_in "$tmp/repo2")
 gap=$(grep '^/v1/agents/connect/poll ' "$tmp/connect/log" | awk '{ t[NR] = $2 } END { printf "%d", t[NR] - t[NR - 1] }')
 [ "$(polls)" -eq 2 ] && [ "$gap" -ge 6 ]; check "browser: slow_down adds five seconds to the interval"
 [ "$(token_of org_Second)" = "$second" ] && [ "$(cat "$conf/default-workspace")" = org_test ] &&
   grep -q "^$tmp/repo2	org_Second\$" "$conf/projects" && has "$out" "vale só nesta pasta"; check "browser: a second workspace, with no terminal to ask, covers only this folder"
-[ ! -e "$tmp/xdg-open.log" ]; check "browser: without a display, no browser is started"
+if [ "$(uname -s)" = Darwin ]; then
+  # A Mac has a screen whenever the session is not over SSH.
+  opened; check "browser: on macOS the page opens with or without DISPLAY"
+else
+  ! opened; check "browser: without a display, no browser is started"
+fi
 
 home browser-refused
 approval denied

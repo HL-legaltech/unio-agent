@@ -30,6 +30,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -188,6 +190,11 @@ def main():
 
         def run(folder, prompt):
             nonlocal offset
+            try:
+                urllib.request.urlopen(urllib.request.Request(base + "/control/expect-mcp", data=b"", method="POST"))
+            except urllib.error.HTTPError as refused:
+                check(False, "the fake API waits for this session's MCP connection",
+                      refused.read().decode("utf-8", "replace"))
             started = time.time()
             done = subprocess.run(
                 [args.claude, "-p", "--plugin-dir", plugin, "--output-format", "json", prompt],
@@ -198,6 +205,13 @@ def main():
             entries, offset = read_log(log_file, offset)
             print("  ran %r in %s: exit %d in %.0fs, %d requests"
                   % (prompt, os.path.basename(folder), done.returncode, time.time() - started, len(entries)))
+            # The fake lets the first message go after 30 s without MCP, and
+            # some checks below hold vacuously when no MCP request came.
+            paths = [e.get("path") for e in entries]
+            first = paths.index("/v1/messages") if "/v1/messages" in paths else len(paths)
+            check("/v1/mcp" in paths[:first],
+                  "%s in %s: Claude Code reached the MCP server before its first message"
+                  % (prompt, os.path.basename(folder)), "requests: %s" % paths)
             return done, entries
 
         def texts(entries):

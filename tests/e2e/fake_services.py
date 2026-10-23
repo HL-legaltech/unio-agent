@@ -12,6 +12,12 @@ credential is needed.
   logs the bearer token and X-Unio-Client of each request.
 - GET /v1/agents/me answers the plugin's scripts by token, like
   tests/fake_api.py, with the workspace given on the command line.
+- POST /control/expect-mcp makes the next /v1/messages wait (up to 30 s)
+  for an MCP request, so a session cannot end before Claude Code connects
+  to Unio: in print mode it does not wait for the connection itself. It
+  first waits out the connections the previous session left open, so none
+  of their requests counts as this session's, and answers 503 when one
+  stays open past 10 s.
 
 Every request becomes one JSON line in the log file.
 
@@ -27,6 +33,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT_FILE, LOG = sys.argv[1:3]
 TOKENS = dict(arg.split("=", 1) for arg in sys.argv[3:])
 LOCK = threading.Lock()
+MCP_SEEN = threading.Event()
+EXPECT_MCP = threading.Event()
+OPEN = threading.Condition()
+open_connections = 0
 
 
 def log(entry):
@@ -110,11 +120,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         body = self.read_body()
+        if path == "/control/expect-mcp":
+            # A request of the previous session still in a handler could set
+            # MCP_SEEN after the clear below; only this connection may be open.
+            with OPEN:
+                drained = OPEN.wait_for(lambda: open_connections <= 1, timeout=10)
+            if not drained:
+                return self.send_json(503, {"error": "a connection of the previous session is still open"})
+            MCP_SEEN.clear()
+            EXPECT_MCP.set()
+            return self.send_empty(204)
         if path == "/v1/mcp":
             return self.mcp(body)
         if path == "/v1/messages/count_tokens":
             return self.send_json(200, {"input_tokens": 10})
         if path == "/v1/messages":
+            if EXPECT_MCP.is_set():
+                MCP_SEEN.wait(30)
+                EXPECT_MCP.clear()
             log({"method": "POST", "path": path, "stream": bool(body.get("stream")),
                  "text": message_text(body)})
             return self.message(body)
@@ -124,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
     def mcp(self, body):
         log({"method": "POST", "path": "/v1/mcp", "token": self.bearer(),
              "client": self.headers.get("X-Unio-Client"), "rpc": body.get("method")})
+        # After the log line, so the log shows it before the message it lets go.
+        MCP_SEEN.set()
         if self.bearer() not in TOKENS:
             return self.send_json(401, {"error": "Token de agente inválido."})
         if "id" not in body:
@@ -178,8 +203,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class Server(ThreadingHTTPServer):
+    """Counts the connections still being handled."""
+
+    def process_request(self, request, client_address):
+        global open_connections
+        with OPEN:
+            open_connections += 1
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        global open_connections
+        super().shutdown_request(request)
+        with OPEN:
+            open_connections -= 1
+            OPEN.notify_all()
+
+
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Server(("127.0.0.1", 0), Handler)
     with open(PORT_FILE + ".tmp", "w", encoding="utf-8") as out:
         out.write(str(server.server_address[1]))
     # Renamed into place, so the driver never reads half a number.
