@@ -6,6 +6,7 @@ LC_ALL=C
 export LC_ALL
 
 UNIO_CONF=$HOME/.config/unio
+UNIO_STATE=${XDG_STATE_HOME:-$HOME/.local/state}/unio
 
 # linux (WSL included), macos, or windows: Git Bash, MSYS2 or Cygwin, where
 # Claude Code runs the plugin's scripts on Windows.
@@ -144,6 +145,94 @@ unio_token_file() {
   else
     printf '%s/token' "$UNIO_CONF"
   fi
+}
+
+# The process id of the coding agent this script serves: its nearest
+# ancestor that is not a shell. Claude Code starts the header helper through
+# sh -c; Codex starts it directly.
+unio_agent_pid() {
+  pid=$PPID
+  hops=0
+  while [ "$hops" -lt 6 ]; do
+    case $pid in ''|0|1|*[!0-9]*) return 1 ;; esac
+    name=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    name=${name%"${name##*[![:space:]]}"}
+    name=${name##*/}
+    case ${name#-} in
+      '') return 1 ;;
+      sh|bash|dash|zsh|ksh|mksh|ash|busybox|env|timeout|nice) ;;
+      *) printf '%s' "$pid"; return 0 ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# Windows lets no process read another one's folder. So there the session
+# hook writes Claude Code's folder to $UNIO_STATE/sessions/<CLAUDE_PID>, and
+# the header helper, which Claude Code starts without CLAUDE_PID, asks Windows
+# for its own nearest ancestor that is not a shell. Prints "<pid> <start>
+# <name>", the start in seconds since 1970.
+unio_windows_agent() {
+  self=$(cat "/proc/$$/winpid" 2>/dev/null)
+  case $self in ''|*[!0-9]*) return 1 ;; esac
+  # shellcheck disable=SC2016 # PowerShell's variables, never the shell's
+  MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command '
+    $p = '"$self"'
+    for ($i = 0; $i -lt 8; $i++) {
+      $w = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+      if (-not $w) { exit 1 }
+      if ($w.Name -notmatch "^(sh|bash|dash|zsh|env|timeout|cmd|powershell|pwsh|conhost)(\.exe)?$") {
+        $start = [int64]($w.CreationDate.ToUniversalTime() - [datetime]"1970-01-01").TotalSeconds
+        Write-Output "$($w.ProcessId) $start $($w.Name)"
+        exit 0
+      }
+      $p = $w.ParentProcessId
+    }
+    exit 1' 2>/dev/null | tr -d '\r' | head -n 1
+}
+
+# The session file the hook wrote for Claude Code process $1.
+unio_session_file() {
+  printf '%s/sessions/%s' "$UNIO_STATE" "$1"
+}
+
+# The folder the coding agent works in, or nothing when it cannot be known.
+# Claude Code runs the header helper in the plugin's own folder and passes no
+# project, so the folder is read off the agent's process.
+unio_agent_dir() {
+  case $UNIO_OS in
+    linux)
+      pid=$(unio_agent_pid) || return 0
+      (CDPATH='' cd -P -- "/proc/$pid/cwd" 2>/dev/null && pwd -P) ;;
+    macos)
+      pid=$(unio_agent_pid) || return 0
+      lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 ;;
+    windows)
+      agent=$(unio_windows_agent)
+      pid=${agent%% *}
+      started=${agent#* }
+      name=${started#* }
+      started=${started%% *}
+      case $pid$started in ''|*[!0-9]*) return 0 ;; esac
+      # Only Claude Code has a hook that leaves the file; Codex never will.
+      case $name in [Cc]laude*) ;; *) return 0 ;; esac
+      file=$(unio_session_file "$pid")
+      # The hook may still be running: Claude Code connects to Unio while it
+      # starts its hooks. A file older than the process is a past session's.
+      tries=0
+      while [ "$tries" -lt 20 ]; do
+        written=$(date -r "$file" +%s 2>/dev/null)
+        if [ -n "$written" ] && [ "$written" -ge $((started - 1)) ]; then
+          head -n 1 "$file"
+          return 0
+        fi
+        sleep 0.25
+        tries=$((tries + 1))
+      done ;;
+  esac
+  return 0
 }
 
 # The installer's command that replaces workspace $1's token and installs

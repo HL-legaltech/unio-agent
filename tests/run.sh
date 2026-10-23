@@ -148,7 +148,17 @@ data = json.loads(text) if text else {}
 value = data.get("systemMessage", "") if sys.argv[1] == "user" else data.get("hookSpecificOutput", {}).get("additionalContext", "")
 print(value)' "$2"
 }
-headers() { (cd "$1" && "$shell" "$scripts/mcp-headers.sh" "${2:-claude-code}"); }
+# Runs a command as a coding agent runs it: from a process that is not a
+# shell (python here, Claude Code or Codex for real), working in folder $1,
+# with the command itself working in folder $2.
+agent() {
+  python3 -I -c 'import os, subprocess, sys
+os.chdir(sys.argv[1])
+sys.exit(subprocess.call(sys.argv[3:], cwd=sys.argv[2]))' "$@"
+}
+# The header helper as Claude Code starts it: in the plugin's folder, with no
+# CLAUDE_PROJECT_DIR, for an agent working in folder $1.
+headers() { agent "$1" "$plugin" "$shell" "$scripts/mcp-headers.sh" "${2:-claude-code}"; }
 notice() { "$shell" "$scripts/session-start.sh" notice; }
 refresh() { "$shell" "$scripts/session-start.sh" refresh; }
 connect() { printf '%s\n' "$1" | "$shell" "$scripts/connect.sh"; }
@@ -228,6 +238,20 @@ has "$out" "Bearer $other"; check "a projects line saved on Windows, with stray 
 printf 'org_A\n' > "$conf/default-workspace"
 out=$(headers "$tmp/elsewhere")
 has "$out" "Bearer $other"; check "default-workspace applies outside mapped folders"
+
+# Without ps, the helper cannot read the agent's folder.
+mkdir -p "$tmp/no-ps"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/no-ps/ps"
+chmod +x "$tmp/no-ps/ps"
+printf '%s\torg_A\n' "$work/a" > "$conf/projects"
+mkdir -p "$conf/workspaces/org_B"
+printf '%s' "$good" > "$conf/workspaces/org_B/token"
+printf 'org_B\n' > "$conf/default-workspace"
+out=$(PATH=$tmp/no-ps:$PATH headers "$work/a")
+lacks "$out" Authorization && has "$out" X-Unio-Client; check "an unknown folder on a computer with mapped folders sends no token, never the default's"
+rm -f "$conf/projects"
+out=$(PATH=$tmp/no-ps:$PATH headers "$work/a")
+has "$out" "Bearer $good"; check "an unknown folder on a computer without mapped folders sends the default's token"
 
 # Folder forms: Claude Code says C:/x on Windows where Git Bash's pwd -P,
 # which the installer writes, says /c/x; Windows and macOS ignore case.
@@ -454,6 +478,19 @@ has "$report" "^bad core api: o Unio recusou o token"; check "doctor reports a r
 rm -f "$conf/token"
 report=$(doctor)
 has "$report" "^bad core token: falta" && has "$report" "/unio:connect"; check "doctor sends a computer without a token to /unio:connect"
+lacks "$report" "core folder:"; check "doctor checks the connection's folder only inside a session with mapped folders"
+
+# Inside a session, on a computer with mapped folders, the doctor checks the
+# folder the header helper will find.
+mkdir -p "$tmp/mapped-a" "$tmp/mapped-b"
+printf '%s\torg_A\n%s\torg_B\n' "$tmp/mapped-a" "$tmp/mapped-b" > "$conf/projects"
+report=$(CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
+has "$report" "^ok core folder: a conexão com o Unio usa o workspace desta pasta"; check "doctor confirms the connection sees this folder"
+report=$(CLAUDECODE=1 agent "$tmp/mapped-b" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
+has "$report" "^bad core folder: .*mapped-b, de outro workspace"; check "doctor reports a connection that sees another workspace's folder"
+report=$(PATH=$tmp/no-ps:$PATH CLAUDECODE=1 agent "$tmp/mapped-a" "$tmp/mapped-a" "$shell" "$scripts/doctor.sh" claude-code)
+has "$report" "^bad core folder: .*conecta sem token"; check "doctor reports a connection that cannot know its folder"
+rm -f "$conf/projects"
 
 # The installer, run as `curl ... | sh -s -- ...` runs it: the script on
 # stdin, in a terminal of its own that types the answers (tests/pty_run.py).

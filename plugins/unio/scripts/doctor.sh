@@ -75,6 +75,30 @@ else
   fi
 fi
 
+# The header helper finds this session's folder on its own (unio_agent_dir).
+# That matters only where folders are tied to workspaces, and can be checked
+# only from inside a session.
+if [ "$kind" = claude-code ] && [ -n "${CLAUDECODE:-}" ] && unio_mapped ''; then
+  if [ "$UNIO_OS" = windows ]; then
+    seen=
+    case ${CLAUDE_PID:-} in
+      ''|*[!0-9]*) ;;
+      *) seen=$(head -n 1 "$(unio_session_file "$CLAUDE_PID")" 2>/dev/null) ;;
+    esac
+    fix="confira que o Git for Windows está instalado e que os hooks do Claude Code estão ligados, e abra uma sessão nova"
+  else
+    seen=$(unio_agent_dir)
+    fix="o comando ps precisa estar disponível (e o lsof, no macOS)"
+  fi
+  if [ -z "$seen" ]; then
+    line bad "core folder: a conexão com o Unio não consegue saber a pasta desta sessão e por isso conecta sem token, para não usar o workspace de outra pasta; $fix"
+  elif [ "$(unio_workspace "$seen")" != "$workspace" ]; then
+    line bad "core folder: a conexão com o Unio vê a pasta $(unio_tilde "$seen"), de outro workspace; abra o Claude Code na pasta do projeto"
+  else
+    line ok "core folder: a conexão com o Unio usa o workspace desta pasta"
+  fi
+fi
+
 if [ -n "$token" ]; then
   body=$(umask 077 && mktemp 2>/dev/null) || body=
   http=000
