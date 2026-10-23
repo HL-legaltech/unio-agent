@@ -29,10 +29,14 @@ quote() {
 instructions() {
   workspace=$(unio_workspace "${CLAUDE_PROJECT_DIR:-$PWD}")
   file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
+  # The commands below are sh commands, which a Windows terminal runs only
+  # in Git Bash.
+  terminal="outro terminal"
+  [ "$UNIO_OS" != windows ] || terminal="outro terminal do Git Bash"
   cat <<EOF
 Para conectar este computador ao Unio:
 
-1. Em outro terminal, fora do Claude Code, rode o comando abaixo na pasta do seu projeto:
+1. Em $terminal, fora do Claude Code, rode o comando abaixo na pasta do seu projeto:
 
 sh $(quote "$(unio_root)/scripts/connect.sh") browser
 
@@ -45,13 +49,13 @@ Se preferir copiar um token, abra Configurações > Pessoal > Agente de código 
 EOF
   if [ -n "$workspace" ]; then
     cat <<EOF
-Depois, em outro terminal, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
+Depois, em $terminal, rode o comando abaixo e cole o token quando ele pedir. Ele troca o token do workspace $workspace, que esta pasta usa. O token não aparece na tela e só é salvo depois que o Unio o aceitar. Para outro workspace, use o comando que a página dele mostra.
 
 $(unio_renew_command "$workspace")
 EOF
   else
     cat <<EOF
-Depois, em outro terminal, rode o comando que a página mostra e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
+Depois, em $terminal, rode o comando que a página mostra e cole o token quando ele pedir. O token não aparece na tela e só é salvo depois que o Unio o aceitar.
 EOF
   fi
   # Only a folder without a workspace reads ~/.config/unio/token, the one

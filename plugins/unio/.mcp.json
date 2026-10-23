@@ -3,7 +3,7 @@
     "unio": {
       "type": "http",
       "url": "https://api.unio.so/v1/mcp",
-      "headersHelper": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-headers.sh\" claude-code"
+      "headersHelper": "git -c \"alias.unio-headers=!sh\" unio-headers \"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-headers.sh\" claude-code"
     }
   }
 }

@@ -7,14 +7,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh", "notice"],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\" notice",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh", "refresh"],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\" refresh",
             "async": true,
             "timeout": 30
           }

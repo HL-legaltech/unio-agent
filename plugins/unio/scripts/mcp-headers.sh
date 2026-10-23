@@ -9,9 +9,13 @@
 #
 # Usage: mcp-headers.sh <claude-code|codex>
 #
-# The folder that picks the workspace is $CLAUDE_PROJECT_DIR, else the working
-# directory. It is never an argument: Claude Code would paste it into a shell
-# command line, where a folder name could run code.
+# The folder that picks the workspace is never an argument: Claude Code would
+# paste it into a shell command line, where a folder name could run code.
+# Claude Code runs this helper in the plugin's own folder and without
+# CLAUDE_PROJECT_DIR, so the folder is the coding agent's own (see
+# unio_agent_dir). When it cannot be known and some folder is tied to a
+# workspace, no token goes out: the computer's default could belong to
+# another workspace than the folder's, and Unio Bot would act there.
 
 # shellcheck source=lib.sh
 . "$(dirname -- "$0")/lib.sh"
@@ -21,10 +25,18 @@ case ${1:-} in
   *) client= ;;
 esac
 
-# An inbox run acts with its runner token, never with a person's.
+# An inbox run acts with its runner token, never with a person's. Without a
+# mapped folder every folder uses the default, so none is looked up.
 token=
-if [ "${UNIO_INBOX_RUN:-}" != 1 ]; then
-  token=$(unio_read_token "$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")")
+if [ "${UNIO_INBOX_RUN:-}" = 1 ]; then
+  :
+elif unio_mapped ''; then
+  folder=${CLAUDE_PROJECT_DIR:-}
+  [ -n "$folder" ] || folder=$(unio_agent_dir)
+  if [ -z "$folder" ] && [ "$(pwd -P)" != "$(unio_root)" ]; then folder=$PWD; fi
+  [ -z "$folder" ] || token=$(unio_read_token "$(unio_token_file "$folder")")
+else
+  token=$(unio_read_token "$(unio_token_file '')")
 fi
 
 if [ -n "$token" ] && [ -n "$client" ]; then

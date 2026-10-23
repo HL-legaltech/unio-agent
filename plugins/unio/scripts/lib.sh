@@ -6,6 +6,15 @@ LC_ALL=C
 export LC_ALL
 
 UNIO_CONF=$HOME/.config/unio
+UNIO_STATE=${XDG_STATE_HOME:-$HOME/.local/state}/unio
+
+# linux (WSL included), macos, or windows: Git Bash, MSYS2 or Cygwin, where
+# Claude Code runs the plugin's scripts on Windows.
+case $(uname -s 2>/dev/null) in
+  Darwin) UNIO_OS=macos ;;
+  MINGW*|MSYS*|CYGWIN*) UNIO_OS=windows ;;
+  *) UNIO_OS=linux ;;
+esac
 
 # The API is pinned to api.unio.so. Only ~/.config/unio/api-url moves it (a
 # test or staging API), never an environment variable: any program a session
@@ -69,6 +78,34 @@ unio_is_org() {
   case ${1#org_} in *[!A-Za-z0-9]*) return 1 ;; esac
 }
 
+# Folder $1 in the one form folders are compared in. Claude Code names a
+# Windows folder C:/x, a person may type C:\x, and Git Bash's pwd -P, which
+# the installer writes to ~/.config/unio/projects, says /c/x. Windows and
+# macOS ignore case, so there the form is lower case.
+unio_dir_key() {
+  d=$1
+  # A folder that exists is read back from the system, physical and, on
+  # Windows, by its long name: Claude Code may name it C:/Users/RUNNER~1/...
+  # where Git Bash says /c/Users/runneradmin/....
+  real=$(CDPATH='' cd -P -- "$d" 2>/dev/null && pwd -P) && [ -n "$real" ] && d=$real
+  if [ "$UNIO_OS" = windows ]; then
+    case $d in
+      [A-Za-z]:*)
+        if command -v cygpath >/dev/null 2>&1; then
+          d=$(cygpath -u "$d" 2>/dev/null) || d=$1
+        else
+          drive=$(printf '%s' "${d%%:*}" | tr '[:upper:]' '[:lower:]')
+          d=/$drive$(printf '%s' "${d#??}" | tr '\134' /)
+        fi ;;
+    esac
+  fi
+  while case $d in ?*/) true ;; *) false ;; esac; do d=${d%/}; done
+  case $UNIO_OS in
+    windows|macos) d=$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]') ;;
+  esac
+  printf '%s' "$d"
+}
+
 # The workspace a folder works in: the longest folder in
 # ~/.config/unio/projects ("<folder><TAB><org id>" per line) that holds it,
 # else the one in ~/.config/unio/default-workspace. Prints nothing when
@@ -77,6 +114,7 @@ unio_workspace() {
   org=
   if [ -n "$1" ] && [ -r "$UNIO_CONF/projects" ]; then
     best=
+    want=$(unio_dir_key "$1")
     tab=$(printf '\t')
     while IFS=$tab read -r path key || [ -n "$path" ]; do
       # A line saved on Windows ends in CR, which would fail unio_is_org and
@@ -84,9 +122,10 @@ unio_workspace() {
       key=${key#"${key%%[![:space:]]*}"}
       key=${key%"${key##*[![:space:]]}"}
       path=${path%"${path##*[![:space:]]}"}
-      while case $path in ?*/) true ;; *) false ;; esac; do path=${path%/}; done
       if [ -z "$path" ] || ! unio_is_org "$key"; then continue; fi
-      case $1/ in
+      path=$(unio_dir_key "$path")
+      [ -n "$path" ] || continue
+      case $want/ in
         "$path"/*)
           if [ "${#path}" -gt "${#best}" ]; then
             best=$path
@@ -110,6 +149,94 @@ unio_token_file() {
   else
     printf '%s/token' "$UNIO_CONF"
   fi
+}
+
+# The process id of the coding agent this script serves: its nearest
+# ancestor that is neither a shell nor git, which runs the header helper for
+# Claude Code (see .mcp.json); Codex starts it directly.
+unio_agent_pid() {
+  pid=$PPID
+  hops=0
+  while [ "$hops" -lt 6 ]; do
+    case $pid in ''|0|1|*[!0-9]*) return 1 ;; esac
+    name=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    name=${name%"${name##*[![:space:]]}"}
+    name=${name##*/}
+    case ${name#-} in
+      '') return 1 ;;
+      sh|bash|dash|zsh|ksh|mksh|ash|busybox|env|timeout|nice|git) ;;
+      *) printf '%s' "$pid"; return 0 ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# Windows lets no process read another one's folder. So there the session
+# hook writes Claude Code's folder to $UNIO_STATE/sessions/<CLAUDE_PID>, and
+# the header helper, which Claude Code starts without CLAUDE_PID, asks Windows
+# for its own nearest ancestor that is not a shell. Prints "<pid> <start>
+# <name>", the start in seconds since 1970.
+unio_windows_agent() {
+  self=$(cat "/proc/$$/winpid" 2>/dev/null)
+  case $self in ''|*[!0-9]*) return 1 ;; esac
+  # shellcheck disable=SC2016 # PowerShell's variables, never the shell's
+  MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command '
+    $p = '"$self"'
+    for ($i = 0; $i -lt 8; $i++) {
+      $w = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+      if (-not $w) { exit 1 }
+      if ($w.Name -notmatch "^(sh|bash|dash|zsh|env|timeout|git|cmd|powershell|pwsh|conhost)(\.exe)?$") {
+        $start = [int64]($w.CreationDate.ToUniversalTime() - [datetime]"1970-01-01").TotalSeconds
+        Write-Output "$($w.ProcessId) $start $($w.Name)"
+        exit 0
+      }
+      $p = $w.ParentProcessId
+    }
+    exit 1' 2>/dev/null | tr -d '\r' | head -n 1
+}
+
+# The session file the hook wrote for Claude Code process $1.
+unio_session_file() {
+  printf '%s/sessions/%s' "$UNIO_STATE" "$1"
+}
+
+# The folder the coding agent works in, or nothing when it cannot be known.
+# Claude Code runs the header helper in the plugin's own folder and passes no
+# project, so the folder is read off the agent's process.
+unio_agent_dir() {
+  case $UNIO_OS in
+    linux)
+      pid=$(unio_agent_pid) || return 0
+      (CDPATH='' cd -P -- "/proc/$pid/cwd" 2>/dev/null && pwd -P) ;;
+    macos)
+      pid=$(unio_agent_pid) || return 0
+      lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 ;;
+    windows)
+      agent=$(unio_windows_agent)
+      pid=${agent%% *}
+      started=${agent#* }
+      name=${started#* }
+      started=${started%% *}
+      case $pid$started in ''|*[!0-9]*) return 0 ;; esac
+      # Only Claude Code has a hook that leaves the file; Codex never will.
+      case $name in [Cc]laude*) ;; *) return 0 ;; esac
+      file=$(unio_session_file "$pid")
+      # The hook may still be running: Claude Code connects to Unio while it
+      # starts its hooks. A file older than the process is a past session's.
+      tries=0
+      while [ "$tries" -lt 20 ]; do
+        written=$(date -r "$file" +%s 2>/dev/null)
+        if [ -n "$written" ] && [ "$written" -ge $((started - 1)) ]; then
+          head -n 1 "$file"
+          return 0
+        fi
+        sleep 0.25
+        tries=$((tries + 1))
+      done ;;
+  esac
+  return 0
 }
 
 # The installer's command that replaces workspace $1's token and installs
@@ -204,8 +331,14 @@ unio_open_url() {
   case $(uname -s 2>/dev/null) in
     Darwin)
       if command -v open >/dev/null 2>&1; then (open "$1" </dev/null >/dev/null 2>&1 &); fi ;;
+    MINGW*|MSYS*|CYGWIN*)
+      (rundll32.exe url.dll,FileProtocolHandler "$1" </dev/null >/dev/null 2>&1 &) ;;
     *)
-      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+      # WSL opens the browser of the Windows around it, through interop.
+      if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null &&
+        command -v rundll32.exe >/dev/null 2>&1; then
+        (rundll32.exe url.dll,FileProtocolHandler "$1" </dev/null >/dev/null 2>&1 &)
+      elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
         (xdg-open "$1" </dev/null >/dev/null 2>&1 &)
       fi ;;
   esac
