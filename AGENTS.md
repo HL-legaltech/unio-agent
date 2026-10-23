@@ -63,9 +63,14 @@ python3 -I tests/check_fixture.py
 dash tests/run.sh
 bash tests/run.sh
 sh tests/check_versions.sh origin/main
+python3 -I tests/e2e/claude_session.py
 python3 -m unittest discover -s runner/tests -v
 ```
 
+- `tests/e2e/claude_session.py` runs the real Claude Code with the plugin
+  against fake Anthropic and Unio APIs on loopback, and CI runs it on Linux,
+  macOS and Windows. It is the only check of what Claude Code itself does
+  with the hook, the commands and the header helper on each system.
 - A change to a command or to the hook also needs a real run of each command
   it touches, in the default permission mode, from a throwaway config folder
   you are signed in to: `CLAUDE_CONFIG_DIR=<folder> claude -p --plugin-dir
@@ -92,8 +97,16 @@ No AI attribution. Stage named paths only.
 
 - The plugin's scripts are POSIX `sh`: they run under dash, bash, macOS `sh`
   and Git Bash. They call POSIX utilities, plus `curl`, `mktemp` and
-  `date +%s`, which every supported system has. Check any other tool on
-  macOS and Git Bash before a script depends on it.
+  `date +%s`, which every supported system has; `lsof` on macOS and
+  `cygpath` and `powershell.exe` on Windows, where `UNIO_OS` says so. Check
+  any other tool on macOS and Git Bash before a script depends on it.
+- On Windows Claude Code runs a hook in exec form (`args`) only when its
+  `command` is an `.exe` on the PATH, and Git for Windows does not put
+  `sh.exe` there. Hooks stay in shell form, which Claude Code runs through
+  Git Bash.
+- Claude Code starts the header helper in the plugin's folder, with no
+  `CLAUDE_PROJECT_DIR` and no session id. The folder comes from
+  `unio_agent_dir`; never from the helper's own working directory.
 - `install.sh` runs piped into `sh`, so it cannot source `lib.sh`: its copies
   of `lib.sh`'s helpers must change with them. Its stdin is the script
   itself, so it reads answers only from `/dev/tty` and starts `claude` and

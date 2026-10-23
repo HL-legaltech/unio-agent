@@ -13,13 +13,13 @@ The plugin carries four things:
 
 - A Unio workspace with agents turned on, where you have the developer role. You generate your own token in Unio, under Configurações > Pessoal > Agente de código (<https://unio.so/app/settings/coding-agent>).
 - Claude Code 2.1.292 or later (`claude --version`), or Codex.
-- `sh` and `curl`: Linux, macOS, WSL, or Windows with Git Bash.
+- Linux, WSL or macOS, which bring the `sh`, `curl` and `ps` the plugin uses (and `lsof`, on macOS). On Windows, [Git for Windows](https://git-scm.com/downloads/win): Claude Code needs git there to install a plugin from GitHub, and Git for Windows brings Git Bash, where Claude Code runs the plugin's scripts. Run the commands below in a Git Bash terminal.
 
 <a id="install"></a>
 
 ## Install with one command
 
-In a terminal of your own, outside Claude Code, run:
+In a terminal of your own, outside Claude Code (on Windows, Git Bash), run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh
@@ -148,6 +148,13 @@ Type them as ordinary messages, in either language; the skill recognizes them.
 - **Which workspace a folder uses:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each, and the longest match wins. Every other folder uses the workspace named in `~/.config/unio/default-workspace`. The installer writes both.
 - **A setup from before the installer:** `~/.config/unio/token`, read only while `default-workspace` does not exist. The hand-setup command (`connect.sh`) still saves a token there, and refuses to while `default-workspace` exists.
 - **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
+- **On Windows,** `~` is your profile folder (`%USERPROFILE%`), so the tokens are in `%USERPROFILE%\.config\unio\workspaces`. Git Bash names the folders in `projects` `/c/Users/...`; a line in the `C:\Users\...` or `C:/Users/...` form works too, and on Windows and macOS case does not matter.
+
+### How a session finds its folder
+
+Claude Code connects to Unio through the plugin's header helper, which it starts in the plugin's own folder and tells nothing about the project. So when any folder is tied to a workspace, the helper asks the coding agent itself: on Linux and macOS it reads the working folder of the Claude Code (or Codex) process that started it. Windows lets no program read another's folder, so there the session hook writes Claude Code's folder to `~/.local/state/unio/sessions/<process id>` as the session starts, and the helper reads it.
+
+If the helper cannot learn the folder, it connects without a token rather than with the computer's default one, which could belong to another workspace, and `/unio:doctor` says why. Without any folder in `projects`, every folder uses the default and nothing is looked up. Codex on Windows has no session hook, so there it uses the default workspace only.
 
 <a id="codex"></a>
 
@@ -163,6 +170,8 @@ Codex uses the same skill, the same header helper and the same token files, from
    ln -s ~/.local/share/unio/agent/plugins/unio/skills/unio ~/.agents/skills/unio
    ```
 
+   On Windows, Git Bash's `ln -s` copies the folder instead, and the copy never updates; make a junction instead: `cmd //c mklink /J "%USERPROFILE%\.agents\skills\unio" "%USERPROFILE%\.local\share\unio\agent\plugins\unio\skills\unio"`.
+
 2. Add the server to `~/.codex/config.toml`. Remove any `[mcp_servers.unio]` block already there first. Codex splits the helper line into words but does not run it through a shell, so it would not expand `~` or `$HOME`; this command writes your real home folder into it:
 
    ```sh
@@ -173,6 +182,8 @@ Codex uses the same skill, the same header helper and the same token files, from
    http_headers_helper = "sh '$HOME/.local/share/unio/agent/plugins/unio/scripts/mcp-headers.sh' codex"
    EOF
    ```
+
+   On Windows, Codex finds no `sh` on its PATH: name Git's own, and write both paths in the `C:/` form, for example `http_headers_helper = "'C:/Program Files/Git/usr/bin/sh.exe' 'C:/Users/you/.local/share/unio/agent/plugins/unio/scripts/mcp-headers.sh' codex"`. The installer prints that line with your own paths.
 
    Codex runs the helper on every connection to Unio. It reads the token file itself and sends `X-Unio-Client: codex/<version>`, so the token never sits in an environment variable that every program you start inherits.
 
