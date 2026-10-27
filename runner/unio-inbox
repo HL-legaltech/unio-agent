@@ -413,13 +413,20 @@ RESEARCH_QUESTION_CHARS = 300
 # What a research query or address must never carry, checked on every WebSearch
 # and WebFetch the stream shows: a hit stops the session. It detects a leak,
 # since the call may already be out; it cannot prevent one. Digit runs are
-# fenced so a longer number (a 13-digit timestamp) is not read as a CPF.
-PRIVATE_TEXT = (
-    ("cpf", re.compile(r"(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)")),
-    ("cnpj", re.compile(r"(?<!\d)\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}(?!\d)")),
-    ("case_number", re.compile(r"(?<!\d)\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}(?!\d)")),
-    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
+# fenced so a longer number (a 13-digit timestamp) is not read as a CPF. A run
+# written the way the document is (123.456.789-09) always counts; a bare or
+# spaced run counts only when its check digits hold, since news and Diário
+# Oficial addresses carry 11- and 14-digit ids (~1% of them pass a CPF check).
+DOC_SEP = r"[\s./-]?"
+PRIVATE_DOCUMENTS = (
+    ("cpf", re.compile(r"(?<!\d)\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{2}}(?!\d)")),
+    ("cnpj", re.compile(r"(?<!\d)\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{2}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{4}}{DOC_SEP}\d{{2}}(?!\d)")),
+    ("case_number", re.compile(r"(?<!\d)\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{7}}{DOC_SEP}\d{{2}}{DOC_SEP}\d{{4}}{DOC_SEP}\d{DOC_SEP}\d{{2}}{DOC_SEP}\d{{4}}(?!\d)")),
 )
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 # WebFetch runs on the operator's machine, beside its dev servers. Measured on
 # 2.1.311 under -p --restricted (probe G1, 2026-10-27): WebFetch(domain:localhost)
 # and WebFetch(domain:127.0.0.1) deny rules refuse those hosts, but 127.0.0.2 went
@@ -1785,13 +1792,44 @@ def fold(text):
     return "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
 
 
+def check_digits_hold(kind, digits):
+    """Whether a CPF's or CNPJ's two check digits (mod 11), or a CNJ case
+    number's (ISO 7064 mod 97-10, Resolução CNJ 65/2008), hold."""
+    d = [int(c) for c in digits]
+    if kind == "case_number":
+        return int(digits[:7] + digits[9:] + digits[7:9]) % 97 == 1
+    if len(set(d)) == 1:
+        return False
+    if kind == "cpf":
+        weights = [range(10, 1, -1), range(11, 1, -1)]
+    else:
+        weights = [[5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2], [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]]
+    for n, w in enumerate(weights):
+        size = len(d) - 2 + n
+        rest = sum(a * b for a, b in zip(d[:size], w)) % 11
+        if d[size] != (0 if rest < 2 else 11 - rest):
+            return False
+    return True
+
+
 def private_text(text, task_key=None):
     """What private kind of text a query or an address carries, or None."""
-    text = urllib.parse.unquote(str(text or ""))
-    for kind, pattern in PRIVATE_TEXT:
-        if pattern.search(text):
+    text = str(text or "")
+    # An address can carry text encoded twice (a%2540b.com).
+    for _ in range(3):
+        decoded = urllib.parse.unquote_plus(text)
+        if decoded == text:
+            break
+        text = decoded
+    for kind, written, loose in PRIVATE_DOCUMENTS:
+        if written.search(text) or any(check_digits_hold(kind, re.sub(r"\D", "", m.group()))
+                                       for m in loose.finditer(text)):
             return kind
-    if task_key and re.search(rf"(?<![A-Za-z0-9]){re.escape(task_key)}(?!\d)", text, re.I):
+    if EMAIL.search(text):
+        return "email"
+    prefix, _, number = str(task_key or "").partition("-")
+    if prefix and number and re.search(rf"(?<![A-Za-z0-9]){re.escape(prefix)}[\s_-]?{re.escape(number)}(?!\d)",
+                                       text, re.I):
         return "task_key"
     return None
 

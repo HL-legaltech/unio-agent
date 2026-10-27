@@ -500,12 +500,17 @@ class WebGuard(unittest.TestCase):
         for text, kind in (("cpf 123.456.789-09", "cpf"), ("12345678909 situacao", "cpf"),
                            ("cnpj 12.345.678/0001-95", "cnpj"), ("12345678000195", "cnpj"),
                            ("processo 0001234-56.2026.8.26.0100", "case_number"),
-                           ("00012345620268260100", "case_number"), ("contato ana@example.com", "email"),
+                           ("00012340320268260100", "case_number"), ("contato ana@example.com", "email"),
                            ("ABC-12 prazo", "task_key"), ("https://x.example/?q=abc-12", "task_key"),
-                           ("https://x.example/a%40b.example.com", "email")):
+                           ("https://x.example/a%40b.example.com", "email"), ("CPF 123 456 789 09", "cpf"),
+                           ("12 345 678 0001 95", "cnpj"), ("https://x.example/a%2540b.example.com", "email"),
+                           ("ABC 12 prazo", "task_key"), ("abc12", "task_key"), ("ABC_12", "task_key")):
             self.assertEqual(inbox.private_text(text, "ABC-12"), kind, text)
+        # Bare digit runs whose check digits fail: public ids, not documents.
         for text in ("aliquota iss software 2026", "lei 13709 2018 art 7", "https://x.example/n/1793188800123",
-                     "ABC-123 is another task", "LC 116/2003", None):
+                     "ABC-123 is another task", "LC 116/2003", None, "00012345620268260100",
+                     "https://g1.globo.com/noticia/2026/10/11987654321.ghtml",
+                     "https://www.in.gov.br/web/dou/-/portaria-12345678901", "11111111111"):
             self.assertIsNone(inbox.private_text(text, "ABC-12"), text)
 
     def test_hosts(self):
