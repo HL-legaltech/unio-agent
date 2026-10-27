@@ -348,6 +348,8 @@ def detach(args, background=False):
     kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
               close_fds=True, cwd=os.path.abspath(os.sep))
     exe = sys.executable
+    # The hook runs in UTF-8 mode (session-status.sh); what it starts does too.
+    args = ["-X", "utf8", *args]
     if not WINDOWS:
         return subprocess.Popen([exe, *args], start_new_session=True, **kw)
     windowless = Path(exe).with_name("pythonw.exe")

@@ -27,6 +27,8 @@ UNIO_SESSION_TOKEN_FILE=$file
 UNIO_SESSION_API=$(unio_api)
 export UNIO_SESSION_TOKEN_FILE UNIO_SESSION_API
 
+# UTF-8 mode: Claude Code's event and every state file are UTF-8, and a
+# Windows Python would read them in the console's code page.
 # shellcheck disable=SC2086 # the launcher and its flag are two words
-$python -I "$(dirname -- "$0")/sessions.py" hook 2>/dev/null
+$python -X utf8 -I "$(dirname -- "$0")/sessions.py" hook 2>/dev/null
 exit 0
