@@ -3191,11 +3191,14 @@ def merge_web(first, second):
 
 
 def progress_domain(url):
-    """The host progress may name for a page: one the server's rule takes, never an IP."""
+    """The host progress may name for a page: one the server's rule takes, never
+    an IP, and without a leading "www." that only lengthens the row."""
     try:
         host = (urllib.parse.urlsplit(str(url or "")).hostname or "").rstrip(".")
     except ValueError:
         return None
+    if host.startswith("www.") and "." in host[4:]:
+        host = host[4:]
     if not host or len(host) > 253 or not DOMAIN.match(host) or all(p.isdigit() for p in host.split(".")):
         return None
     return host

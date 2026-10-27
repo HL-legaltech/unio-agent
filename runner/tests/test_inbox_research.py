@@ -955,7 +955,10 @@ class ResearchProgress(unittest.TestCase):
         self.assertNotIn("domain", api.bodies[-1])
 
     def test_domain_rule(self):
-        self.assertEqual(inbox.progress_domain("https://WWW.Gov.Example./lei"), "www.gov.example")
+        self.assertEqual(inbox.progress_domain("https://WWW.Gov.Example./lei"), "gov.example")
+        self.assertEqual(inbox.progress_domain("https://www.planalto.gov.br/x"), "planalto.gov.br")
+        self.assertEqual(inbox.progress_domain("https://www2.example.org/"), "www2.example.org")
+        self.assertEqual(inbox.progress_domain("https://www.example/"), "www.example")
         for url in ("http://8.8.8.8/", "https://[2001:db8::1]/", "not a url", None, "https://xn--d1a.example/"):
             self.assertIn(inbox.progress_domain(url), (None, "xn--d1a.example"), url)
         self.assertIsNone(inbox.progress_domain("http://8.8.8.8/"))
