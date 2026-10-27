@@ -819,5 +819,9 @@ class Protocol(unittest.TestCase):
                       "state's official legislation site otherwise) before citing it.", self.text)
         self.assertIn('Every link in the answer appears under "Sources".', self.text)
 
+    def test_a_title_in_another_language_is_quoted(self):
+        self.assertIn("A source's title, or words you quote from it, in another language go in double quotes",
+                      self.text)
+
     def test_the_final_message_is_the_json_line_alone(self):
         self.assertIn("Your final message is the JSON line alone", self.text)

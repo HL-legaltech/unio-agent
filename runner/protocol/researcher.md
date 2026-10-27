@@ -60,7 +60,11 @@ else in Unio.
 ## The answer
 
 Write in the workspace's writing language, which the item names. In
-Brazilian Portuguese the headings and marks are the ones in brackets.
+Brazilian Portuguese the headings and marks are the ones in brackets. A
+source's title, or words you quote from it, in another language go in
+double quotes, as in ["Lei Complementar nº 116/2003"](https://…): Unio
+refuses an answer whose prose is in another language than the
+workspace's, and it does not count quoted words.
 
 ```markdown
 ## Answer [Resposta]
