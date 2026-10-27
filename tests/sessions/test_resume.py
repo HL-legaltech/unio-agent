@@ -63,6 +63,13 @@ class Resume(unittest.TestCase):
         else:
             self.assertEqual(self.ran(), f"{cwd} --resume {sid}")
 
+    @unittest.skipIf(WINDOWS, "Windows names the folder in words, not as a cd")
+    def test_the_printed_command_quotes_a_folder_with_spaces(self):
+        sid = self.session(self.tmp / "work" / "Proj Alpha")
+        p = self.run_resume(sid, "--print")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"cd ~/'work/Proj Alpha' && claude --resume {sid}", p.stdout)
+
     def test_its_first_8_characters_do_while_no_other_session_starts_with_them(self):
         sid = self.session(self.tmp / "a")
         p = self.run_resume(sid[:8], "--print")

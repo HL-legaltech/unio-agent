@@ -21,6 +21,7 @@ runtime text does.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -129,10 +130,20 @@ def sessions_for(ref):
     return found
 
 
+def shell_folder(path):
+    """The folder as a shell word: quoted, with a leading ~/ left outside the quotes so it still expands."""
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~/" + shlex.quote(path[len(home) + 1:])
+    return shlex.quote(path)
+
+
 def command(session):
     if system.WINDOWS:
         return f"claude --resume {session['id']}, na pasta {session['cwd']}"
-    return f"cd {tilde(session['cwd'])} && claude --resume {session['id']}"
+    return f"cd {shell_folder(session['cwd'])} && claude --resume {session['id']}"
 
 
 def usage(message):
