@@ -2,12 +2,12 @@
 name: unio
 description: Track engineering work in Unio, the team's task tracker, through the `unio` MCP tools, acting as the workspace's agent. Use in the top-level session at the start of substantive work (the user pastes a Unio task link or a key such as ABC-12, or asks to build, fix, investigate, migrate or ship something that will become a commit or pull request), whenever the work changes phase (plan settled, pull request opened, review round, merged, deployed, blocked), when a new topic deserves its own task, when work is larger than one task and should be planned as a project with milestones, and whenever the user mentions Unio, a task (tarefa), a ticket, a card, a project (projeto) or a milestone (marco).
 metadata:
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Track the work in Unio
 
-This is version 1.3 of the Unio skill.
+This is version 1.4 of the Unio skill.
 
 Every substantive session belongs to one Unio task, and that task reads at
 any moment like a precise record: what the work is, where it stands, what
@@ -41,8 +41,8 @@ is what Codex and other clients do instead.
   - `current`, `unknown`, or no `skill` block: say nothing.
 
   <how> is, **Claude Code:** `/unio:update`, then `/reload-plugins`;
-  **Elsewhere:** `git -C ~/.local/share/unio/agent pull --ff-only`, then a
-  new session. Asked whether the skill is up to date, answer from
+  **Elsewhere:** `unio update`, then a new session (where the terminal has
+  no `unio` command: `git -C ~/.local/share/unio/agent pull --ff-only`). Asked whether the skill is up to date, answer from
   `skill.status`; without one, say Unio cannot tell and give the version
   this file states.
 
@@ -387,7 +387,7 @@ ask first.
 - Never touch another session's line or post yours as a comment; a resumed
   session keeps its line. No folder: the server refuses local paths.
 - End every tracked session's chat report with the same resume command,
-  led by `Resume: unio-resume <KEY>` when `command -v unio-resume` finds it.
+  led by `Resume: unio resume <KEY>` when `unio help resume` succeeds.
   Asked which conversation worked on a task, read its Sessions section.
 
 ## 12. When Unio is unavailable
