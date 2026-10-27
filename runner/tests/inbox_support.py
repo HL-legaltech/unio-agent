@@ -108,6 +108,8 @@ class FakeUnio:
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
         # What GET /agents/inbox lists; a completed item leaves it.
         self.items = []
+        # An HTTP status every runner create_comment over MCP gets, or None.
+        self.mcp_comment_status = None
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -180,6 +182,9 @@ class FakeUnio:
             return 200, {"data": {"id": path.rsplit("/", 1)[1]}}
         if method == "POST" and path == "/v1/mcp":
             name = ((body.get("params") or {}).get("name"))
+            if name == "create_comment" and self.mcp_comment_status:
+                code = "agent_research_comment_cap" if self.mcp_comment_status == 409 else "unavailable"
+                return self.mcp_comment_status, {"error": "Recusado.", "code": code}
             # create_comment's answer (write_tools.ts): the new comment's id, its time and its task.
             answer = {"id": "c-session-reply", "createdAt": "2026-10-27T12:00:00.000Z",
                       "task": {"key": "ABC-1"}} if name == "create_comment" else {}

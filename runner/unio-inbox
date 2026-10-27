@@ -1292,6 +1292,19 @@ def rpc_answer(raw, content_type, rid):
                  and ("result" in m or "error" in m)), None)
 
 
+class ToolError(str):
+    """Why a tool call failed, in words. `transport` when no verdict came back
+    (unreachable, a 5xx, no JSON-RPC answer): only then may another route try
+    the same write, since a refusal would be posted past the rule that made it."""
+    transport = False
+
+
+def tool_error(text, transport=False):
+    error = ToolError(text)
+    error.transport = transport
+    return error
+
+
 class Mcp:
     """Unio's MCP endpoint as a plain JSON-RPC client, for the runner's own
     writes: one tools/call per request, no handshake and no session."""
@@ -1304,7 +1317,7 @@ class Mcp:
         self.next_id = 0
 
     def call_tool(self, name, arguments, timeout=30):
-        """(answer, None) with the tool's JSON answer, or (None, error). A tool's
+        """(answer, None) with the tool's JSON answer, or (None, ToolError). A tool's
         refusal (isError) is an error carrying the server's words."""
         if stopping.is_set():
             timeout = min(timeout, 5)
@@ -1317,33 +1330,33 @@ class Mcp:
         req.add_header("Accept", "application/json, text/event-stream")
         req.add_header("MCP-Protocol-Version", MCP_PROTOCOL)
         req.add_header("User-Agent", f"unio-inbox/{VERSION}")
-        for name, value in self.headers.items():
-            req.add_header(name, value)
+        for header, value in self.headers.items():
+            req.add_header(header, value)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status, ctype, raw = resp.status, resp.headers.get("Content-Type"), resp.read()
         except urllib.error.HTTPError as e:
-            return None, f"{name}: {describe(e.code, Api._json(e.read()))}"
+            return None, tool_error(f"{name}: {describe(e.code, Api._json(e.read()))}", e.code >= 500)
         except (urllib.error.URLError, OSError) as e:
-            return None, f"{name}: {self.url} unreachable: {getattr(e, 'reason', e)}"
+            return None, tool_error(f"{name}: {self.url} unreachable: {getattr(e, 'reason', e)}", True)
         message = rpc_answer(raw, ctype, self.next_id)
         if message is None:
-            return None, f"{name}: HTTP {status} without a JSON-RPC answer"
+            return None, tool_error(f"{name}: HTTP {status} without a JSON-RPC answer", True)
         if "error" in message:
             error = message["error"]
-            return None, f"{name}: {short(error.get('message') if isinstance(error, dict) else error, 300)}"
+            return None, tool_error(f"{name}: {short(error.get('message') if isinstance(error, dict) else error, 300)}")
         result = message.get("result")
         if not isinstance(result, dict):
-            return None, f"{name}: the answer has no result"
+            return None, tool_error(f"{name}: the answer has no result", True)
         text = result_text(result.get("content"))
         if result.get("isError"):
-            return None, f"{name} refused: {short(text, 400)}"
+            return None, tool_error(f"{name} refused: {short(text, 400)}")
         try:
             answer = json.loads(text) if text else result.get("structuredContent")
         except ValueError:
             answer = None
         if not isinstance(answer, dict):
-            return None, f"{name}: the answer is not a JSON object"
+            return None, tool_error(f"{name}: the answer is not a JSON object", True)
         return answer, None
 
 
@@ -3919,8 +3932,9 @@ class Runner:
 
     def post_research_reply(self, api, item, claim, content):
         """The runner's reply under the item's claim, through MCP so the server's
-        content guard applies; REST when MCP refuses it twice. create_comment
-        answers a retry within 10 minutes with the comment it already posted."""
+        content guard and the claim's one-comment cap apply; REST only when MCP
+        could not be reached twice. create_comment answers a retry within 10
+        minutes with the comment it already posted."""
         comment = item.get("comment") or {}
         mcp = Mcp(self.cfg.mcp_url, api.token, scope_headers(item, claim))
         arguments = {"task": (item.get("task") or {}).get("key") or (item.get("task") or {}).get("id"),
@@ -3930,6 +3944,11 @@ class Runner:
             answer, error = mcp.call_tool("create_comment", arguments)
             if answer is not None:
                 return None
+            if not error.transport:
+                # A 409 agent_research_comment_cap means the run's own answer is out
+                # though the stream never showed it: REST, under no scope, would post a second.
+                self.state.log("research_reply_refused", key=item.get("key"), error=error)
+                return error
         fallback = self.reply(api, item, content, f"unio-inbox:note:{item.get('key')}:{claim['claimId']}")
         return f"{error}; {fallback}" if fallback else None
 

@@ -464,6 +464,23 @@ class Run(HomeCase):
         self.assertEqual(done["outcome"], "replied")
         self.assertEqual(self.fake.seen("POST", "/v1/tasks/11111111-1111-4111-8111-111111111111/comments"), [])
 
+    def test_a_refused_reply_is_never_posted_another_way(self):
+        # The claim's comment cap: the run's own answer is out though the stream never showed it.
+        self.fake.mcp_comment_status = 409
+        self.assertEqual(self.once("research_silent"), 0)
+        self.assertEqual(len(self.fake.seen("POST", "/v1/mcp")), 1)
+        self.assertEqual(self.fake.seen("POST", "/v1/tasks/11111111-1111-4111-8111-111111111111/comments"), [])
+        refused = [e for e in map(json.loads, (self.state / "log.jsonl").read_text(encoding="utf-8").splitlines())
+                   if e["event"] == "research_reply_refused"]
+        self.assertEqual(len(refused), 1)
+        self.assertIn("create_comment: HTTP 409", refused[0]["error"])
+
+    def test_an_unreachable_mcp_falls_back_to_rest(self):
+        self.fake.mcp_comment_status = 503
+        self.assertEqual(self.once("research_silent"), 0)
+        self.assertEqual(len(self.fake.seen("POST", "/v1/mcp")), 2)
+        self.assertEqual(len(self.fake.seen("POST", "/v1/tasks/11111111-1111-4111-8111-111111111111/comments")), 1)
+
     def test_a_clean_end_needs_no_edit(self):
         self.assertEqual(self.once("research"), 0)
         self.assertEqual(self.fake.seen("PUT", "/v1/comments/c-session-reply"), [])
