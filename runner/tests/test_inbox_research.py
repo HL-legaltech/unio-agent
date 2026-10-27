@@ -8,7 +8,7 @@ import socket
 import time
 import unittest
 from datetime import timedelta
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
 from inbox_support import REAL_RESOLVE_HOST, FakeUnio, HomeCase, inbox, write_fake_claude
@@ -1079,7 +1079,7 @@ class FilesProfile(HomeCase):
         self.assertEqual(allowed[-1], inbox.files_rule(Path("/state/runs/k/work/files-abcdefgh")))
 
     def test_the_rule_on_each_system(self):
-        self.assertEqual(inbox.files_rule(Path("/home/u/state/work/files-abcdefgh"), windows=False),
+        self.assertEqual(inbox.files_rule(PurePosixPath("/home/u/state/work/files-abcdefgh"), windows=False),
                          "Edit(//home/u/state/work/files-abcdefgh/**)")
         self.assertEqual(inbox.files_rule(PureWindowsPath(r"C:\Users\U\AppData\Local\unio\work\files-abcdefgh"),
                                           windows=True),
