@@ -2756,6 +2756,10 @@ class Runner:
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("parent_tool_use_id") is not None:
+                # A subagent's turn (measured on 2.1.311: it inherits the parent's
+                # MCP tools). Its writes and steps are never the run's own.
+                continue
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 Runner._check_init(proc, s, event)
