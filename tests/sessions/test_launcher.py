@@ -174,7 +174,7 @@ class Doctor(unittest.TestCase):
 class Hooks(unittest.TestCase):
     """hooks.json registers the launcher for every event it needs, in shell form."""
 
-    def test_every_event_runs_the_launcher_and_only_the_end_and_start_hold_the_session(self):
+    def test_every_event_runs_the_launcher_and_only_the_end_holds_the_session(self):
         hooks = json.loads((SCRIPTS.parent / "hooks" / "hooks.json").read_text())["hooks"]
         command = 'sh "${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh"'
         found = {}
@@ -184,7 +184,9 @@ class Hooks(unittest.TestCase):
                     if h["command"] == command:
                         found[event] = (group.get("matcher"), bool(h.get("async")), h["timeout"])
         self.assertEqual(found, {
-            "SessionStart": (None, False, 5),
+            # Async: a start that waits on Python competes with Claude Code's
+            # MCP header helper, and on Windows the helper lost (no token).
+            "SessionStart": (None, True, 10),
             "UserPromptSubmit": (None, True, 10),
             "PostToolUse": ("mcp__plugin_unio_unio__.*|mcp__unio__.*", True, 10),
             "Stop": (None, True, 10),
