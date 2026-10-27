@@ -119,8 +119,10 @@ env.pop("CLAUDE_PID")
 without = subprocess.run([sys.executable, "-c", {probe!r}], env=env, capture_output=True, text=True).stdout
 print(json.dumps([with_pid.strip(), without.strip()]), flush=True)
 """])
+        # Read while it runs: macOS's ps knows no process once it has exited.
+        expected = str((parent.pid, system.start_time(parent.pid)))
         with_pid, without = json.loads(parent.stdout.readline())
-        self.assertEqual(with_pid, str((parent.pid, system.start_time(parent.pid))))
+        self.assertEqual(with_pid, expected)
         self.assertEqual(without, "None", "a process that is neither Claude Code nor a shell was taken for it")
 
     @unittest.skipIf(WINDOWS, "a POSIX shell between them")
@@ -135,7 +137,8 @@ inner = "sh -c " + shlex.quote(shlex.quote(sys.executable) + " -c " + shlex.quot
 print(subprocess.run(["sh", "-c", inner + "; true"], env=env, capture_output=True, text=True).stdout.strip(),
       flush=True)
 """])
-        self.assertEqual(parent.stdout.readline().strip(), str((parent.pid, system.start_time(parent.pid))))
+        expected = str((parent.pid, system.start_time(parent.pid)))
+        self.assertEqual(parent.stdout.readline().strip(), expected)
 
     @unittest.skipIf(WINDOWS, "Windows reads no other process's environment")
     def test_a_claude_code_started_as_a_child_session_says_so_in_its_own_environment(self):

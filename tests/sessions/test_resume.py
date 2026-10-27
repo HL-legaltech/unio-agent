@@ -61,7 +61,9 @@ class Resume(unittest.TestCase):
             # cmd may name the folder by its short 8.3 form.
             self.assertTrue(self.ran().endswith(f"unio --resume {sid}"), self.ran())
         else:
-            self.assertEqual(self.ran(), f"{cwd} --resume {sid}")
+            # macOS's temporary folder is under /var, a link to /private/var.
+            ran_in, _, rest = self.ran().partition(" --resume ")
+            self.assertEqual((os.path.realpath(ran_in), rest), (os.path.realpath(cwd), sid))
 
     @unittest.skipIf(WINDOWS, "Windows names the folder in words, not as a cd")
     def test_the_printed_command_quotes_a_folder_with_spaces(self):
