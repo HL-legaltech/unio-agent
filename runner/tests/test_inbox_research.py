@@ -1134,10 +1134,13 @@ class FileChecks(HomeCase):
         self.assertIsNone(inbox.file_note("**", "**"))
         for text in ("pesquise e anexe na tarefa", "coloque no card a planilha", "Anexe a planilha na própria tarefa",
                      "please attach it to the task", "@[Agent](u) research and put the CSV on the task",
-                     "suba o arquivo na tarefa", "salve na tarefa", "carregue a planilha no card"):
+                     "suba o arquivo na tarefa", "salve na tarefa", "carregue a planilha no card",
+                     "não responda aqui: anexe na tarefa"):
             self.assertTrue(inbox.wants_task_file(text), text)
         for text in ("pesquise as alíquotas", "anexe a planilha", "attach the csv",
                      "levante os subsídios jurídicos para a tarefa",
                      "pesquise a substituição tributária aplicável na tarefa",
-                     "veja o prazo subsequente na tarefa", "address it to the task"):
+                     "veja o prazo subsequente na tarefa", "address it to the task",
+                     "@[Bot](x) não anexe na tarefa, só responda", "pesquise e não coloque no card",
+                     "não precisa anexar na tarefa", "please don't put it on the task", "do not attach it to the task"):
             self.assertFalse(inbox.wants_task_file(text), text)
