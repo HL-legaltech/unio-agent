@@ -2323,7 +2323,8 @@ def research_lines(research, language="en"):
     return lines
 
 
-def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", language="en", research=None):
+def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", language="en", research=None,
+                 thread=None):
     on_project = item_subject(item) == "project"
     project = item.get("project") if on_project else None
     task = {} if on_project else item.get("task") or {}
@@ -2359,6 +2360,10 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         lines.append(f"Your teams in this workspace: {', '.join(teams)}. This run's tools reach "
                      f"{team.get('identifier')} only.")
     lines += research_lines(research, language) if research else [web_line(web, language)]
+    if thread and not research and web == "handover":
+        lines.append(f"This thread already has your research answer (comment {thread}). A reply that asks for more "
+                     "of it (another place, period or source, or \"continue\") goes to research the same way; a "
+                     "thanks or an acknowledgement does not.")
     lines.append(language_line(language))
     if comment:
         lines += [
@@ -3756,15 +3761,17 @@ class Runner:
                 teams = self.agent_teams(api)
                 ask = self.research_ask(item, h)
                 if ask is None:
+                    thread = self.research_thread(item, h) if self.research_ready(item) else None
                     s = self.run_session(item, build_prompt(item, snapshots, attempt, rerun, teams,
-                                                            self.reply_web(item), self.language),
+                                                            self.reply_web(item), self.language, thread=thread),
                                          snapshots, out, claim, on_wait)
                     v = self.classify(s)
                     if v.kind == "research" and self.research_ready(item):
                         # Charged now: the research run below is charged on its own.
                         triage = {"costUsd": self.charge(h, s, started_at), "turns": (s.result or {}).get("num_turns"),
                                   "run": out.name}
-                        ask = {"why": "escalated", "question": v.question}
+                        ask = {"why": "thread" if thread else "escalated", "question": v.question,
+                               **({"answer": thread} if thread else {})}
                     elif v.kind == "research":
                         v = Verdict("fail", cause="research_unavailable",
                                     error="the session asked for research, which this item cannot get")
@@ -3903,21 +3910,26 @@ class Runner:
 
     def research_ask(self, item, h, now=None):
         """Why this item goes straight to a research run, or None for a reply run:
-        an escalation a gate released, a thread the bot answered with research, or
-        a comment that opens by asking for it."""
+        an escalation a gate released, or a comment that opens by asking for it.
+        Any other reply in a thread the bot answered with research goes to a reply
+        run told so (research_thread): a thanks must not spend a research run."""
         if not self.research_ready(item):
             return None
         now = now or utcnow()
+        answer = self.research_thread(item, h)
+        thread = {"answer": answer} if answer else {}
         pending = (h.get("researchPending") or {}).get(item.get("key"))
         if isinstance(pending, dict) and (parse_iso(pending.get("at")) or now) > now - timedelta(days=1):
-            return {"why": "escalated", "question": pending.get("question")}
-        comment = item["comment"]
-        thread = (h.get("researchThreads") or {}).get(comment.get("rootId") or comment.get("id"))
-        if isinstance(thread, dict) and isinstance(thread.get("comment"), str):
-            return {"why": "thread", "answer": thread["comment"]}
-        if asks_research(comment.get("content")):
-            return {"why": "intent"}
+            return {"why": "escalated", "question": pending.get("question"), **thread}
+        if asks_research(item["comment"].get("content")):
+            return {"why": "thread" if answer else "intent", **thread}
         return None
+
+    def research_thread(self, item, h):
+        """The bot's research answer in this item's thread, or None."""
+        comment = item.get("comment") or {}
+        thread = (h.get("researchThreads") or {}).get(comment.get("rootId") or comment.get("id"))
+        return thread["comment"] if isinstance(thread, dict) and isinstance(thread.get("comment"), str) else None
 
     def remember_thread(self, h, item, answer_id, now=None):
         now = now or utcnow()

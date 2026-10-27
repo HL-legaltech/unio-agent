@@ -239,7 +239,11 @@ class Profile(HomeCase):
         self.assertEqual(r.research_ask(mention(), {}), {"why": "intent"})
         self.assertIsNone(r.research_ask(mention("@[Agent](user_agent) pode explicar?"), {}))
         threads = {"researchThreads": {"c-root": {"comment": "c-answer", "at": "2026-10-27T12:00:00Z"}}}
-        self.assertEqual(r.research_ask(mention("e para Curitiba?", root="c-root"), threads),
+        # A reply in a research thread goes to a reply run, told of the answer, unless it asks outright.
+        self.assertIsNone(r.research_ask(mention("e para Curitiba?", root="c-root"), threads))
+        self.assertIsNone(r.research_ask(mention("@[Agent](user_agent) obrigada!", root="c-root"), threads))
+        self.assertEqual(r.research_thread(mention("obrigada!", root="c-root"), threads), "c-answer")
+        self.assertEqual(r.research_ask(mention("pesquise também Curitiba", root="c-root"), threads),
                          {"why": "thread", "answer": "c-answer"})
         project = dict(mention(), subject="project", task=None,
                        project={"id": "p1", "slug": "p", "team": {"identifier": "ABC"}})
@@ -344,6 +348,11 @@ class Prompt(unittest.TestCase):
         self.assertLess(text.index("BEGIN UNTRUSTED"), text.index("Research question, as an earlier run restated "
                                                                    "it: ISS rates"))
 
+    def test_a_reply_in_a_research_thread(self):
+        text = inbox.build_prompt(mention("obrigada!"), [], 1, web="handover", thread="c-9")
+        self.assertIn("This thread already has your research answer (comment c-9). A reply that asks for more", text)
+        self.assertNotIn("comment c-9", inbox.build_prompt(mention("obrigada!"), [], 1, web="off", thread="c-9"))
+
     def test_weekly_gate_line(self):
         text = inbox.build_prompt(mention(), [], 1, language="pt-BR", research=self.facts(web=(), no_web=True))
         self.assertIn("Web research: off this run, the weekly usage limit is nearly spent. Open your answer with "
@@ -431,6 +440,30 @@ class Run(HomeCase):
         item, = self.items()
         self.assertEqual((item["research"]["why"], item["triage"]["turns"]), ("escalated", 3))
         self.assertEqual([s.get("kind") for s in self.health()["sessions"]], [None, "research"])
+
+    def thread(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        at = inbox.iso(inbox.utcnow())
+        (self.state / "health.json").write_text(json.dumps(
+            {"researchThreads": {"c-root": {"comment": "c-answer", "at": at}}}), encoding="utf-8")
+
+    def test_a_thanks_in_a_research_thread_gets_a_reply_run(self):
+        self.thread()
+        self.assertEqual(self.once("", mention("@[Agent](user_agent) obrigada!", root="c-root")), 0)
+        reply, = self.sessions()
+        self.assertIn("This thread already has your research answer (comment c-answer).", reply["prompt"])
+        item, = self.items()
+        self.assertIsNone(item.get("research"))
+        self.assertEqual([s.get("kind") for s in self.health()["sessions"]], [None])
+
+    def test_a_follow_up_in_a_research_thread_escalates_to_it(self):
+        self.thread()
+        self.assertEqual(self.once("escalate", mention("@[Agent](user_agent) e para Curitiba?", root="c-root")), 0)
+        _, research = self.sessions()
+        self.assertIn("This thread already has your research answer (comment c-answer); start from its sources.",
+                      research["prompt"])
+        item, = self.items()
+        self.assertEqual(item["research"]["why"], "thread")
 
     def test_a_gate_releases_without_a_session(self):
         state = self.state
