@@ -351,6 +351,12 @@ STEPS = {
     "WebSearch": "researching",
     "WebFetch": "researching",
 }
+# A research run tells reading a page from searching; reading_source falls back
+# to researching on a server that predates it (Progress.degrade).
+RESEARCH_STEPS = {**STEPS, "WebFetch": "reading_source"}
+# The server's hostname rule for a progress domain (validators/agents.ts):
+# lower-case labels, and never an IP literal.
+DOMAIN = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*$")
 # A project review is offered these two tools and nothing else: the server
 # registers only them under X-Unio-Review-Project, so any other tool at init
 # means the header did not take.
@@ -1495,23 +1501,51 @@ class Progress:
     arrived inside the spacing is never lost. tick() sends what is due; the
     session's wait loop calls it twice a second."""
 
-    def __init__(self, api, receipt, on_step):
+    def __init__(self, api, receipt, on_step, support=None):
         self.api = api
         self.receipt = receipt
         self.on_step = on_step
+        # What the server took, for the life of the process (Runner.progress_support):
+        # a server before research refuses the fields (422) and the reading_source step.
+        # reading_source is None until the server first takes it.
+        self.support = support if support is not None else {"fields": True, "reading_source": None}
+        self.mode = None
         self.seen = None
+        self.values = None
         self.want = None
         self.sent = None
         self.at = None
         self.count = 0
         self.error = None
 
-    def report(self, step):
+    def report(self, step, searches=None, sources=None, domain=None):
         if step != self.seen:
             self.seen = step
             self.on_step(step)
-        self.want = {**self.receipt, "step": step}
+        self.values = {"step": step, "searches": searches, "sources": sources, "domain": domain}
+        self.want = self.body()
         self.tick()
+
+    def begin_research(self, step="reading_task"):
+        """Marks the claim a research claim now, before the research session
+        connects: the server narrows that connection's tools by it."""
+        self.mode = "research"
+        self.values = {**(self.values or {}), "step": step}
+        self.want = self.body()
+        self.post(self.want, time.monotonic())
+
+    def body(self):
+        v = self.values
+        step = v["step"]
+        if step == "reading_source" and self.support["reading_source"] is False:
+            step = "researching"
+        body = {**self.receipt, "step": step}
+        if self.mode and self.support["fields"]:
+            body["mode"] = self.mode
+            body.update({k: min(int(v[k]), 999) for k in ("searches", "sources") if isinstance(v.get(k), int)})
+            if step == "reading_source" and v.get("domain"):
+                body["domain"] = v["domain"]
+        return body
 
     def tick(self, now=None):
         if self.want is None:
@@ -1525,6 +1559,11 @@ class Progress:
         self.at = now
         try:
             st, d = self.api.call("POST", "/agents/inbox/progress", body, timeout=STATUS_TIMEOUT)
+            for _ in range(2):
+                if st != 422 or not self.degrade(body, d):
+                    break
+                body = self.want = self.body()
+                st, d = self.api.call("POST", "/agents/inbox/progress", body, timeout=STATUS_TIMEOUT)
             error = None if st == 200 else describe(st, d)
         except ApiUnreachable as e:
             error = str(e)
@@ -1534,6 +1573,23 @@ class Progress:
             self.error = self.error or error
         else:
             self.count += 1
+            if body.get("step") == "reading_source":
+                self.support["reading_source"] = True
+
+    def degrade(self, body, data):
+        """After a 422: whether dropping what this server may not know changes the
+        body, for the rest of the process. A refused reading_source falls back to
+        researching; a refused field drops mode, counters and domain alike."""
+        data = data if isinstance(data, dict) else {}
+        fields = {m.get("field") for m in data.get("messages") or [] if isinstance(m, dict)}
+        fields.add(data.get("field"))
+        if body.get("step") == "reading_source" and "step" in fields and self.support["reading_source"] is not False:
+            self.support["reading_source"] = False
+            return True
+        if self.support["fields"] and any(k in body for k in ("mode", "searches", "sources", "domain")):
+            self.support["fields"] = False
+            return True
+        return False
 
 
 class State:
@@ -3026,6 +3082,8 @@ class WebTrack:
         self.fetched = {}
         # Each landing address's asked addresses: an answer may link either.
         self.via = {}
+        # The host of the page being read, as progress may name it.
+        self.domain = None
 
     def use(self, block):
         name, args = block.get("name"), block.get("input") if isinstance(block.get("input"), dict) else {}
@@ -3035,6 +3093,7 @@ class WebTrack:
             self.fetches += 1
             if isinstance(args.get("url"), str):
                 self.asked[block.get("id")] = args["url"]
+            self.domain = progress_domain(args.get("url"))
 
     def answer(self, use_id, result):
         """A WebFetch answer: {bytes, code, codeText, result, durationMs, url} on 2.1.311,
@@ -3063,6 +3122,10 @@ class WebTrack:
         and left out of it was not a source of anything."""
         return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.cited(answer))}
 
+    def progress(self):
+        """The live row: every page read so far, since no answer is final yet."""
+        return {"searches": self.searches, "sources": len(self.sources), "domain": self.domain}
+
 
 # An address in an answer's Markdown, up to the parenthesis that closes its link.
 LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
@@ -3070,6 +3133,17 @@ LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
 
 def link_key(url):
     return url.rstrip(".,;:!?/")
+
+
+def progress_domain(url):
+    """The host progress may name for a page: one the server's rule takes, never an IP."""
+    try:
+        host = (urllib.parse.urlsplit(str(url or "")).hostname or "").rstrip(".")
+    except ValueError:
+        return None
+    if not host or len(host) > 253 or not DOMAIN.match(host) or all(p.isdigit() for p in host.split(".")):
+        return None
+    return host
 
 
 class Verdict:
@@ -3127,6 +3201,8 @@ class Runner:
         # Observe mode, and a finish waiting out its day, log a project's decision when it changes.
         self.status_seen = {}
         self._workspace = None
+        # What this server took on progress, for the life of the process (Progress.support).
+        self.progress_support = {"fields": True, "reading_source": None}
         # The teams GET /agents/me listed, for the responder's workspace section.
         self._team_rows = None
         # The agent's writing language, read with the teams; English until then.
@@ -3330,7 +3406,8 @@ class Runner:
             headers.update(scope_headers(item, claim))
             if research is not None:
                 argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
-                s = Session(required=RESEARCH_REQUIRED, builtin=set(research), refused=RESEARCH_INIT_REFUSED)
+                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS, builtin=set(research),
+                            refused=RESEARCH_INIT_REFUSED)
                 s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
@@ -3790,12 +3867,13 @@ class Runner:
         working = {"itemKey": key, **({"taskId": record.get("id")} if subject == "task" else {})}
         self.presence.set("working", **working)
         progress = Progress(api, self.receipt(item, claim),
-                            lambda step: self.presence.set("working", step=step, **working))
+                            lambda step: self.presence.set("working", step=self.presence_step(step), **working),
+                            self.progress_support)
         next_ack = [time.monotonic() + self.cfg.interval]
 
         def on_wait(s):
             if s.step:
-                progress.report(s.step)
+                progress.report(s.step, **(s.web.progress() if progress.mode else {}))
             if time.monotonic() > next_ack[0]:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
@@ -3828,7 +3906,7 @@ class Runner:
                         v = Verdict("fail", cause="research_unavailable",
                                     error="the session asked for research, which this item cannot get")
                 if ask is not None:
-                    s, v, research = self.research(item, h, claim, ask, run_dir, on_wait, teams, rerun)
+                    s, v, research = self.research(item, h, claim, ask, run_dir, on_wait, teams, rerun, progress)
         except Exception as e:  # a runner bug must still spend the attempt, or the item loops forever
             s, v = Session(), Verdict("fail", cause="runner_error",
                                       error=f"runner error: {type(e).__name__}: {short(e, 200)}")
@@ -3940,6 +4018,11 @@ class Runner:
         note_quota(h, s)
         return usd
 
+    def presence_step(self, step):
+        """A presence write has no fallback of its own: reading_source goes there
+        only once a progress post showed the server takes it."""
+        return "researching" if step == "reading_source" and not self.progress_support["reading_source"] else step
+
     def research_status(self, h):
         """The research block of health.json, which `unio runner status` prints: its limits as this process runs them."""
         cfg = self.cfg
@@ -4017,7 +4100,7 @@ class Runner:
         week = quota_used(h, "seven_day", now)
         return None, bool(week and week[0] >= QUOTA_GATE), left
 
-    def research(self, item, h, claim, ask, run_dir, on_wait, teams, rerun):
+    def research(self, item, h, claim, ask, run_dir, on_wait, teams, rerun, progress=None):
         """(session, verdict, research) for a research run under this claim, or
         for the gate that holds it back (a release, with no session)."""
         now = utcnow()
@@ -4043,6 +4126,8 @@ class Runner:
         facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
                  "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
         prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
+        if progress:
+            progress.begin_research()
         s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
         v = self.classify(s, timeout=timeout)
         if v.kind == "research":

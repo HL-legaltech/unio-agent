@@ -478,6 +478,12 @@ class Run(HomeCase):
         self.assertEqual(health["quota"]["seven_day"]["utilization"], 0.5)
         progress = [r["body"]["step"] for r in self.fake.seen("POST", "/v1/agents/inbox/progress")]
         self.assertNotIn("reading_code", progress)
+        # The claim is marked research before the session connects, so the server narrows its tools.
+        calls = [(r["path"], r["body"]) for r in self.fake.seen() if r["path"] in ("/v1/agents/inbox/progress",
+                                                                                   "/v1/mcp")]
+        self.assertEqual(calls[0], ("/v1/agents/inbox/progress", {"key": "comment:c-0001",
+                                                                  "claimId": "claim-0001-fake",
+                                                                  "step": "reading_task", "mode": "research"}))
 
     def test_escalation_runs_research_under_the_same_claim(self):
         self.assertEqual(self.once("escalate", mention("@[Agent](user_agent) qual a alíquota de ISS?")), 0)
@@ -869,3 +875,58 @@ class LatestWins(unittest.TestCase):
         p.tick(115.0)
         self.assertEqual([b["step"] for b in api.bodies], ["researching", "researching"])
         self.assertEqual(p.count, 2)
+
+
+class ResearchProgress(unittest.TestCase):
+    def progress(self, api, support=None):
+        return inbox.Progress(api, {"key": "k", "claimId": "c"}, lambda step: None, support)
+
+    def test_research_fields(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        p.begin_research()
+        self.assertEqual(api.bodies[0], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research"})
+        p.report("reading_source", 3, 2, "www.gov.example")
+        p.tick(time.monotonic() + 3)
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_source", "mode": "research",
+                                          "searches": 3, "sources": 2, "domain": "www.gov.example"})
+        self.assertTrue(p.support["reading_source"])
+        p.report("writing_reply", 3, 2, "www.gov.example")
+        p.tick(time.monotonic() + 6)
+        self.assertNotIn("domain", api.bodies[-1])
+
+    def test_a_reply_run_sends_no_fields(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        p.report("reading_task", 1, 1, "x.example")
+        self.assertEqual(api.bodies, [{"key": "k", "claimId": "c", "step": "reading_task"}])
+
+    def test_an_older_server_refuses_the_fields(self):
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "mode"})])
+        support = {"fields": True, "reading_source": None}
+        p = self.progress(api, support)
+        p.begin_research()
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_task"})
+        self.assertEqual(p.count, 1)
+        self.assertFalse(support["fields"])
+        p.report("researching", 4, 1)
+        p.tick(time.monotonic() + 3)
+        self.assertNotIn("searches", api.bodies[-1])
+
+    def test_an_older_server_refuses_reading_source(self):
+        refusal = (422, {"error": "Validation failed", "messages": [{"field": "step", "rule": "enum"}]})
+        api = FakeCalls([refusal])
+        support = {"fields": True, "reading_source": None}
+        p = self.progress(api, support)
+        p.mode = "research"
+        p.report("reading_source", 1, 0, "www.gov.example")
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_source", "researching"])
+        self.assertIs(support["reading_source"], False)
+        self.assertTrue(support["fields"], "the fields stay")
+        self.assertNotIn("domain", api.bodies[-1])
+
+    def test_domain_rule(self):
+        self.assertEqual(inbox.progress_domain("https://WWW.Gov.Example./lei"), "www.gov.example")
+        for url in ("http://8.8.8.8/", "https://[2001:db8::1]/", "not a url", None, "https://xn--d1a.example/"):
+            self.assertIn(inbox.progress_domain(url), (None, "xn--d1a.example"), url)
+        self.assertIsNone(inbox.progress_domain("http://8.8.8.8/"))
