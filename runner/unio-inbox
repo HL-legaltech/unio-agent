@@ -274,6 +274,16 @@ RESEARCH_UNFINISHED = {
               "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+RESEARCH_STOPPED_NOTE = "research stopped on request"
+# A person stopped the run from the thread (PLAN 1, state 15). The server may
+# name them in the progress answer; without a name the line names nobody.
+RESEARCH_STOPPED = {
+    "en": {"by": "Research stopped by {name}.", "anon": "Research stopped.",
+           "line": "_{stopped} What is above was checked against the cited sources._"},
+    "pt-BR": {"by": "Pesquisa interrompida por {name}.", "anon": "Pesquisa interrompida.",
+              "line": "_{stopped} O que está acima foi conferido nas fontes citadas._"},
+}
+PERSON_NAME = re.compile(r"^[^\n\r*_`\[\]()<>#|~\\]{1,80}$")
 # The runner's checks of a research run's files (PLAN 3, owner decisions O1-O2),
 # which the server's POST /agents/inbox/files repeats. 512 KiB keeps the JSON
 # body under the API's default 1 MB limit; 1,500 bytes is less than a file
@@ -1552,6 +1562,9 @@ class Progress:
         self.at = None
         self.count = 0
         self.error = None
+        # A person asked to stop the run: the answer's `stop`, and who, when the server names them.
+        self.stop = False
+        self.stopped_by = None
 
     def report(self, step, searches=None, sources=None, domain=None):
         if step != self.seen:
@@ -1612,6 +1625,11 @@ class Progress:
         self.count += 1
         if body.get("step") == "reading_source":
             self.support["reading_source"] = True
+        answer = d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), dict) else {}
+        if answer.get("stop") is True and not self.stop:
+            self.stop = True
+            who = answer.get("stoppedBy")
+            self.stopped_by = who.get("name") if isinstance(who, dict) else None
         return True
 
     def degrade(self, body, data):
@@ -2199,6 +2217,13 @@ def file_note(body, shown):
 def wants_task_file(text):
     text = fold(MENTION_TOKEN.sub(" ", str(text or "")))
     return any(not TASK_TARGET_DENIED.search(text[:m.start()]) for m in TASK_TARGET.finditer(text))
+
+
+def stopped_words(language, name=None):
+    """"Pesquisa interrompida por Ana." with a name that is plain text, else without one."""
+    words = RESEARCH_STOPPED[language]
+    name = " ".join(str(name).split()) if isinstance(name, str) else ""
+    return words["by"].format(name=name) if name and PERSON_NAME.match(name) else words["anon"]
 
 
 def unfinished_reply(language, sources, lead=None):
@@ -3267,6 +3292,8 @@ class Session:
         # A research run's checks ({"key", "hosts"}), and the first one its calls broke.
         self.guard = None
         self.violation = None
+        # Set when a person stopped the run: their name, or "" when the server gives none.
+        self.stopped_by = None
 
     @property
     def bad_init(self):
@@ -3657,7 +3684,7 @@ class Runner:
                         break
                     except subprocess.TimeoutExpired:
                         pass
-                    if s.bad_init or s.violation:
+                    if s.bad_init or s.violation or s.stopped_by is not None:
                         self.kill(proc)
                     elif stopping.is_set():
                         s.interrupted = True
@@ -3870,6 +3897,8 @@ class Runner:
             return Verdict("release", reason="interrupted", error="the runner stopped during the session",
                            retry=now + INTERRUPTED_RETRY)
         ev = s.result or {}
+        if s.stopped_by is not None:
+            return Verdict("too_large", error="stopped on request")
         if s.violation:
             return Verdict("too_large", error=f"stopped by the web check: {s.violation}")
         if s.timed_out:
@@ -4106,6 +4135,11 @@ class Runner:
         def on_wait(s):
             if s.step:
                 progress.report(s.step, **(s.web.progress() if progress.mode else {}))
+            else:
+                # The heartbeat runs from the first post on, and brings a stop request with it.
+                progress.tick()
+            if progress.stop and progress.mode and s.stopped_by is None:
+                s.stopped_by = progress.stopped_by or ""
             if time.monotonic() > next_ack[0]:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
@@ -4204,8 +4238,8 @@ class Runner:
                 outcome = written_outcome(s.succeeded)
             else:
                 outcome = "replied"
-            self.complete(api, item, claim, h, base, stats, outcome,
-                          RESEARCH_PARTIAL_NOTE if limit else v.note, wire, claimedOutcome=None if limit else v.claimed,
+            note = RESEARCH_STOPPED_NOTE if end == "stopped" else RESEARCH_PARTIAL_NOTE if limit else v.note
+            self.complete(api, item, claim, h, base, stats, outcome, note, wire, claimedOutcome=None if limit else v.claimed,
                           error=v.error, reason=None if limit else v.reason, noteError=note_error)
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
@@ -4392,25 +4426,30 @@ class Runner:
         protocol says. A marker left in the answer gives way to the limit line,
         except after a clean end, where it just goes."""
         language = self.language
+        stopped = s.stopped_by is not None
+        closing = RESEARCH_STOPPED[language]["line"].format(stopped=stopped_words(language, s.stopped_by)) \
+            if stopped else RESEARCH_LIMIT[language]
         if s.answer_id:
             body = s.answer_body
             if limit:
-                text = swap_marker(body, RESEARCH_LIMIT[language], append=True)
+                text = swap_marker(body, closing, append=True)
             elif has_marker(body):
                 text = swap_marker(body, None if clean else RESEARCH_LIMIT[language])
             else:
                 return ("no_web" if no_web else "complete"), None
             partial = limit or not clean
+            end = "stopped" if stopped else "partial" if partial else "no_web" if no_web else "complete"
             if body is None:
-                return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
+                return end, "the answer's text is unknown: its marker stays"
             error = self.edit_comment(api, s.answer_id, text)
             if error is None:
                 s.answer_body = text
-            return ("partial" if partial else "no_web" if no_web else "complete"), error
+            return end, error
         if not limit:
             return ("no_web" if no_web else "complete"), None
-        reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
-        return "partial", self.post_research_reply(api, item, claim, reply)
+        lead = f"**{stopped_words(language, s.stopped_by)}**" if stopped else None
+        reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()), lead)
+        return ("stopped" if stopped else "partial"), self.post_research_reply(api, item, claim, reply)
 
     def attach_files(self, api, item, claim, s, folder, now=None):
         """Checks the run's files and uploads what passes to its answer, or to the

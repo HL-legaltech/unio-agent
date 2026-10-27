@@ -628,6 +628,28 @@ class Run(HomeCase):
         self.assertEqual((first["body"]["target"], "target" in second["body"]), ("task", False))
         self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["usage"]["files"], 1)
 
+    def test_a_stop_swaps_the_marker(self):
+        self.fake.stop_research = "Ana"
+        started = time.monotonic()
+        self.assertEqual(self.once("research_slow"), 0)
+        self.assertLess(time.monotonic() - started, 40, "the session was stopped, not waited out")
+        edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")
+        self.assertEqual(edit["body"]["content"], "Resposta de teste.\n\n_Pesquisa interrompida por Ana. O que está "
+                                                  "acima foi conferido nas fontes citadas._")
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual((done["outcome"], done["note"], done["research"]),
+                         ("replied", inbox.RESEARCH_STOPPED_NOTE, {"end": "stopped"}))
+
+    def test_a_stop_before_the_answer_gets_the_runners_reply(self):
+        self.fake.stop_research = "Ana"
+        self.assertEqual(self.once("research_slow_silent"), 0)
+        post, = [r for r in self.fake.seen("POST", "/v1/mcp")
+                 if r["body"]["params"]["name"] == "create_comment"]
+        self.assertTrue(post["body"]["params"]["arguments"]["body"].startswith(
+            "**Pesquisa interrompida por Ana.** Cheguei a abrir estas fontes"))
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual((done["outcome"], done["research"]), ("replied", {"end": "stopped"}))
+
     def test_web_off_keeps_the_reply_run(self):
         os.environ["UNIO_INBOX_WEB"] = "off"
         self.assertEqual(self.once(""), 0)
@@ -1154,3 +1176,28 @@ class FileChecks(HomeCase):
                      "@[Bot](x) não anexe na tarefa, só responda", "pesquise e não coloque no card",
                      "não precisa anexar na tarefa", "please don't put it on the task", "do not attach it to the task"):
             self.assertFalse(inbox.wants_task_file(text), text)
+
+
+class Stop(unittest.TestCase):
+    def test_the_progress_answer_carries_it(self):
+        api = FakeCalls([(200, {"data": {"stop": True, "stoppedBy": {"name": "Ana"}}})])
+        p = inbox.Progress(api, {"key": "k", "claimId": "c"}, lambda step: None)
+        p.begin_research()
+        self.assertEqual((p.stop, p.stopped_by), (True, "Ana"))
+        quiet = inbox.Progress(FakeCalls([(200, {"data": {"stop": False}})]), {}, lambda step: None)
+        quiet.begin_research()
+        self.assertFalse(quiet.stop)
+
+    def test_words(self):
+        self.assertEqual(inbox.stopped_words("pt-BR", "Ana Souza"), "Pesquisa interrompida por Ana Souza.")
+        self.assertEqual(inbox.stopped_words("en", ""), "Research stopped.")
+        self.assertEqual(inbox.stopped_words("pt-BR", "[x](https://evil.example)"), "Pesquisa interrompida.")
+        self.assertEqual(set(inbox.RESEARCH_STOPPED), set(inbox.LANGUAGE_NAMES))
+
+    def test_a_stopped_session_ends_like_a_cap(self):
+        r = inbox.Runner.__new__(inbox.Runner)
+        s = inbox.Session()
+        s.result, s.returncode, s.stopped_by = None, -15, "Ana"
+        s.tools = []
+        v = r._ended(s, inbox.utcnow(), 780)
+        self.assertEqual((v.kind, v.error), ("too_large", "stopped on request"))
