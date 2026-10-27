@@ -16,6 +16,7 @@
 #:   doctor      Confere a instalação e diz o que corrigir.
 #:   update      Instala agora as versões mais novas do Unio neste computador.
 #:   disconnect  Tira um workspace deste computador.
+#:   resume      Retoma a sessão do Claude Code que trabalhou numa tarefa.
 #:   runner      Liga e cuida do serviço de respostas do Unio neste computador.
 #:
 #: unio <comando> --help mostra as opções de cada comando.
@@ -161,6 +162,23 @@ Unio: revogue-o em Configurações > Pessoal > Agente de código.
 
   --workspace   O workspace a tirar (org_...).
   --yes         Não pergunta antes de apagar. Sem um terminal, é obrigatório.
+EOF
+}
+
+help_resume() {
+  cat <<'EOF'
+Uso: unio resume <tarefa ou sessão> [--list | --print]
+
+Retoma no Claude Code, na pasta em que ela começou, a sessão mais recente que
+trabalhou numa tarefa do Unio. A tarefa vai pela chave (DEV-12), pelo link
+ou pelo id; uma sessão vai pelo id que a página do agente mostra a você, ou
+pelos 8 primeiros caracteres dele.
+
+  --list    Lista as sessões da tarefa e não retoma nenhuma.
+  --print   Mostra o comando que retomaria a sessão, sem rodá-lo.
+
+Só aparecem as sessões que o plugin do Unio acompanhou neste computador, e
+ele precisa do Python 3.9 ou mais novo.
 EOF
 }
 
@@ -424,6 +442,22 @@ cmd_update() {
   exit 0
 }
 
+cmd_resume() {
+  for arg; do
+    case $arg in
+      -h|--help) help_resume; exit 0 ;;
+      --list|--print) ;;
+      -*) usage_error resume "Opção desconhecida: $(clean "$arg")." ;;
+    esac
+  done
+  if ! python=$(python_cmd); then
+    say "unio resume precisa do Python 3.9 ou mais novo. Instale o Python e rode este comando de novo." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC2086 # the launcher and its flag are two words
+  exec $python -I "$scripts/sessions.py" resume "$@"
+}
+
 # Each command's own help, for unio help <comando> and a bare unio runner.
 case ${1-}:${2-} in
   help:runner|-h:runner|--help:runner|runner:) set -- runner --help ;;
@@ -446,6 +480,9 @@ case ${1:-help} in
   disconnect)
     shift
     cmd_disconnect "$@" ;;
+  resume)
+    shift
+    cmd_resume "$@" ;;
   runner)
     shift
     if [ ! -f "$root/runner/unio-runner" ]; then

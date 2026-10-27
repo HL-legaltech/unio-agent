@@ -1,8 +1,8 @@
 @echo off
 rem unio on Windows, the twin of bin\unio: Unio's command on this computer.
 rem install.ps1 puts this folder on the user's Path; it runs from the clone
-rem it sits in. Every command but runner is bin\unio itself, run by Git for
-rem Windows' own sh.exe, so both systems print the same words.
+rem it sits in. Every command but runner and resume is bin\unio itself, run
+rem by Git for Windows' own sh.exe, so both systems print the same words.
 rem
 rem unio help prints the lines of bin\unio that start with "#:", the one
 rem table of commands. A command in that table needs its branch here too.
@@ -20,6 +20,7 @@ if /i "%unio_cmd%"=="status" goto :posix
 if /i "%unio_cmd%"=="doctor" goto :posix
 if /i "%unio_cmd%"=="update" goto :posix
 if /i "%unio_cmd%"=="disconnect" goto :posix
+if /i "%unio_cmd%"=="resume" goto :resume
 if /i "%unio_cmd%"=="runner" goto :runner
 if /i "%unio_cmd%"=="help" if not "%~2"=="" if /i not "%~2"=="runner" goto :posix
 if /i "%unio_cmd%"=="help" goto :help
@@ -69,6 +70,21 @@ call py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul 
 if not defined unio_python call python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
 if not defined unio_python goto :no_python
 %unio_python% -X utf8 "%unio_root%\runner\unio-runner"%unio_args%
+exit /b %errorlevel%
+
+:resume
+rem The session list lives in %LOCALAPPDATA%, which Python reads natively,
+rem and claude must start in this console, so Python runs here and not
+rem under Git's sh. Its help is bin\unio's, which sh prints.
+for %%a in (%*) do if /i "%%~a"=="-h" goto :posix
+for %%a in (%*) do if /i "%%~a"=="--help" goto :posix
+rem The arguments go on in their own slots, never through a variable:
+rem expanding one would let a quoted "&" or "|" end the line.
+set "unio_python="
+call py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
+if not defined unio_python call python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
+if not defined unio_python goto :no_python
+%unio_python% -X utf8 -I "%unio_root%\plugins\unio\scripts\sessions.py" resume %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
 
 :help

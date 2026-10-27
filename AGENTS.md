@@ -73,6 +73,7 @@ bash tests/run.sh
 sh tests/check_versions.sh origin/main
 python3 -I tests/e2e/claude_session.py
 python3 -m unittest discover -s runner/tests -v
+python3 -m unittest discover -s tests/sessions -v
 ```
 
 - `tests/e2e/claude_session.py` runs the real Claude Code with the plugin
@@ -105,9 +106,10 @@ No AI attribution. Stage named paths only.
 
 - The plugin's scripts are POSIX `sh`: they run under dash, bash, macOS `sh`
   and Git Bash. They call POSIX utilities, plus `curl`, `mktemp` and
-  `date +%s`, which every supported system has; `lsof` on macOS and
-  `cygpath` and `powershell.exe` on Windows, where `UNIO_OS` says so. Check
-  any other tool on macOS and Git Bash before a script depends on it.
+  `date +%s`, which every supported system has; `lsof` and `xcode-select`
+  on macOS and `cygpath` and `powershell.exe` on Windows, where `UNIO_OS`
+  says so. Check any other tool on macOS and Git Bash before a script
+  depends on it.
 - On Windows Claude Code runs a hook in exec form (`args`) only when its
   `command` is an `.exe` on the PATH, and Git for Windows does not put
   `sh.exe` there. Hooks stay in shell form, which Claude Code runs through
@@ -128,6 +130,12 @@ No AI attribution. Stage named paths only.
 - The session hook's `additionalContext` carries fixed text only, never a name
   or CHANGELOG text: what someone types in Unio must not reach Claude's context
   through the hook.
+- The session status (`scripts/session-status.sh` and `scripts/unio_sessions/`)
+  is standard-library Python 3.9 or later and prints nothing: Python 3.9 reads
+  no `Z` in `datetime.fromisoformat`, so times go through `watch.stamp`. On
+  Linux and macOS its state folder, file names and lock names are those of the
+  hand-made hook it replaced, so a session that hook already watches is never
+  watched twice. Without Python it reports nothing.
 - Text a person reads at runtime (hook messages, command output) is Brazilian
   Portuguese: sentence case, no em dash, no emoji. Repository files are in
   English.
@@ -135,9 +143,10 @@ No AI attribution. Stage named paths only.
   table of commands, and `bin/unio.cmd` prints the same lines. A new command
   adds its line there and a branch to each file; the table lists only
   commands both files run.
-- `bin/unio.cmd` runs every command but `runner` as `bin/unio`, through Git
-  for Windows' `sh.exe`, which is not on the PATH: it finds it from
-  `where git`.
+- `bin/unio.cmd` runs every command but `runner` and `resume` as `bin/unio`,
+  through Git for Windows' `sh.exe`, which is not on the PATH: it asks
+  `git --exec-path` where Git is installed. Those two run Python itself, in
+  the person's console.
 - On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
   `install.sh` and `install.ps1`'s plugin mode keep using a clone already at
   `~/.local/share/unio/agent`, since a Codex config names it.

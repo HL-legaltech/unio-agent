@@ -15,8 +15,8 @@ ur = load_runner()
 BIN = RUNNER_DIR.parent / "bin"
 VERSION = (RUNNER_DIR / "VERSION").read_text(encoding="utf-8").strip()
 SH = shutil.which("sh")
-COMMANDS = ["connect", "status", "doctor", "update", "disconnect", "runner"]
-# The commands bin/unio runs itself; unio.cmd hands them to Git's sh.
+COMMANDS = ["connect", "status", "doctor", "update", "disconnect", "resume", "runner"]
+# The commands whose help and options bin/unio itself handles.
 OWN = COMMANDS[:-1]
 
 
@@ -266,6 +266,27 @@ class WindowsCommand(unittest.TestCase):
         code, out, err = self.unio("connect", "--bogus")
         self.assertEqual((code, out), (2, ""))
         self.assertIn("Opção desconhecida: --bogus.", err)
+
+    def test_resume_runs_python_in_this_console_and_its_help_through_gits_sh(self):
+        code, out, err = self.unio("resume", "DEV-1")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("Nenhuma sessão deste computador está ligada a DEV-1", err)
+        for args in (["resume", "--help"], ["help", "resume"]):
+            code, out, _ = self.unio(*args)
+            self.assertEqual(code, 0, args)
+            self.assertTrue(out.startswith("Uso: unio resume"), out)
+        code, _, err = self.unio("resume", "DEV-1", "--bogus")
+        self.assertEqual(code, 2)
+        self.assertIn("Opção desconhecida: --bogus.", err)
+
+    def test_resume_without_a_python_that_runs(self):
+        stub = self.box.root / "stub"
+        stub.mkdir()
+        (stub / "python.cmd").write_bytes(b'@echo off\r\nexit /b 9009\r\n')
+        system = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")
+        code, out, err = self.unio("resume", "DEV-1", PATH=str(stub) + os.pathsep + system)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Falta o Python 3.9 ou mais novo", err)
 
     def test_without_git_for_windows(self):
         system = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")

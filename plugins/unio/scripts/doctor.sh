@@ -47,6 +47,17 @@ if [ "$kind" = claude-code ]; then
   fi
   command -v unio >/dev/null 2>&1 ||
     line info "core command: o comando unio, que conecta e confere o Unio pelo terminal, não está no PATH; o instalador da página Agente de código o instala"
+  # session-status.sh finds Python the same way, so this line says what the hook does.
+  if unio_python >/dev/null; then
+    line ok "core sessions: as sessões do Claude Code neste computador aparecem no Unio, com o uso e o comando que retoma cada uma"
+  else
+    case $UNIO_OS in
+      windows) how="instale com winget install Python.Python.3.12" ;;
+      macos) how="instale com xcode-select --install" ;;
+      *) how="instale o pacote python3 do sistema" ;;
+    esac
+    line info "core sessions: as sessões do Claude Code neste computador não aparecem no Unio, porque falta o Python 3.9 ou mais novo; $how e abra uma sessão nova"
+  fi
 fi
 
 workspace=$(unio_workspace "$project")

@@ -1,5 +1,5 @@
 {
-  "description": "Unio: connection, token, update and migration notices when a session starts",
+  "description": "Unio: connection, token, update and migration notices when a session starts, and the session's status on the agent's page",
   "hooks": {
     "SessionStart": [
       {
@@ -15,6 +15,64 @@
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\" refresh",
             "async": true,
             "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_unio_unio__.*|mcp__unio__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "timeout": 5
           }
         ]
       }

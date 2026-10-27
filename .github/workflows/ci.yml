@@ -118,6 +118,34 @@ jobs:
         shell: pwsh
         run: python -I tests/e2e/claude_session.py --claude "$env:USERPROFILE\.local\bin\claude.exe"
 
+  sessions:
+    # The session status (plugins/unio/scripts/unio_sessions) on each system
+    # it supports, from the oldest Python it accepts. Each system runs its
+    # own locks, process checks and detached start for real. GitHub-hosted
+    # only, as above.
+    name: sessions (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the session status tests
+        run: python -m unittest discover -s tests/sessions -v
+
   runner:
     # The answering service and its setup on each system it supports.
     # GitHub-hosted only, as above.

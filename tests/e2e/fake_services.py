@@ -12,6 +12,8 @@ credential is needed.
   logs the bearer token and X-Unio-Client of each request.
 - GET /v1/agents/me answers the plugin's scripts by token, like
   tests/fake_api.py, with the workspace given on the command line.
+- PUT /v1/agents/presence/:id and PUT /v1/agents/sessions/:id take the
+  session status's reports and log each body with its token.
 - POST /control/expect-mcp makes the next /v1/messages wait (up to 30 s)
   for an MCP request, so a session cannot end before Claude Code connects
   to Unio: in print mode it does not wait for the connection itself. It
@@ -116,6 +118,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self.send_empty(200)
+
+    def do_PUT(self):
+        path = self.path.split("?", 1)[0]
+        body = self.read_body()
+        token = self.bearer()
+        log({"method": "PUT", "path": path, "token": token, "body": body})
+        if token not in TOKENS:
+            return self.send_json(401, {"error": "Token de agente inválido."})
+        if path.startswith(("/v1/agents/presence/", "/v1/agents/sessions/")):
+            return self.send_json(200, {"data": {"id": path.rsplit("/", 1)[1]}})
+        return self.send_json(404, {"error": path})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
