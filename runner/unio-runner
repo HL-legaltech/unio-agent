@@ -1101,6 +1101,39 @@ def autoupdate(prof):
     return "desligada (%s)" % why if why else "ligada"
 
 
+def project_status(prof):
+    """The status block unio-inbox keeps in the profile's health.json for its
+    project status pass, or None before the service first wrote one."""
+    try:
+        block = json.loads((prof.state / "health.json").read_text(encoding="utf-8")).get("status")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return block if isinstance(block, dict) else None
+
+
+def project_status_words(block):
+    if not block:
+        return "sem informação ainda (o serviço escreve isso depois da primeira volta)"
+    if block.get("configError"):
+        # The raw message is English and stays in --json; people get where to look.
+        return ("parado por um valor inválido de UNIO_STATUS, UNIO_STATUS_INTERVAL ou UNIO_STATUS_DONE_AFTER "
+                "no arquivo env do perfil")
+    mode = block.get("mode")
+    if mode not in ("on", "observe"):
+        return "desligado (UNIO_STATUS=on no arquivo env do perfil liga)"
+    words = "ligado" if mode == "on" else "só registra, sem mudar nenhum projeto (UNIO_STATUS=on liga)"
+    if block.get("lastPassError"):
+        return "%s; a última passagem falhou em %s (o motivo está em %s logs)" % (
+            words, clean(str(block.get("lastPassErrorAt") or "?"), 40), self_command())
+    if block.get("lastPassAt"):
+        pending = block.get("pending")
+        waiting = "" if not isinstance(pending, int) else (
+            ", nenhum projeto esperando" if pending == 0 else
+            ", 1 projeto esperando" if pending == 1 else ", %d projetos esperando" % pending)
+        return "%s; última passagem em %s%s" % (words, clean(str(block["lastPassAt"]), 40), waiting)
+    return words
+
+
 def version_key(text):
     """(major, minor, patch) of "2.0.0", as unio-inbox compares versions, or None."""
     found = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?$", str(text or "").strip())
@@ -1268,7 +1301,8 @@ def status(opts):
         entries = read_entries(prof.log_file, 1)
         rows.append((prof, {"workspace": org, "state": svc.state(org) if svc else "unknown",
                             "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
-                            "token": prof.token.exists(), "lastLog": entries[-1] if entries else None}))
+                            "token": prof.token.exists(), "lastLog": entries[-1] if entries else None,
+                            "projectStatus": project_status(prof)}))
     if opts.get("--json"):
         say(json.dumps({"workspaces": [row for _, row in rows]}))
         return 0
@@ -1279,6 +1313,7 @@ def status(opts):
         say("%s: %s" % (row["workspace"], STATE_WORDS[row["state"]]))
         say("  versão: %s" % (row["version"] or "ainda não começou"))
         say("  atualização automática: %s" % autoupdate(prof))
+        say("  status dos projetos: %s" % project_status_words(row["projectStatus"]))
         say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
     return 0
 

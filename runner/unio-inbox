@@ -151,7 +151,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -3223,6 +3223,7 @@ class Runner:
             h["lastPollAt"] = iso(now)
             self.review_status(h)
             self.needs_status(h)
+            self.status_status(h)
             left = h.pop("current", None)
             if isinstance(left, dict) and left.get("target"):
                 h.setdefault("orphans", []).append(left)

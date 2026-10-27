@@ -235,11 +235,43 @@ class Commands(unittest.TestCase):
         in_clone = (ur.CLONE / ".git").exists()
         self.assertEqual(json.loads(out), {"workspaces": [
             {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
-             "lastLog": None},
+             "lastLog": None, "projectStatus": None},
             {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
-             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}}]})
+             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}, "projectStatus": None}]})
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
+
+    def test_status_names_the_project_status_pass(self):
+        self.make_profile()
+        health = self.state / "health.json"
+        cases = [
+            (None, "status dos projetos: sem informação ainda"),
+            ({"mode": "off"}, "status dos projetos: desligado (UNIO_STATUS=on no arquivo env do perfil liga)"),
+            ({"mode": "observe", "lastPassAt": "2026-10-27T12:00:00Z", "pending": 0},
+             "status dos projetos: só registra, sem mudar nenhum projeto (UNIO_STATUS=on liga); "
+             "última passagem em 2026-10-27T12:00:00Z, nenhum projeto esperando"),
+            ({"mode": "on", "lastPassAt": "2026-10-27T12:00:00Z", "pending": 2},
+             "status dos projetos: ligado; última passagem em 2026-10-27T12:00:00Z, 2 projetos esperando"),
+            ({"mode": "on", "lastPassAt": "2026-10-27T12:00:00Z", "lastPassError": "unio_unavailable: 503",
+              "lastPassErrorAt": "2026-10-27T12:00:00Z"},
+             "status dos projetos: ligado; a última passagem falhou em 2026-10-27T12:00:00Z (o motivo está em "),
+            ({"mode": "off", "configError": "UNIO_STATUS_INTERVAL is not a number"},
+             "status dos projetos: parado por um valor inválido de UNIO_STATUS, UNIO_STATUS_INTERVAL ou "
+             "UNIO_STATUS_DONE_AFTER no arquivo env do perfil"),
+        ]
+        for block, line in cases:
+            with self.subTest(block=block):
+                if block is None:
+                    health.unlink(missing_ok=True)
+                else:
+                    health.write_text(json.dumps({"lastPollAt": "2026-10-27T12:00:00Z", "status": block}),
+                                      encoding="utf-8")
+                code, out = self.box.runner(["status", "--workspace", "org_test"])
+                self.assertEqual(code, 0, out)
+                self.assertIn("  " + line, out)
+        code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
+        self.assertEqual(json.loads(out)["workspaces"][0]["projectStatus"],
+                         {"mode": "off", "configError": "UNIO_STATUS_INTERVAL is not a number"})
 
     def test_status_json_without_profiles(self):
         code, out = self.box.runner(["status", "--json"])
