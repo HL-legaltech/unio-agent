@@ -525,10 +525,12 @@ class WebGuard(unittest.TestCase):
                              ("http://db.internal/", "local_name"), ("http://intranet/", "local_name"),
                              ("https://api.unio.so/v1/tasks", "unio_host"), ("https://unio.so/app", "unio_host"),
                              ("https://user:pw@example.org/", "userinfo"), ("file:///etc/passwd", "scheme"),
-                             ("ftp://example.org/", "scheme")):
+                             ("ftp://example.org/", "scheme"), ("http://１２７.0.0.1:3001/", "private_address"),
+                             ("http://１０.0.0.1/", "private_address"), ("http://192。168。0。1/", "private_address"),
+                             ("http://ｌｏｃａｌｈｏｓｔ/", "local_name")):
             self.assertEqual(inbox.fetch_problem(url, unio), problem, url)
         for url in ("https://www.gov.example/ccivil_03/leis/l13709.htm", "http://8.8.8.8/",
-                    "https://beef.cafe.example/", "https://unio.so.example/"):
+                    "https://beef.cafe.example/", "https://unio.so.example/", "https://bücher.example/"):
             self.assertIsNone(inbox.fetch_problem(url, unio), url)
 
     def checked(self, lines):

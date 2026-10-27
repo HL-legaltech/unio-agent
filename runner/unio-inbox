@@ -1850,7 +1850,15 @@ def host_address(host):
 
 def private_host(host, unio_hosts=()):
     """Why a host is off limits to WebFetch, or None for a public one."""
-    host = str(host or "").lower().strip("[]").rstrip(".")
+    host = str(host or "").lower().strip("[]")
+    if not host.isascii():
+        # WebFetch reads the host as WHATWG URL does, after UTS-46 mapping: "１２７.0.0.1"
+        # and "127。0。0。1" reach 127.0.0.1. IDNA 2003 maps them the same way.
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return "host_form"
+    host = host.rstrip(".")
     if not host:
         return "no_host"
     ip = host_address(host)
