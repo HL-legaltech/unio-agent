@@ -2092,9 +2092,22 @@ def comment_lines(body):
     return {" ".join(line.split()) for line in str(body or "").split("\n") if line.strip()}
 
 
+# Excel and LibreOffice run a cell that opens with one of these as a formula
+# (OWASP CSV injection), and a CSV's cells come from pages the run read.
+CSV_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+CSV_NUMBER = re.compile(r"^[-+]?\d+(?:[.,]\d+)*%?$")
+
+
+def inert_cell(cell):
+    """The cell as text a spreadsheet shows and never runs: a leading quote
+    before a formula's first character, numbers (-5, +2,5%) as they are."""
+    return f"'{cell}" if cell.startswith(CSV_FORMULA_START) and not CSV_NUMBER.match(cell) else cell
+
+
 def rewrite_csv(text):
     """The CSV as Excel in Brazil opens it: ';' between fields, UTF-8 with a BOM,
-    whatever separator the model used. Raises ValueError past the limits."""
+    whatever separator the model used, and no cell a spreadsheet would run.
+    Raises ValueError past the limits."""
     try:
         dialect = csv.Sniffer().sniff(text[:20000], delimiters=",;\t|")
         rows = list(csv.reader(io.StringIO(text), dialect))
@@ -2106,7 +2119,7 @@ def rewrite_csv(text):
     if len(rows) > CSV_MAX_ROWS or max(len(row) for row in rows) > CSV_MAX_COLUMNS:
         raise ValueError("too many rows or columns")
     out = io.StringIO()
-    csv.writer(out, delimiter=";", lineterminator="\r\n").writerows(rows)
+    csv.writer(out, delimiter=";", lineterminator="\r\n").writerows([inert_cell(c) for c in row] for row in rows)
     return "\ufeff" + out.getvalue()
 
 

