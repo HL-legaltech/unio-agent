@@ -3888,7 +3888,7 @@ class Runner:
         return usd
 
     def research_status(self, h):
-        """The research block of health.json, for unio-doctor: its limits as this process runs them."""
+        """The research block of health.json, which `unio runner status` prints: its limits as this process runs them."""
         cfg = self.cfg
         h["research"] = {"web": cfg.web, "protocol": cfg.researcher.is_file(), "configError": cfg.research_error,
                          "caps": {"turns": cfg.research_max_turns, "usd": cfg.research_max_budget_usd,
