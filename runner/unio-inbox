@@ -321,10 +321,11 @@ PROBLEMS = {
     "research_runs": "the day's research runs are spent",
     "research_reserve": "research may not spend the reserve of the daily budget",
     "research_session_window": "the Claude session window is nearly spent",
+    "research_unmarked": "Unio did not take the request as research",
 }
 # The wire reason of a research gate's release.
 RESEARCH_GATE_REASONS = {"research_lease": "other", "research_runs": "budget", "research_reserve": "budget",
-                         "research_session_window": "usage_limit"}
+                         "research_session_window": "usage_limit", "research_unmarked": "unio_unavailable"}
 # The server refuses any step outside its codes (422), and the web app words
 # each one; a tool missing here keeps the previous step.
 STEPS = {
@@ -1531,11 +1532,13 @@ class Progress:
 
     def begin_research(self, step="reading_task"):
         """Marks the claim a research claim now, before the research session
-        connects: the server narrows that connection's tools by it."""
+        connects: the server narrows that connection's tools by it. Whether the
+        session may start: the server took the mark, or it predates the mark
+        (a 422 on the field), so only the runner's own narrowing applies."""
         self.mode = "research"
         self.values = {**(self.values or {}), "step": step}
         self.want = self.body()
-        self.post(self.want, time.monotonic())
+        return self.post(self.want, time.monotonic()) and ("mode" in self.sent or not self.support["fields"])
 
     def body(self):
         v = self.values
@@ -1574,10 +1577,11 @@ class Progress:
         self.sent = body
         if error:
             self.error = self.error or error
-        else:
-            self.count += 1
-            if body.get("step") == "reading_source":
-                self.support["reading_source"] = True
+            return False
+        self.count += 1
+        if body.get("step") == "reading_source":
+            self.support["reading_source"] = True
+        return True
 
     def degrade(self, body, data):
         """After a 422: whether dropping what this server may not know changes the
@@ -4182,6 +4186,10 @@ class Runner:
         pending = h.get("researchPending") if isinstance(h.get("researchPending"), dict) else {}
         pending.pop(item.get("key"), None)
         gate, *rest = self.research_gate(h, claim, now)
+        if not gate and progress and not progress.begin_research():
+            # The server narrows the run's unio tools to its thread by this mark; a
+            # run it did not take would connect with every tool.
+            gate, rest = "research_unmarked", [progress.error, now + UNIO_RETRY]
         if gate:
             detail, retry = rest
             if "question" in ask:
@@ -4200,8 +4208,6 @@ class Runner:
         facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
                  "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
         prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
-        if progress:
-            progress.begin_research()
         s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
         v = self.classify(s, timeout=timeout)
         if v.kind == "research":

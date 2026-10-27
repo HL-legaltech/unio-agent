@@ -527,6 +527,15 @@ class Run(HomeCase):
         item, = self.items()
         self.assertEqual(item["research"]["why"], "thread")
 
+    def test_a_run_the_server_did_not_mark_never_starts(self):
+        self.fake.research_mark_status = 500
+        self.assertEqual(self.once("research"), 0)
+        self.assertFalse(self.claude_log.exists())
+        release = self.fake.seen("POST", "/v1/agents/inbox/release")[0]["body"]
+        self.assertEqual(release["reason"], "unio_unavailable")
+        item, = self.items()
+        self.assertEqual(item["research"]["gate"], "research_unmarked")
+
     def test_a_gate_releases_without_a_session(self):
         state = self.state
         state.mkdir(parents=True, exist_ok=True)
@@ -892,7 +901,7 @@ class ResearchProgress(unittest.TestCase):
     def test_research_fields(self):
         api = FakeCalls()
         p = self.progress(api)
-        p.begin_research()
+        self.assertTrue(p.begin_research())
         self.assertEqual(api.bodies[0], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research"})
         p.report("reading_source", 3, 2, "www.gov.example")
         p.tick(time.monotonic() + 3)
@@ -913,13 +922,25 @@ class ResearchProgress(unittest.TestCase):
         api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "mode"})])
         support = {"fields": True, "reading_source": None}
         p = self.progress(api, support)
-        p.begin_research()
+        self.assertTrue(p.begin_research(), "the runner's own narrowing is all an older server has")
         self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_task"})
         self.assertEqual(p.count, 1)
         self.assertFalse(support["fields"])
         p.report("researching", 4, 1)
         p.tick(time.monotonic() + 3)
         self.assertNotIn("searches", api.bodies[-1])
+
+    def test_a_mark_the_server_never_took(self):
+        for answer in ((500, {"code": "server_error"}), (409, {"code": "agent_inbox_not_claimed"})):
+            self.assertFalse(self.progress(FakeCalls([answer])).begin_research(), answer)
+
+        class Unreachable:
+            def call(self, *args, **kwargs):
+                raise inbox.ApiUnreachable("timed out")
+
+        p = self.progress(Unreachable())
+        self.assertFalse(p.begin_research())
+        self.assertEqual(p.error, "timed out")
 
     def test_an_older_server_refuses_reading_source(self):
         refusal = (422, {"error": "Validation failed", "messages": [{"field": "step", "rule": "enum"}]})

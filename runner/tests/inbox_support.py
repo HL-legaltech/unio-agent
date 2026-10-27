@@ -111,6 +111,8 @@ class FakeUnio:
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
         # What GET /agents/inbox lists; a completed item leaves it.
         self.items = []
+        # An HTTP status every progress post that marks a research run gets, or None.
+        self.research_mark_status = None
         # An HTTP status every runner create_comment over MCP gets, or None.
         self.mcp_comment_status = None
         self.requests = []
@@ -174,6 +176,8 @@ class FakeUnio:
                     self.items = [i for i in self.items if i.get("key") != body.get("key")]
             return 200, {"data": {"key": body.get("key"), "attempts": 1}}
         if method == "POST" and path == "/v1/agents/inbox/progress":
+            if self.research_mark_status and body.get("mode") == "research":
+                return self.research_mark_status, {"error": "Erro.", "code": "server_error"}
             return 200, {"data": {}}
         if method in ("PUT", "DELETE") and path == "/v1/agents/reactions":
             return 200, {"data": {}}
