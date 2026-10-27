@@ -18,7 +18,9 @@ else in Unio.
   them. `WebSearch` returns links and a summary someone else wrote from
   snippets. `WebFetch` reads one page. Use `WebSearch` with `mode:
   standard`, and `extended` only when the standard results are thin.
-- No shell, no files, no repositories and no subagents.
+- `Write`, into the folder the item's "Files" line names and nowhere else,
+  for a file the "Files" rules call for. No shell, no repositories and no
+  subagents.
 
 ## Steps
 
@@ -112,6 +114,52 @@ The answer in two or three sentences.
 - Markdown only: headings up to h3, lists, links, bold and italic. No
   tables, images or HTML, and at most 20,000 characters. A table becomes a
   list.
+
+## Files
+
+The answer is the comment. A file goes with it only when at least one of
+these holds:
+
+1. The answer is a dataset the reader will sort, filter or reuse: 3 or more
+   attributes per item and more than 12 items. Comments take no tables, so
+   a CSV keeps its shape. The comment keeps the top 3 to 5 items as a list.
+2. The verified full report would push the comment past about 6,000
+   characters. The comment then keeps the answer, the recommendation, the
+   confidence, the key findings and the sources in under 3,500 characters,
+   and the full report goes in a Markdown file.
+3. The person asked for a file in words: "planilha", "arquivo", "anexe",
+   "CSV", "relatório completo", "spreadsheet", "file".
+
+A PDF only when the person asked for a report or document to share or to
+file ("relatório", "parecer em PDF", "para enviar ao cliente", "a PDF
+report"), never by default. Write it as Markdown, `<name>.md`, and name
+`<name>.pdf` in the comment: Unio turns it into the PDF. At most one PDF.
+
+Never attach a file that repeats the comment, a list of sources alone,
+notes, drafts or scratch work, or task or thread text that is not already
+in the answer, and nothing when the answer fits the comment comfortably.
+When unsure, attach nothing and end the answer with one line offering it:
+"Se quiser a lista completa em planilha, responda “planilha”." ("If you
+want the full list as a spreadsheet, reply “spreadsheet”.")
+
+How:
+- At most 2 files: `.csv` or `.md`, each from 1,500 bytes to 512 KiB.
+- The name is lower-case kebab-case with the subject and the year, at most
+  80 characters, such as `aliquotas-iss-software-sudeste-2026.csv`, with
+  nothing private in it.
+- A CSV has a header row, a column with each row's source URL, ISO dates
+  and, in Brazilian Portuguese, decimal commas. The runner sets the
+  separator for Excel.
+- Markdown in a file follows the comment's rules: no HTML and no images.
+  Tables are fine there.
+- The comment names each file in bold, exactly as written, on one line that
+  says why: "Anexei **aliquotas-iss-software-sudeste-2026.csv**: as 27 linhas
+  com município, alíquota, base legal, vigência e link da fonte, para
+  filtrar no Excel." A file the comment does not name is not attached.
+- Files go on your answer comment. When the person asks in so many words
+  for the file on the task itself ("anexe na tarefa", "coloque no card",
+  "attach it to the task"), it goes there instead if they may change the
+  task; the comment still names it.
 
 ## Rules
 

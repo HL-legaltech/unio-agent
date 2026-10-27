@@ -2401,6 +2401,14 @@ def item_subject(item):
     return None
 
 
+def files_rule(folder, windows=None):
+    """The rule that lets Write into `folder` and nowhere else. Measured on 2.1.311:
+    an Edit(//abs/dir/**) allow rule admits Write inside dir, while every
+    Write(...) form tried never matched; --restricted refuses any path outside
+    the working folder either way."""
+    return f"Edit({rule_path(folder, windows)}/**)"
+
+
 def scope_headers(item, claim):
     """What scopes a connection to an item's claim on the server."""
     return {"X-Unio-Inbox-Item": str(item.get("key")),
@@ -2446,6 +2454,8 @@ def research_lines(research, language="en"):
         f"Checkpoint marker: end your first post with this line, and remove it in your last edit: "
         f"{RESEARCH_MARKER[language]}",
     ]
+    if research.get("files"):
+        lines.append(f"Files: write only into {research['files']}, and only when the \"Files\" rules allow it.")
     if research.get("answer"):
         lines.append(f"This thread already has your research answer (comment {research['answer']}); start from "
                      "its sources.")
@@ -3304,15 +3314,17 @@ class Runner:
             args += ["--disallowedTools"] + [f"Read({rule_path(path)}/**/{g})" for path in paths for g in SECRET_GLOBS]
         return args
 
-    def research_args(self, mcp_path, web):
+    def research_args(self, mcp_path, web, files=None):
         """A research run: the web tools `web` names (none when the weekly gate holds
-        them back), five unio tools by name, no repository: no code can reach a query."""
+        them back), five unio tools by name, no repository: no code can reach a query.
+        With `files`, a folder of its own, Write confined to it."""
+        tools = [*web, *(["Write"] if files else [])]
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
             "--settings", self.settings_arg(),
-            "--tools", ",".join(web),
-            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web]),
+            "--tools", ",".join(tools),
+            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web, *([files_rule(files)] if files else [])]),
             "--disallowedTools", ",".join([*RESEARCH_DENIED, *(
                 f"WebFetch(domain:{host})" for host in self.fetch_denied() if "WebFetch" in web)]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
@@ -3442,7 +3454,7 @@ class Runner:
             proc.wait()
 
     def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False, research=None,
-                    timeout=None):
+                    timeout=None, files=None):
         """`review` is a project id: the session then reviews that project, with
         its own scope, tools and limits, and no item. `needs` makes it a needs
         check: no scope header, two tools, its own limits. `research`, the web
@@ -3465,9 +3477,9 @@ class Runner:
         else:
             headers.update(scope_headers(item, claim))
             if research is not None:
-                argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
-                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS, builtin=set(research),
-                            refused=RESEARCH_INIT_REFUSED)
+                argv, timeout = self.research_args(mcp_path, research, files), timeout or self.cfg.research_timeout
+                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS,
+                            builtin={*research, *(["Write"] if files else [])}, refused=RESEARCH_INIT_REFUSED)
                 s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
@@ -4206,12 +4218,21 @@ class Runner:
         no_web, left = rest
         web = () if no_web else tuple(self.cfg.web_tools)
         timeout = min(self.cfg.research_timeout, (left - RESEARCH_MARGIN).total_seconds())
-        info["out"] = run_dir / f"attempt-{claim['attempt']}-{str(claim.get('claimId') or 'unnamed')[:8]}-research"
+        claim8 = str(claim.get("claimId") or "unnamed")[:8]
+        info["out"] = run_dir / f"attempt-{claim['attempt']}-{claim8}-research"
+        # Fresh for each attempt, so a retry can never attach what an earlier one wrote.
+        files = info["files"] = run_dir / "work" / f"files-{claim8}"
+        remove_tree(files)
+        files.mkdir(parents=True, exist_ok=True)
         info["log"].update(noWeb=no_web or None, timeoutS=int(timeout))
         facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
-                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
+                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question"),
+                 "files": files}
         prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
-        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
+        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout, files=files)
+        if s.refused.get("Write"):
+            # The run goes on without files; the answer offers one instead.
+            self.state.log("files_unavailable", key=item.get("key"), error=s.refused["Write"])
         v = self.classify(s, timeout=timeout)
         if v.kind == "research":
             v = Verdict("fail", cause="no_outcome", error="a research run asked for research")

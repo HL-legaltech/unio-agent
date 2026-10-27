@@ -461,7 +461,7 @@ class Run(HomeCase):
         self.assertEqual(self.once("research"), 0)
         session, = self.sessions()
         argv = session["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
         self.assertTrue(argv[argv.index("--append-system-prompt-file") + 1].endswith("researcher.md"))
         self.assertIn("Research limits:", session["prompt"])
         self.assertEqual(session["headers"], ["Authorization", "X-Unio-Inbox-Claim", "X-Unio-Inbox-Item"])
@@ -1011,3 +1011,25 @@ class Settlement(HomeCase):
         api.settle = lambda method, path, body, key, timeout=20: (keys.append(key), api.call(method, path, body))[1]
         r.settle(api, "complete", {"key": "k"}, {"claimId": "c"}, outcome="replied", note="n")
         self.assertEqual(keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:plain"])
+
+
+class FilesProfile(HomeCase):
+    def test_write_is_confined_to_the_folder(self):
+        self.profile("org_test")
+        r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        argv = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"), Path("/state/runs/k/work/files-abcdefgh"))
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertEqual(allowed[-1], inbox.files_rule(Path("/state/runs/k/work/files-abcdefgh")))
+
+    def test_the_rule_on_each_system(self):
+        self.assertEqual(inbox.files_rule(Path("/home/u/state/work/files-abcdefgh"), windows=False),
+                         "Edit(//home/u/state/work/files-abcdefgh/**)")
+        self.assertEqual(inbox.files_rule(PureWindowsPath(r"C:\Users\U\AppData\Local\unio\work\files-abcdefgh"),
+                                          windows=True),
+                         "Edit(//c/Users/U/AppData/Local/unio/work/files-abcdefgh/**)")
+
+    def test_the_prompt_names_the_folder(self):
+        facts = {"web": ("WebSearch",), "minutes": 13, "turns": 60, "files": Path("/w/files-abcdefgh")}
+        text = inbox.build_prompt(mention(), [], 1, research=facts)
+        self.assertIn(f"Files: write only into {Path('/w/files-abcdefgh')}, and only when the \"Files\" rules", text)
