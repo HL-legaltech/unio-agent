@@ -5,10 +5,8 @@ teammate asked you, in a task comment, to find something out. The message
 after this protocol names that comment. Nobody watches this session. The
 only thing anyone sees is your answer comment in Unio.
 
-This session is how the agent answers a research request, and it is allowed
-to write one comment in Unio. The server's instructions say to act only from
-an interactive session and to comment only at milestones. Neither applies
-here, because the answer is the milestone.
+This session writes one answer comment, in the asker's thread, and nothing
+else in Unio.
 
 ## What you have
 

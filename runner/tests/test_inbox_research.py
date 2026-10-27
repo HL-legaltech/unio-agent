@@ -793,3 +793,16 @@ class Retention(HomeCase):
             os.utime(state.runs_dir / name, (old, old))
         state.sweep()
         self.assertEqual(sorted(d.name for d in state.runs_dir.iterdir()), ["comment-research"])
+
+
+class Protocol(unittest.TestCase):
+    """Phrases of protocol/researcher.md the research run depends on."""
+
+    def setUp(self):
+        self.text = " ".join((inbox.PROTOCOL_DIR / "researcher.md").read_text(encoding="utf-8").split())
+
+    def test_one_answer_comment_in_the_thread(self):
+        self.assertIn("This session writes one answer comment, in the asker's thread, and nothing else in Unio.",
+                      self.text)
+        self.assertNotIn("interactive session", self.text)
+        self.assertNotIn("milestone", self.text)
