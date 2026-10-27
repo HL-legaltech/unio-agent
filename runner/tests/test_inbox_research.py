@@ -67,3 +67,30 @@ class Subagents(unittest.TestCase):
                 {"type": "tool_result", "tool_use_id": "a", "content": "{}"}]}},
         ])
         self.assertEqual(s.succeeded, {"mcp__unio__create_comment"})
+
+
+class Quota(unittest.TestCase):
+    def test_both_windows_from_one_event(self):
+        s = read(fixture("subagent-p1.jsonl"))
+        self.assertEqual(s.rate_limits["seven_day"], {"utilization": 0.89, "resetsAt": "2026-10-28T12:00:00Z"})
+        self.assertEqual(s.rate_limits["five_hour"]["utilization"], 0.19)
+
+    def test_one_window_without_unified_windows(self):
+        event = {"type": "rate_limit_event", "rate_limit_info": {
+            "rateLimitType": "five_hour", "utilization": 0.93, "resetsAt": 1793117400}}
+        self.assertEqual(inbox.rate_limits(event), {"five_hour": {"utilization": 0.93,
+                                                                  "resetsAt": "2026-10-27T16:10:00Z"}})
+        self.assertEqual(inbox.rate_limits({"rate_limit_info": {"rateLimitType": "seven_day",
+                                                                "utilization": "high"}}), {})
+
+    def test_health_keeps_a_fresh_reading_only(self):
+        s = inbox.Session()
+        s.rate_limits = {"seven_day": {"utilization": 0.91, "resetsAt": "2026-10-28T00:00:00Z"}}
+        h = {}
+        at = inbox.parse_iso("2026-10-27T12:00:00Z")
+        inbox.note_quota(h, s, at)
+        self.assertEqual(h["quota"]["seven_day"]["at"], "2026-10-27T12:00:00Z")
+        used = inbox.quota_used(h, "seven_day", at + inbox.timedelta(minutes=29))
+        self.assertEqual(used, (0.91, inbox.parse_iso("2026-10-28T00:00:00Z")))
+        self.assertIsNone(inbox.quota_used(h, "seven_day", at + inbox.timedelta(minutes=31)))
+        self.assertIsNone(inbox.quota_used(h, "five_hour", at))

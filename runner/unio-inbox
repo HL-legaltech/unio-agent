@@ -197,6 +197,10 @@ PRESENCE_SPACING = 11
 PROGRESS_SPACING = 3
 STATUS_TIMEOUT = 3
 TOO_LARGE_NOTE = "too large to answer automatically"
+# The subscription windows a rate_limit_event reports. A reading older than
+# QUOTA_FRESH says nothing about now: the windows roll.
+QUOTA_WINDOWS = ("five_hour", "seven_day")
+QUOTA_FRESH = timedelta(minutes=30)
 # The writing languages GET /agents/me can name. What the runner posts itself
 # comes in each of them; anything else it gets is read as English.
 LANGUAGE_NAMES = {"en": "English", "pt-BR": "Brazilian Portuguese"}
@@ -1712,6 +1716,46 @@ def usage_reset(text, now=None):
     return at if at > now else None
 
 
+def rate_limits(event):
+    """{window: {utilization, resetsAt}} for five_hour and seven_day from a
+    rate_limit_event. Measured on 2.1.311: rate_limit_info names one window
+    (rateLimitType) and, under unifiedWindows, every window it knows;
+    resetsAt is epoch seconds."""
+    info = event.get("rate_limit_info") if isinstance(event.get("rate_limit_info"), dict) else {}
+    windows = dict(info.get("unifiedWindows")) if isinstance(info.get("unifiedWindows"), dict) else {}
+    if info.get("rateLimitType") in QUOTA_WINDOWS and info.get("rateLimitType") not in windows:
+        windows[info["rateLimitType"]] = info
+    found = {}
+    for name in QUOTA_WINDOWS:
+        w = windows.get(name)
+        used = w.get("utilization") if isinstance(w, dict) else None
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not 0 <= used <= 10:
+            continue
+        reset = w.get("resetsAt")
+        at = datetime.fromtimestamp(reset, timezone.utc) if isinstance(reset, (int, float)) and \
+            not isinstance(reset, bool) and 0 < reset < 10**11 else None
+        found[name] = {"utilization": float(used), "resetsAt": iso(at)}
+    return found
+
+
+def note_quota(h, s, now=None):
+    """health.json's quota: each window a session reported, with when it was read."""
+    if not s.rate_limits:
+        return
+    quota = h["quota"] = h["quota"] if isinstance(h.get("quota"), dict) else {}
+    for name, window in s.rate_limits.items():
+        quota[name] = {**window, "at": iso(now or utcnow())}
+
+
+def quota_used(h, name, now):
+    """(utilization, resetsAt) of a window read in the last QUOTA_FRESH, else None."""
+    w = (h.get("quota") or {}).get(name) if isinstance(h.get("quota"), dict) else None
+    at = parse_iso(w.get("at")) if isinstance(w, dict) else None
+    if not at or now - at > QUOTA_FRESH or not isinstance(w.get("utilization"), (int, float)):
+        return None
+    return float(w["utilization"]), parse_iso(w.get("resetsAt"))
+
+
 def written_outcome(succeeded):
     """What the session's successful tool calls amount to, by the protocol's definitions."""
     if succeeded & ACTING_WRITES:
@@ -2452,6 +2496,8 @@ class Session:
         self.timed_out = False
         self.interrupted = False
         self.stderr_tail = ""
+        # The subscription's windows as the last rate_limit_event gave them (rate_limits()).
+        self.rate_limits = {}
 
     @property
     def bad_init(self):
@@ -2789,6 +2835,8 @@ class Runner:
                             made = made_project(block.get("content"))
                             if made and made not in s.projects:
                                 s.projects.append(made)
+            elif kind == "rate_limit_event":
+                s.rate_limits.update(rate_limits(event))
             elif kind == "result":
                 s.result = event
 
@@ -3097,6 +3145,7 @@ class Runner:
         usd = self.session_cost(s)
         if s.started:
             h.setdefault("sessions", []).append({"at": iso(started_at), "usd": usd})
+        note_quota(h, s)
         stats = {"attempt": attempt, "claimId": claim.get("claimId"), "run": f"{run_dir.name}/{out.name}",
                  "durationMs": int((time.monotonic() - started) * 1000),
                  "costUsd": ev.get("total_cost_usd"), "costAssumedUsd": usd if s.started and not s.result else None,
@@ -3684,6 +3733,7 @@ class Runner:
         usd = self.session_cost(s, cfg.review_max_budget_usd)
         if s.started:
             h.setdefault("sessions", []).append({"at": iso(started_at), "usd": usd, "kind": "review"})
+        note_quota(h, s)
         now = utcnow()
         outcome, reason, error = review_outcome(s, v)
         tried = POST_UPDATE in s.tool_uses.values()
@@ -4307,6 +4357,7 @@ class Runner:
             h.setdefault("sessions", []).append({"at": iso(now), "usd": usd, "kind": "needs"})
         elif iso(now) in data["judgeRuns"]:
             data["judgeRuns"].remove(iso(now))
+        note_quota(h, s)
         others = sorted({name for name in s.tool_uses.values() if name not in NEEDS_TOOLS}) + foreign_reads(s, view)
         ticked, reason, error = None, None, None
         if v and v.kind == "release":
