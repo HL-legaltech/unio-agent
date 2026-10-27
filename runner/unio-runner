@@ -1115,14 +1115,16 @@ def project_status_words(block):
     if not block:
         return "sem informação ainda (o serviço escreve isso depois da primeira volta)"
     if block.get("configError"):
-        return "erro na configuração: %s" % clean(str(block["configError"]), 160)
+        # The raw message is English and stays in --json; people get where to look.
+        return ("parado por um valor inválido de UNIO_STATUS, UNIO_STATUS_INTERVAL ou UNIO_STATUS_DONE_AFTER "
+                "no arquivo env do perfil")
     mode = block.get("mode")
     if mode not in ("on", "observe"):
         return "desligado (UNIO_STATUS=on no arquivo env do perfil liga)"
     words = "ligado" if mode == "on" else "só registra, sem mudar nenhum projeto (UNIO_STATUS=on liga)"
     if block.get("lastPassError"):
-        return "%s; a última passagem falhou em %s: %s" % (
-            words, clean(str(block.get("lastPassErrorAt") or "?"), 40), clean(str(block["lastPassError"]), 160))
+        return "%s; a última passagem falhou em %s (o motivo está em %s logs)" % (
+            words, clean(str(block.get("lastPassErrorAt") or "?"), 40), self_command())
     if block.get("lastPassAt"):
         pending = block.get("pending")
         waiting = "" if not isinstance(pending, int) else (

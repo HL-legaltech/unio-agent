@@ -254,9 +254,10 @@ class Commands(unittest.TestCase):
              "status dos projetos: ligado; última passagem em 2026-10-27T12:00:00Z, 2 projetos esperando"),
             ({"mode": "on", "lastPassAt": "2026-10-27T12:00:00Z", "lastPassError": "unio_unavailable: 503",
               "lastPassErrorAt": "2026-10-27T12:00:00Z"},
-             "status dos projetos: ligado; a última passagem falhou em 2026-10-27T12:00:00Z: unio_unavailable: 503"),
+             "status dos projetos: ligado; a última passagem falhou em 2026-10-27T12:00:00Z (o motivo está em "),
             ({"mode": "off", "configError": "UNIO_STATUS_INTERVAL is not a number"},
-             "status dos projetos: erro na configuração: UNIO_STATUS_INTERVAL is not a number"),
+             "status dos projetos: parado por um valor inválido de UNIO_STATUS, UNIO_STATUS_INTERVAL ou "
+             "UNIO_STATUS_DONE_AFTER no arquivo env do perfil"),
         ]
         for block, line in cases:
             with self.subTest(block=block):
