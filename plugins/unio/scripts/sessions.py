@@ -18,6 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def main(argv):
     command, rest = (argv[0], argv[1:]) if argv else ("", [])
     if command == "resume":
+        # Its messages are Portuguese: a pipe on Windows would get them in
+        # the console's code page, whoever started it and with what flags.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
         from unio_sessions import resume
         return resume.main(rest)
     try:
