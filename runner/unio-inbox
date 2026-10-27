@@ -436,6 +436,12 @@ LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".lan")
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 # inet_aton's forms (127.1, 0x7f000001, 2130706433) reach the loopback as surely as 127.0.0.1.
 NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$")
+# A public name can point at a private address (127.0.0.1.nip.io, localtest.me), so
+# a name is also resolved here and each address checked. The lookup is not the
+# one WebFetch makes, so a name that rebinds between the two still passes: only
+# a PreToolUse hook (probe G2, unproven) would refuse the call before it goes.
+# A name that does not resolve here passes: WebFetch cannot reach it either.
+RESOLVE_TIMEOUT = 2
 # The server's claim lasts 15 minutes from claimed_at, and nothing extends it
 # (agent_inbox_receipt_service.ts). A research run ends RESEARCH_MARGIN before
 # that, for its closing writes and settlement, and does not start with less
@@ -1848,6 +1854,28 @@ def host_address(host):
     return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
 
 
+def private_ip(ip):
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified \
+        or ip.is_multicast or (ip.version == 4 and ip in CGNAT)
+
+
+def resolve_host(host):
+    """Every address a name resolves to on this computer, or () when it does not
+    resolve within RESOLVE_TIMEOUT: getaddrinfo takes no timeout of its own."""
+    found = []
+
+    def look():
+        try:
+            found.append({info[4][0] for info in socket.getaddrinfo(host, None)})
+        except (OSError, UnicodeError):
+            pass
+
+    lookup = threading.Thread(target=look, daemon=True)
+    lookup.start()
+    lookup.join(RESOLVE_TIMEOUT)
+    return tuple(sorted(found[0])) if found else ()
+
+
 def private_host(host, unio_hosts=()):
     """Why a host is off limits to WebFetch, or None for a public one."""
     host = str(host or "").lower().strip("[]")
@@ -1863,13 +1891,18 @@ def private_host(host, unio_hosts=()):
         return "no_host"
     ip = host_address(host)
     if ip is not None:
-        private = ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified \
-            or ip.is_multicast or (ip.version == 4 and ip in CGNAT)
-        return "private_address" if private else None
+        return "private_address" if private_ip(ip) else None
     if host == "localhost" or host.endswith(LOCAL_SUFFIXES) or "." not in host:
         return "local_name"
     if any(host == h or host.endswith("." + h) for h in unio_hosts):
         return "unio_host"
+    for address in resolve_host(host):
+        try:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            continue
+        if private_ip(ip.ipv4_mapped or ip if ip.version == 6 else ip):
+            return "private_resolution"
     return None
 
 

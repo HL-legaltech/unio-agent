@@ -4,13 +4,14 @@ import io
 import json
 import os
 import signal
+import socket
 import time
 import unittest
 from datetime import timedelta
 from pathlib import Path, PureWindowsPath
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox, write_fake_claude
+from inbox_support import REAL_RESOLVE_HOST, FakeUnio, HomeCase, inbox, write_fake_claude
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -532,6 +533,35 @@ class WebGuard(unittest.TestCase):
         for url in ("https://www.gov.example/ccivil_03/leis/l13709.htm", "http://8.8.8.8/",
                     "https://beef.cafe.example/", "https://unio.so.example/", "https://bücher.example/"):
             self.assertIsNone(inbox.fetch_problem(url, unio), url)
+
+    def test_a_public_name_for_a_private_address(self):
+        answers = {"127.0.0.1.nip.io": ("127.0.0.1",), "localtest.me": ("::1", "127.0.0.1"),
+                   "169.254.169.254.nip.io": ("169.254.169.254",), "mixed.example": ("93.184.215.14", "10.0.0.7"),
+                   "v6.example": ("::ffff:192.168.0.1",), "www.gov.example": ("93.184.215.14", "2606:2800::1")}
+        with mock.patch.object(inbox, "resolve_host", side_effect=lambda host: answers.get(host, ())):
+            for url in ("http://127.0.0.1.nip.io:3355/v1/", "http://localtest.me:3001/",
+                        "http://169.254.169.254.nip.io/latest/meta-data/", "https://mixed.example/",
+                        "https://v6.example/"):
+                self.assertEqual(inbox.fetch_problem(url), "private_resolution", url)
+            self.assertIsNone(inbox.fetch_problem("https://www.gov.example/lei"))
+            self.assertIsNone(inbox.fetch_problem("https://gone.example/"))
+
+    def test_the_lookup_gives_up_on_time(self):
+        def slow(*args):
+            time.sleep(5)
+            return []
+
+        found = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+                 (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 0, 0, 0))]
+        with mock.patch.object(socket, "getaddrinfo", return_value=found):
+            self.assertEqual(REAL_RESOLVE_HOST("localtest.me"), ("127.0.0.1", "::1"))
+        with mock.patch.object(socket, "getaddrinfo", side_effect=socket.gaierror("no name")):
+            self.assertEqual(REAL_RESOLVE_HOST("gone.example"), ())
+        with mock.patch.object(socket, "getaddrinfo", side_effect=slow), \
+                mock.patch.object(inbox, "RESOLVE_TIMEOUT", 0.2):
+            began = time.monotonic()
+            self.assertEqual(REAL_RESOLVE_HOST("slow.example"), ())
+            self.assertLess(time.monotonic() - began, 2)
 
     def checked(self, lines):
         s = inbox.Session(required=(), builtin={"WebSearch", "WebFetch"})

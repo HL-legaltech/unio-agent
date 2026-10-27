@@ -36,6 +36,9 @@ def load_runner():
 
 
 inbox = load_runner()
+# No test resolves a real name: the web check's lookup answers "does not resolve".
+REAL_RESOLVE_HOST = inbox.resolve_host
+inbox.resolve_host = lambda host: ()
 
 
 def non_utf8_locale(env):
