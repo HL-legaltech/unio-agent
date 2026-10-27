@@ -46,8 +46,8 @@ else in Unio.
    3 times in all. Each edit sends the whole comment. Your last edit removes
    the marker line. If you stop with the marker still there, the runner
    replaces it with a line saying the research stopped at its limit.
-7. End your final message with exactly one line of JSON and nothing after
-   it. Do not put it in a code block:
+7. Your final message is the JSON line alone: no summary of the answer
+   before it, nothing after it, and no code block:
 
    {"outcome":"replied","note":"ISS rates for software in four capitals"}
 

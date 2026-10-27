@@ -818,3 +818,6 @@ class Protocol(unittest.TestCase):
         self.assertIn("For a point of law, open the law itself (planalto.gov.br for federal law, the city's or "
                       "state's official legislation site otherwise) before citing it.", self.text)
         self.assertIn('Every link in the answer appears under "Sources".', self.text)
+
+    def test_the_final_message_is_the_json_line_alone(self):
+        self.assertIn("Your final message is the JSON line alone", self.text)
