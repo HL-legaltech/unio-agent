@@ -94,3 +94,45 @@ class Quota(unittest.TestCase):
         self.assertEqual(used, (0.91, inbox.parse_iso("2026-10-28T00:00:00Z")))
         self.assertIsNone(inbox.quota_used(h, "seven_day", at + inbox.timedelta(minutes=31)))
         self.assertIsNone(inbox.quota_used(h, "five_hour", at))
+
+
+def use(n, name, args, result=None, structured=None, error=False):
+    """A tool call and its answer, as the stream prints them."""
+    lines = [{"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": f"t{n}", "name": name, "input": args}]}}]
+    answer = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": f"t{n}", "is_error": error, "content": result or "ok"}]}}
+    if structured is not None:
+        answer["tool_use_result"] = structured
+    return lines + [answer]
+
+
+def fetch(n, url, code=200, final=None):
+    return use(n, "WebFetch", {"url": url, "prompt": "p"},
+               structured={"bytes": 10, "code": code, "codeText": "OK", "result": "r", "url": final or url})
+
+
+class Usage(unittest.TestCase):
+    def test_web_counts(self):
+        s = read([*use(1, "WebSearch", {"query": "aliquota iss", "mode": "standard"}),
+                  *fetch(2, "https://www.planalto.gov.br/a"), *fetch(3, "https://portal.stf.jus.br/t", 504),
+                  *fetch(4, "https://www.planalto.gov.br/a"),
+                  *use(5, "WebFetch", {"url": "https://x.example/"}, "connect ECONNREFUSED", "Error: x", True)])
+        self.assertEqual(s.web.counts(), {"searches": 1, "fetches": 4, "sources": 1})
+        self.assertEqual(s.web.sources, ["https://www.planalto.gov.br/a"])
+        self.assertEqual(s.step, "researching")
+
+    def test_a_redirect_is_kept_where_it_landed(self):
+        s = read(fetch(1, "https://a.example/old", 200, "https://b.example/new"))
+        self.assertEqual(s.web.sources, ["https://b.example/new"])
+
+    def test_usage_from_the_result(self):
+        result = json.loads(fixture("subagent-p1.jsonl")[-1])
+        usage = inbox.run_usage(result)
+        self.assertEqual(usage["model"], "claude-opus-5-5")
+        self.assertEqual(usage["turns"], 3)
+        self.assertEqual(usage["costUsd"], result["total_cost_usd"])
+        self.assertFalse(usage["estimated"])
+        self.assertGreater(usage["inputTokens"], 0)
+        self.assertEqual(inbox.run_usage({}, 3.0), {"costUsd": 3.0, "estimated": True})
+        self.assertIsNone(inbox.run_usage(None))

@@ -1783,6 +1783,28 @@ def session_text(s):
     return ev.get("result") if isinstance(ev.get("result"), str) else "; ".join(map(str, ev.get("errors") or []))
 
 
+def run_usage(ev, assumed_usd=None):
+    """What a session spent, from its result event: the model that cost the
+    most, tokens summed over every model (the Haiku calls behind WebSearch and
+    WebFetch included), the list-price cost and its turns. A session stopped
+    before its result counts `assumed_usd`, marked estimated."""
+    if not isinstance(ev, dict) or not ev:
+        return {"costUsd": assumed_usd, "estimated": True} if assumed_usd is not None else None
+    models = {name: m for name, m in (ev.get("modelUsage") or {}).items() if isinstance(m, dict)} \
+        if isinstance(ev.get("modelUsage"), dict) else {}
+
+    def total(field):
+        values = [m.get(field) for m in models.values()]
+        return sum(v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)) if models else None
+
+    return {
+        "model": max(models, key=lambda name: models[name].get("costUSD") or 0) if models else None,
+        "inputTokens": total("inputTokens"), "outputTokens": total("outputTokens"),
+        "cacheReadTokens": total("cacheReadInputTokens"), "cacheWriteTokens": total("cacheCreationInputTokens"),
+        "costUsd": ev.get("total_cost_usd"), "turns": ev.get("num_turns"), "estimated": False,
+    }
+
+
 def made_project(content):
     """'[name](url)' of the project a create_project result names, or None."""
     text = result_text(content)
@@ -2498,10 +2520,51 @@ class Session:
         self.stderr_tail = ""
         # The subscription's windows as the last rate_limit_event gave them (rate_limits()).
         self.rate_limits = {}
+        self.web = WebTrack()
 
     @property
     def bad_init(self):
         return bool(self.unexpected_tools or self.unio_unavailable)
+
+
+class WebTrack:
+    """What a session did on the web: its searches, its page reads, and each
+    page's address and HTTP status as WebFetch answered (the address after
+    any redirect, when the answer names one)."""
+
+    def __init__(self):
+        self.searches = 0
+        self.fetches = 0
+        self.asked = {}
+        self.fetched = {}
+
+    def use(self, block):
+        name, args = block.get("name"), block.get("input") if isinstance(block.get("input"), dict) else {}
+        if name == "WebSearch":
+            self.searches += 1
+        elif name == "WebFetch":
+            self.fetches += 1
+            if isinstance(args.get("url"), str):
+                self.asked[block.get("id")] = args["url"]
+
+    def answer(self, use_id, result):
+        """A WebFetch answer: {bytes, code, codeText, result, durationMs, url} on 2.1.311,
+        a plain error string when the fetch failed or was refused."""
+        url = self.asked.get(use_id)
+        if url is None or not isinstance(result, dict):
+            return
+        code = result.get("code")
+        final = result.get("url") if isinstance(result.get("url"), str) else url
+        if isinstance(code, int) and not isinstance(code, bool):
+            self.fetched[final] = code
+
+    @property
+    def sources(self):
+        """The addresses read with a 2xx answer, first read first."""
+        return [url for url, code in self.fetched.items() if 200 <= code < 300]
+
+    def counts(self):
+        return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.sources)}
 
 
 class Verdict:
@@ -2818,6 +2881,7 @@ class Runner:
                         name = str(block.get("name"))
                         s.tool_uses[block.get("id")] = name
                         s.tool_inputs[block.get("id")] = block.get("input") or {}
+                        s.web.use(block)
                         filing = name == "mcp__unio__create_task" and (block.get("input") or {}).get("project")
                         s.step = "updating_project" if filing else s.steps.get(name, s.step)
                     elif block.get("type") == "tool_result" and block.get("is_error"):
@@ -2828,6 +2892,9 @@ class Runner:
                         name = s.tool_uses.get(block.get("tool_use_id"))
                         if name:
                             s.succeeded.add(name)
+                        if name == "WebFetch" and len(content) == 1:
+                            # Its structured answer sits beside the message, one per event.
+                            s.web.answer(block.get("tool_use_id"), event.get("tool_use_result"))
                         if name == POST_UPDATE:
                             health = (s.tool_inputs.get(block.get("tool_use_id")) or {}).get("health")
                             s.posted_health = health if isinstance(health, str) else s.posted_health
@@ -3153,7 +3220,8 @@ class Runner:
                  "claudeCodeVersion": s.version, "reactionError": reaction_error,
                  "steps": progress.count or None, "progressError": progress.error,
                  "repos": [f"{x['repo']}@{x['commit']}" for x in snapshots] or None,
-                 "projects": len(s.projects) or None}
+                 "projects": len(s.projects) or None,
+                 "usage": run_usage(ev, usd if s.started else None), "web": s.web.counts() if s.started else None}
         if len(s.projects) > 1:
             self.state.log("warn", **base, run=stats["run"], detail="create_project called more than once",
                            projects=s.projects)
