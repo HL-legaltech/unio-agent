@@ -2,9 +2,12 @@
 
 Proves, on whatever system runs it, what only a real session shows: that the
 SessionStart hook runs and its context reaches the model, that the scripts
-/unio:doctor and /unio:connect inject are allowed to run, and that the MCP
+/unio:doctor and /unio:connect inject are allowed to run, that the MCP
 header helper sends each folder its own workspace's token, and no token at all
-where its workspace has none.
+where its workspace has none, and that the session status hook, with the
+Python running this test, shows each session to Unio with its folder's token:
+its presence, and the row its watcher sends, which only a watcher tied to the
+Claude Code process sends.
 
 Three folders under a throwaway HOME:
   "Proj Alpha"  mapped to org_Alpha in ~/.config/unio/projects, written in the
@@ -32,6 +35,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -152,7 +156,7 @@ def main():
         mcp["mcpServers"]["unio"]["url"] = base + "/v1/mcp"
         write(mcp_path, json.dumps(mcp, indent=2) + "\n")
         trace = os.path.join(root, "trace.log")
-        for name in ("session-start.sh", "mcp-headers.sh", "doctor.sh"):
+        for name in ("session-start.sh", "mcp-headers.sh", "doctor.sh", "session-status.sh"):
             path = os.path.join(plugin, "scripts", name)
             with open(path, encoding="utf-8") as f:
                 lines = f.read().split("\n")
@@ -170,6 +174,9 @@ def main():
             "DISABLE_AUTOUPDATER": "1",
             "DISABLE_TELEMETRY": "1",
             "UNIO_E2E_TRACE": trace,
+            # The session status's state, with forward slashes, which both
+            # Git Bash and a Windows Python read.
+            "XDG_STATE_HOME": os.path.join(root, "state").replace("\\", "/"),
         })
         if WINDOWS:
             env["PATH"] = windows_path_without_git_tools(env.get("PATH", ""))
@@ -220,6 +227,66 @@ def main():
         def mcp_tokens(entries):
             return {e.get("token") for e in entries if e.get("path") == "/v1/mcp"}
 
+        sessions_dir = os.path.join(root, "state", "unio", "sessions")
+
+        def check_status(label, done, token, folder):
+            """The session's presence and row reach the fake API with the
+            folder's token, and name no folder. They come from detached
+            processes, which may still be sending after claude exits."""
+            try:
+                session = json.loads(done.stdout).get("session_id") or ""
+            except ValueError:
+                session = ""
+            check(bool(session), "%s: claude -p named its session" % label, done.stdout[-500:])
+            if not session:
+                return session
+            pid = str(uuid.uuid5(uuid.NAMESPACE_URL, "unio-session:" + session))
+            puts = []
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                puts = [e for e in read_log(log_file, 0)[0] if e.get("method") == "PUT"
+                        and e.get("path") in ("/v1/agents/presence/" + pid, "/v1/agents/sessions/" + pid)]
+                if any(e["path"].startswith("/v1/agents/sessions/") for e in puts) and \
+                        any((e.get("body") or {}).get("state") == "ended" for e in puts):
+                    break
+                time.sleep(0.5)
+            presence = [e for e in puts if e["path"].startswith("/v1/agents/presence/")]
+            rows = [e for e in puts if e["path"].startswith("/v1/agents/sessions/")]
+            check(bool(presence) and all((e.get("body") or {}).get("kind") == "session" for e in presence),
+                  "%s: the session's presence reached Unio" % label, "PUTs: %s" % puts)
+            check(any((e.get("body") or {}).get("state") == "ended" for e in presence),
+                  "%s: the session's end reached Unio" % label,
+                  "states: %s" % [(e.get("body") or {}).get("state") for e in presence])
+            check(any((e.get("body") or {}).get("claudeSessionId") == session for e in rows),
+                  "%s: the session's watcher sent its row" % label,
+                  "PUTs: %s; trace: %s" % ([e["path"] for e in puts], sorted(os.listdir(sessions_dir))
+                                           if os.path.isdir(sessions_dir) else "no sessions folder"))
+            check(bool(puts) and {e.get("token") for e in puts} == {token},
+                  "%s: every report carried the folder's token" % label,
+                  "tokens seen: %s" % sorted(t[:12] if t else "<none>" for t in {e.get("token") for e in puts}))
+            sent = json.dumps([e.get("body") for e in puts])
+            check(folder not in sent and folder.replace("\\", "/") not in sent and
+                  os.path.basename(folder) not in sent,
+                  "%s: no report named the folder" % label, sent[:800])
+            return session
+
+        def watcher_ended(session):
+            path = os.path.join(sessions_dir, session + ".watch.json")
+            deadline = time.time() + 30
+            state = {}
+            while time.time() < deadline:
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        state = json.load(f)
+                except (OSError, ValueError):
+                    state = {}
+                if state.get("ended"):
+                    return True
+                time.sleep(0.5)
+            check(False, "the watcher of %s ended with its session" % session,
+                  "watch.json: %s" % {k: state.get(k) for k in ("ended", "endedBy", "lastError", "pid")})
+            return False
+
         # 1. A folder mapped to its own workspace: /unio:doctor and the helper.
         done, entries = run(folders["Proj Alpha"], "/unio:doctor")
         check(done.returncode == 0, "alpha: claude -p exits 0",
@@ -232,12 +299,15 @@ def main():
         check("core api: token aceito" in report, "alpha: the doctor's API check passed", report[-800:])
         check("ok core folder:" in report, "alpha: the doctor confirms the connection sees this folder",
               report[-800:])
+        check("ok core sessions:" in report, "alpha: the doctor finds the Python the session status runs on",
+              report[-800:])
         tokens = mcp_tokens(entries)
         check(tokens == {TOKEN_A}, "alpha: every MCP request carried org_Alpha's token",
               "tokens seen: %s" % sorted(t[:12] if t else "<none>" for t in tokens))
         clients = {e.get("client") for e in entries if e.get("path") == "/v1/mcp"}
         check(all(c and c.startswith("claude-code/") for c in clients),
               "alpha: MCP requests named the plugin's version", "clients seen: %s" % sorted(map(str, clients)))
+        alpha_session = check_status("alpha", done, TOKEN_A, folders["Proj Alpha"])
         seen = glob.glob(os.path.join(config, "plugins", "data", "*", "seen-version"))
         check(bool(seen), "alpha: the SessionStart hook ran (seen-version written)",
               "plugin data: %s" % glob.glob(os.path.join(config, "plugins", "data", "*", "*")))
@@ -248,6 +318,7 @@ def main():
         tokens = mcp_tokens(entries)
         check(tokens == {TOKEN_B}, "beta: every MCP request carried the default workspace's token",
               "tokens seen: %s" % sorted(t[:12] if t else "<none>" for t in tokens))
+        beta_session = check_status("beta", done, TOKEN_B, folders["beta"])
 
         # 3. A folder whose workspace has no token: no token at all, and the
         #    hook tells the model so.
@@ -265,6 +336,9 @@ def main():
         check("Para conectar este computador ao Unio" in texts(entries),
               "connect: the instructions reached the model",
               texts(entries)[-800:] or (done.stderr or done.stdout)[-1500:])
+        for session in (alpha_session, beta_session):
+            if session:
+                watcher_ended(session)
         try:
             with open(trace, encoding="utf-8") as f:
                 print("trace:\n  " + f.read().strip().replace("\n", "\n  "))
