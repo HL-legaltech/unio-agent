@@ -33,6 +33,18 @@ their repositories written in for each run.
 The runner tells Unio what it is doing (idle, the item and step it works on,
 or the problem that holds it), so the workspace sees it on the agent's page.
 
+Research: a task comment whose first words ask to find something out
+(pesquise, levante, compare, research, look up...), a reply in a thread the
+agent answered with research, or an item a reply run hands over with
+{"outcome":"research"} gets a research run under the same claim: the web tools
+UNIO_INBOX_WEB allows, five unio tools by name, no repository, and the
+researcher protocol. It posts one answer early and refines it; the runner
+closes an answer the run left unfinished, or replies with the pages it read.
+A run ends 90 s before the claim's 15 minutes do. It waits while the Claude
+session window is 90 % used, after 8 research runs in 24 h, or once all runs
+spent 60 % of UNIO_INBOX_DAILY_BUDGET_USD; with the weekly window 90 % used it
+answers without the web. Reply runs never hold the web themselves.
+
 Project reviews, with UNIO_REVIEW=on: inside a daily look window,
 when a poll found no item, the runner asks Unio which projects changed since
 their latest update and runs one session per chosen project, between inbox
@@ -99,8 +111,11 @@ UNIO_INBOX_INTERVAL (30 s), UNIO_INBOX_TIMEOUT (600 s), UNIO_INBOX_MAX_TURNS (30
 UNIO_INBOX_MAX_BUDGET_USD (1, per session), UNIO_INBOX_DAILY_BUDGET_USD (15, over
 any 24 h), UNIO_INBOX_HOURLY_SESSIONS (20), UNIO_INBOX_MODEL, UNIO_INBOX_CLAUDE
 and UNIO_INBOX_GH (the executables; default: claude and gh on PATH).
-UNIO_INBOX_WEB (off, search or on; default off): search lets an inbox run use web
-search, on also lets it read the pages it finds.
+UNIO_INBOX_WEB (off, search or on; default off): search lets a research run use web
+search, on also lets it read the pages it finds; off means no research run at all.
+UNIO_INBOX_RESEARCH_MAX_TURNS (60), UNIO_INBOX_RESEARCH_MAX_BUDGET_USD (3, per run),
+UNIO_INBOX_RESEARCH_DAILY_RUNS (8 over any 24 h) and UNIO_INBOX_RESEARCH_MODEL
+(default: the inbox's): see Research.
 UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
 UNIO_INBOX_MEMORY_FLOOR_GIB (a profile on Linux; default none): GiB of memory
 available below which answers wait.
@@ -152,7 +167,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")

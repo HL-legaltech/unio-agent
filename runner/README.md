@@ -75,6 +75,12 @@ The settings folder holds `runner-token` (readable by you alone), `repos.json` (
 
 The definitions come from the templates in [`services/`](services), and setup writes them again each time it runs. It never touches a `unio-inbox.service` left by a setup made by hand.
 
+## Research
+
+With `UNIO_INBOX_WEB=search` or `on` in the settings folder's `env`, a mention in a task comment that asks to find something out ("pesquise as alíquotas…", "levante", "compare", "research", "look up"), a reply in a thread the agent answered with research, or a question an ordinary answer finds needs the web, gets a research run. It searches the web (`search`), and reads the pages it finds (`on`), on the plan of the person whose computer runs the service. It answers in the thread as soon as it has a verified finding, with its sources and how confident it is, then refines the same comment. A run lasts at most about 13 minutes, inside the 15 minutes Unio holds a request for it; one that stops early leaves what it found, and a line saying where it stopped.
+
+Research protects the plan: it waits while Claude's five-hour window is 90% used, stops after 8 research runs in 24 hours or once 60% of `UNIO_INBOX_DAILY_BUDGET_USD` is spent, and answers without the web, saying so, while the weekly window is 90% used. `UNIO_INBOX_RESEARCH_MAX_TURNS` (60), `UNIO_INBOX_RESEARCH_MAX_BUDGET_USD` (3), `UNIO_INBOX_RESEARCH_DAILY_RUNS` (8) and `UNIO_INBOX_RESEARCH_MODEL` change its limits. A research run has no repository and only the Unio tools for its own task's thread; the service stops one whose searches or addresses carry a CPF, CNPJ, case number, e-mail address or the task's key, or that tries to read a page on the computer's own network. Project comments get no research: the answer points to a task. Research transcripts stay in the log folder for 30 days.
+
 ## Updates
 
 The service keeps its clone up to date: at start and every 6 hours, between answers, it fetches `main` and, when `runner/VERSION` there is newer and the clone has no local changes, fast-forwards and exits so the service manager starts the new version. It does the same, between answers, as soon as the clone holds a newer version, after `unio runner update` or another workspace's service moved it. `UNIO_RUNNER_AUTOUPDATE=off`, in the environment or the settings folder's `env`, turns that off; `unio runner update` then updates by hand.
