@@ -1039,6 +1039,7 @@ class FilesProfile(HomeCase):
     def test_write_is_confined_to_the_folder(self):
         self.profile("org_test")
         r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        r.state.ensure()
         argv = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"), Path("/state/runs/k/work/files-abcdefgh"))
         self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
