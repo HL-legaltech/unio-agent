@@ -627,6 +627,29 @@ class WebGuard(unittest.TestCase):
         self.assertEqual(s.violation, "tool mcp__unio__search_tasks")
         self.assertEqual(s.proc.stopped, 1)
 
+    def init(self, *tools):
+        s = inbox.Session(required=inbox.RESEARCH_REQUIRED, builtin={"WebSearch", "WebFetch"},
+                          refused=inbox.RESEARCH_INIT_REFUSED)
+        return read([{"type": "system", "subtype": "init", "tools": ["WebSearch", "WebFetch",
+                                                                       *inbox.RESEARCH_MCP_TOOLS, *tools],
+                      "mcp_servers": [{"name": "unio", "status": "connected"}]}], s)
+
+    def test_an_init_with_another_unio_write_releases(self):
+        s = self.init("mcp__unio__get_task", "mcp__unio__update_task")
+        self.assertEqual(s.unexpected_tools, ["mcp__unio__update_task"])
+        self.assertEqual(s.proc.stopped, 1)
+        v = inbox.Runner.__new__(inbox.Runner)._ended(s, inbox.utcnow(), 780)
+        self.assertEqual((v.kind, v.reason), ("release", "unexpected_tools"))
+        self.assertIn("none of its other writes", v.error)
+        for name in ("create_task", "create_project", "update_project", "create_label", "post_project_update",
+                     "create_project_comment", "create_milestone", "update_milestone", "remove_reaction"):
+            self.assertIn(f"mcp__unio__{name}", inbox.RESEARCH_INIT_REFUSED)
+
+    def test_an_init_with_an_unknown_read_passes(self):
+        s = self.init("mcp__unio__search_tasks", "mcp__unio__get_weather")
+        self.assertFalse(s.bad_init)
+        self.assertEqual(s.proc.stopped, 0)
+
     def test_a_private_fetch_stops_it(self):
         s = self.checked(use(1, "WebFetch", {"url": "http://127.0.0.2:9/"}))
         self.assertEqual(s.violation, "WebFetch private_address")

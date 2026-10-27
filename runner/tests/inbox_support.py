@@ -312,9 +312,12 @@ def post_comment(body):
 
 mode = os.environ.get("FAKE_CLAUDE_MODE") or ""
 builtin = [t for t in (value("--tools") or "").split(",") if t]
+# Claude Code leaves a tool its deny rules name out of the init.
+denied = set((value("--disallowedTools") or "").split(","))
 emit({"type": "system", "subtype": "init", "claude_code_version": "2.1.300",
-      "tools": builtin + ["mcp__unio__get_task", "mcp__unio__list_comments", "mcp__unio__create_comment",
-                          "mcp__unio__update_comment", "mcp__unio__add_reaction", "mcp__unio__update_task"],
+      "tools": builtin + [t for t in ("mcp__unio__get_task", "mcp__unio__list_comments", "mcp__unio__create_comment",
+                                      "mcp__unio__update_comment", "mcp__unio__add_reaction",
+                                      "mcp__unio__update_task") if t not in denied],
       "mcp_servers": [{"name": "unio", "status": "connected"}]})
 task = re.search(r"^Task: (\S+) \(id ([^)]+)\)", prompt, re.M)
 use(1, "mcp__unio__get_task", {"task": task.group(1)}, True, json.dumps({"id": task.group(2)}))

@@ -405,6 +405,10 @@ UNIO_READ_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
 RESEARCH_MCP_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
     "get_task", "list_comments", "create_comment", "update_comment", "add_reaction"))
 RESEARCH_REQUIRED = ("mcp__unio__get_task", "mcp__unio__create_comment")
+# A research init that lists one of these releases the item: the deny did
+# not hold. A read-only tool the server adds later is tolerated there, so it
+# cannot release every item; a call to it still stops the session.
+RESEARCH_INIT_REFUSED = tuple(name for name in UNIO_WRITE_TOOLS if name not in RESEARCH_MCP_TOOLS)
 RESEARCH_DENIED = tuple(name for name in dict.fromkeys([*UNIO_WRITE_TOOLS, *UNIO_READ_TOOLS])
                         if name not in RESEARCH_MCP_TOOLS)
 # A comment whose first words, its mentions and punctuation aside, ask to find
@@ -2941,12 +2945,13 @@ def build_needs_prompt(view, items, facts, today, zone, url=None, language="en")
 
 class Session:
     """One headless Claude Code run and what it printed. `required` must be
-    offered at init; `allowed` is every tool it may be offered (None: Read,
-    Grep, Glob and any unio tool)."""
+    offered at init; `allowed` is every tool it may be offered (None: the
+    `builtin` tools and any unio tool but those in `refused`)."""
 
-    def __init__(self, required=REQUIRED_TOOLS, allowed=None, steps=STEPS, builtin=BUILTIN_TOOLS):
+    def __init__(self, required=REQUIRED_TOOLS, allowed=None, steps=STEPS, builtin=BUILTIN_TOOLS, refused=()):
         self.required = required
         self.allowed = allowed
+        self.refused_at_init = set(refused)
         self.builtin = set(builtin)
         self.steps = steps
         self.tools = None
@@ -3283,7 +3288,7 @@ class Runner:
             headers.update(scope_headers(item, claim))
             if research is not None:
                 argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
-                s = Session(required=RESEARCH_REQUIRED, builtin=set(research))
+                s = Session(required=RESEARCH_REQUIRED, builtin=set(research), refused=RESEARCH_INIT_REFUSED)
                 s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
@@ -3460,7 +3465,8 @@ class Runner:
         s.tools = [str(t) for t in event.get("tools") or []]
         s.version = event.get("claude_code_version")
         if s.allowed is None:
-            s.unexpected_tools = [t for t in s.tools if t not in s.builtin and not t.startswith(UNIO_TOOL_PREFIX)]
+            s.unexpected_tools = [t for t in s.tools if t in s.refused_at_init
+                                  or (t not in s.builtin and not t.startswith(UNIO_TOOL_PREFIX))]
         else:
             s.unexpected_tools = [t for t in s.tools if t not in s.allowed]
         servers = {m.get("name"): m.get("status") for m in event.get("mcp_servers") or [] if isinstance(m, dict)}
@@ -3513,7 +3519,9 @@ class Runner:
             return Verdict("release", reason="claude_unavailable", error=s.start_error,
                            retry=now + MACHINE_PAUSE, pause=now + MACHINE_PAUSE)
         if s.unexpected_tools:
-            offered = "Read, Grep, Glob and the unio server" if s.allowed is None else ", ".join(sorted(s.allowed))
+            offered = ", ".join(sorted(s.allowed)) if s.allowed is not None else \
+                ", ".join([*sorted(s.builtin), "the unio server"]) + (" (none of its other writes)"
+                                                                       if s.refused_at_init else "")
             return Verdict("release", reason="unexpected_tools",
                            error=f"the session offered tools beyond {offered}: " + ", ".join(s.unexpected_tools),
                            detail=short(", ".join(s.unexpected_tools), 120),
