@@ -282,14 +282,18 @@ def report_presence(data, session):
         return
     want = wanted(data, session)
     if want:
-        request_presence(session, want)
+        request_presence(session, want, reopen=data.get("hook_event_name") == "SessionStart")
 
 
-def request_presence(session, want):
+def request_presence(session, want, reopen=False):
     with Locked(session, wait=1) as ok:
         if not ok:
             return
         p = read_presence(session)
+        # Checked again under the lock: a late background event read the
+        # state before SessionEnd wrote `ended`, and must not outvote it.
+        if not reopen and want["state"] != "ended" and (p.get("want") or {}).get("state") == "ended":
+            return
         now = time.time()
         if p.get("want") == want and (want["state"] == "ended" or now - p.get("requestedAt", 0) < PRESENCE_REPEAT):
             return

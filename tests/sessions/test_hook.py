@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from support import (ENTRY, HOOK_LIMIT, LAUNCHER, WINDOWS, Transcript, base_env, kill, presence_id, processes,
+from support import (ENTRY, HOOK_LIMIT, LAUNCHER, SCRIPTS, WINDOWS, Transcript, base_env, kill, presence_id, processes,
                      remove_tree, wait_for)
 import fake_api
 
@@ -209,6 +209,23 @@ class SessionPresence(HookCase):
         self.hook("SessionStart", source="resume")
         self.settled()
         self.assertEqual([b["state"] for b in self.bodies()], ["ended", "idle"], "a resume did not report")
+
+    def test_a_late_event_that_passed_the_end_check_still_cannot_outvote_the_end(self):
+        # It read the state before SessionEnd wrote `ended`, then took the
+        # lock after it: under the lock it must see the end and back off.
+        self.hook("SessionEnd", reason="exit")
+        self.settled()
+        late = ("import sys; sys.path.insert(0, %r); from unio_sessions import hook; "
+                "hook.request_presence(%r, {'state': 'idle'}, reopen=%s)")
+        def send(reopen):
+            subprocess.run([sys.executable, "-X", "utf8", "-I", "-c",
+                            late % (str(SCRIPTS), self.session, reopen)], env=self.env(), check=True, timeout=20)
+            self.settled()
+            time.sleep(0.5)
+            return [b["state"] for b in self.bodies()]
+
+        self.assertEqual(send(False), ["ended"], "a late idle outvoted the end")
+        self.assertEqual(send(True), ["ended", "idle"], "a new start could not reopen the session")
 
     def test_a_task_outside_the_agents_teams_still_shows_the_session(self):
         self.bind(task_id="99999999-0000-4000-8000-000000000000")
