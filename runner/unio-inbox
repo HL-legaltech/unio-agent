@@ -3223,6 +3223,7 @@ class Runner:
             h["lastPollAt"] = iso(now)
             self.review_status(h)
             self.needs_status(h)
+            self.status_status(h)
             left = h.pop("current", None)
             if isinstance(left, dict) and left.get("target"):
                 h.setdefault("orphans", []).append(left)
