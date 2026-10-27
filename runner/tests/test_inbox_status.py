@@ -96,6 +96,18 @@ class Switch(HomeCase):
                 self.assertIn(name, inbox.Config(dict(os.environ, UNIO_STATUS="on", **{name: value})).status_error)
 
 
+class PollHealth(StatusCase):
+    def test_a_poll_names_the_pass_mode_even_when_it_is_off(self):
+        # unio runner status reads this block; without it, "off" read as "no information yet".
+        self.legacy_token()
+        runner = inbox.Runner(inbox.Config(dict(os.environ)))
+        runner.state.ensure()
+        runner.poll()
+        health = json.loads(runner.state.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"]["mode"], "off")
+        self.assertNotIn("lastPassAt", health["status"])
+
+
 class Pass(StatusCase):
     """The pass as the single-machine service runs it with UNIO_STATUS=on."""
 
