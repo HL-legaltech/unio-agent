@@ -393,14 +393,20 @@ UNIO_WRITE_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
     "update_task", "create_task", "create_comment", "update_comment", "create_label", "add_reaction",
     "remove_reaction", "create_project", "update_project", "create_milestone", "update_milestone",
     "post_project_update", "create_project_comment"))
+# Every unio tool that only reads (the same source, 2026-10-27).
+UNIO_READ_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
+    "get_me", "get_task", "list_comments", "search_tasks", "list_inbox", "get_project", "list_project_comments",
+    "search_projects", "list_members", "get_team", "list_teams"))
 # Research on mention (protocol/researcher.md). The session gets these unio
-# tools by name: in -p mode a tool missing from --allowedTools cannot be
-# approved, so the server's other tools are refused, and the writes among
-# them are also denied by name.
+# tools by name, and every other tool the server registers is denied by
+# name, since deny wins over allow: a run that reads untrusted pages must not
+# reach another task, even to read it. A tool the server adds later is
+# caught in the stream (Runner._read), which stops the session.
 RESEARCH_MCP_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
     "get_task", "list_comments", "create_comment", "update_comment", "add_reaction"))
 RESEARCH_REQUIRED = ("mcp__unio__get_task", "mcp__unio__create_comment")
-RESEARCH_DENIED = tuple(name for name in UNIO_WRITE_TOOLS if name not in RESEARCH_MCP_TOOLS)
+RESEARCH_DENIED = tuple(name for name in dict.fromkeys([*UNIO_WRITE_TOOLS, *UNIO_READ_TOOLS])
+                        if name not in RESEARCH_MCP_TOOLS)
 # A comment whose first words, its mentions and punctuation aside, ask to find
 # something out goes straight to research; any other wording reaches it
 # through the reply run's {"outcome":"research"}. Matched on case- and
@@ -3371,6 +3377,10 @@ class Runner:
                         s.web.use(block)
                         if s.guard and not s.violation and name in ("WebSearch", "WebFetch"):
                             Runner._check_web(proc, s, name, block.get("input"))
+                        elif s.guard and not s.violation and name.startswith(UNIO_TOOL_PREFIX) \
+                                and name not in RESEARCH_MCP_TOOLS:
+                            s.violation = f"tool {name}"
+                            stop_group(proc)
                         filing = name == "mcp__unio__create_task" and (block.get("input") or {}).get("project")
                         s.step = "updating_project" if filing else s.steps.get(name, s.step)
                     elif block.get("type") == "tool_result" and block.get("is_error"):

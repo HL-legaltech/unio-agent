@@ -208,9 +208,11 @@ class Profile(HomeCase):
                          ("60", "3", "claude-sonnet-test"))
         self.assertEqual(value["--append-system-prompt-file"], str(inbox.PROTOCOL_DIR / "researcher.md"))
         denied = argv[argv.index("--disallowedTools") + 1].split(",")
-        for tool in ("mcp__unio__update_task", "mcp__unio__create_task", "mcp__unio__create_project"):
+        for tool in ("mcp__unio__update_task", "mcp__unio__create_task", "mcp__unio__create_project",
+                     "mcp__unio__search_tasks", "mcp__unio__list_project_comments", "mcp__unio__get_me"):
             self.assertIn(tool, denied)
-        self.assertNotIn("mcp__unio__create_comment", denied)
+        for tool in inbox.RESEARCH_MCP_TOOLS:
+            self.assertNotIn(tool, denied)
         self.assertNotIn("--add-dir", argv)
         self.assertEqual(argv[-1], "claude-sonnet-test", "the prompt goes on stdin")
 
@@ -572,6 +574,12 @@ class WebGuard(unittest.TestCase):
         s = self.checked([*use(1, "WebSearch", {"query": "ABC-1 prazo"}),
                           *use(2, "WebSearch", {"query": "ana@example.com"})])
         self.assertEqual(s.violation, "WebSearch task_key")
+        self.assertEqual(s.proc.stopped, 1)
+
+    def test_another_unio_tool_stops_it(self):
+        s = self.checked([*use(1, "mcp__unio__get_task", {"task": "ABC-1"}),
+                          *use(2, "mcp__unio__search_tasks", {"query": "cliente"})])
+        self.assertEqual(s.violation, "tool mcp__unio__search_tasks")
         self.assertEqual(s.proc.stopped, 1)
 
     def test_a_private_fetch_stops_it(self):
