@@ -104,6 +104,17 @@ class Resume(unittest.TestCase):
                 self.assertIn(f"claude --resume {sid}", p.stderr)
         self.assertFalse(self.log.exists())
 
+    def test_a_session_whose_starting_folder_is_unknown_is_never_resumed_elsewhere(self):
+        sid = str(uuid.uuid4())
+        path = self.projects / "-project" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "last-prompt"}) + "\n")
+        p = self.run_resume(sid)
+        self.assertEqual(p.returncode, 1)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn("não diz em que pasta ela começou", p.stderr)
+        self.assertFalse(self.log.exists(), "claude ran in a folder the session never started in")
+
     def test_a_task_finds_the_sessions_bound_to_it(self):
         sid = self.session(self.tmp / "work" / "backend")
         task = {"id": str(uuid.uuid4()), "key": "DEV-439", "url": "https://unio.so/app/tasks/DEV-439"}

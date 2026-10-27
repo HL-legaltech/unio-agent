@@ -9,7 +9,7 @@
 
 - As sessões do Claude Code aparecem na página do agente no Unio, em qualquer computador (macOS, Linux ou Windows): o que cada uma está fazendo, a tarefa, o uso por hora e, só para você, o comando que a retoma. Pasta e branch nunca saem do computador.
 - unio resume DEV-12 retoma a sessão que trabalhou na tarefa, na pasta em que ela começou.
-- Precisa do Python 3.9 ou mais novo; sem ele, nada é enviado e /unio:doctor diz como instalar.
+- Precisa do Python 3.9 ou mais novo; sem ele, nenhum status de sessão é enviado e /unio:doctor diz como instalar.
 
 ## 1.3.1
 
