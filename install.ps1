@@ -145,15 +145,25 @@ function Add-UserPath([string]$Folder) {
     return $true
 }
 
-# The sh.exe of Git for Windows, from git.exe's own folder: Git's cmd folder
-# is on the Path, its bin folder is not. $null without Git for Windows.
+# The sh.exe of Git for Windows, which is not on the Path; $null without Git
+# for Windows. git names its own install with --exec-path
+# (<root>/mingw64/libexec/git-core), whether the git on the Path is Git's
+# cmd\git.exe, its bin\git.exe or a shim such as Scoop's. A git that cannot
+# answer falls back to the folder above its own, Git's cmd layout.
 function Find-GitSh {
     $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $git) { return $null }
-    $gitRoot = Split-Path -Parent (Split-Path -Parent $git.Source)
-    foreach ($relative in @('bin\sh.exe', 'usr\bin\sh.exe')) {
-        $candidate = Join-Path $gitRoot $relative
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    $roots = @()
+    $exec = "$(& $git.Source --exec-path 2>$null)".Trim()
+    if ($LASTEXITCODE -eq 0 -and $exec) {
+        $roots += [IO.Path]::GetFullPath((Join-Path ($exec -replace '/', '\') '..\..\..'))
+    }
+    $roots += Split-Path -Parent (Split-Path -Parent $git.Source)
+    foreach ($root in $roots) {
+        foreach ($relative in @('bin\sh.exe', 'usr\bin\sh.exe')) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
     }
     return $null
 }
@@ -245,7 +255,7 @@ function Install-Runner {
         return
     }
     if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
-        Say 'O comando git n\u00e3o est\u00e1 no PATH. Instale o Git (winget install Git.Git), abra outro terminal e rode este comando de novo.'
+        Say 'O comando git n\u00e3o est\u00e1 no PATH. Instale o Git (winget install --id Git.Git -e), abra outro terminal e rode este comando de novo.'
         return
     }
     $python = Find-Python
@@ -254,7 +264,7 @@ function Install-Runner {
         return
     }
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-        Say 'O comando claude n\u00e3o est\u00e1 no PATH. Instale o Claude Code, entre na sua conta e rode este comando de novo.'
+        Say 'O comando claude n\u00e3o est\u00e1 no PATH. Instale o Claude Code (irm https://claude.ai/install.ps1 | iex), entre na sua conta, abra outro terminal e rode este comando de novo.'
         return
     }
     $clone = Join-Path $env:LOCALAPPDATA 'unio\agent'
