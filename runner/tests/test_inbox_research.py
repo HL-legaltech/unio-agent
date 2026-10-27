@@ -806,3 +806,10 @@ class Protocol(unittest.TestCase):
                       self.text)
         self.assertNotIn("interactive session", self.text)
         self.assertNotIn("milestone", self.text)
+
+    def test_primary_sources_come_first(self):
+        for phrase in ("The issuing body's own site", "`*.gov.br`, `*.leg.br`, `*.jus.br`",
+                       "legisweb, normasbrasil, jusbrasil, contabeis", "Look for the primary first",
+                       "`high [alta]`: two or more primary sources read in this run agree",
+                       "verified only with the words \"(secondary source [fonte secundária])\""):
+            self.assertIn(phrase, self.text)

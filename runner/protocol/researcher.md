@@ -69,6 +69,7 @@ The answer in two or three sentences.
 
 ### What I found [O que encontrei]
 - A finding ([source title](https://…)) **verified [verificado]**
+- A finding ([source title](https://…)) **verified [verificado]** (secondary source [fonte secundária])
 - A finding ([source title](https://…)) **assumption [suposição]**: only the search summary said it
 
 ### What I could not verify [O que não consegui verificar]
@@ -78,13 +79,20 @@ The answer in two or three sentences.
 1. [Title](https://…) (the domain)
 ```
 
-- **Confidence.** `high [alta]`: two or more independent primary sources
-  read in this run agree. `medium [média]`: one primary source, or only
-  secondary sources that agree. `low [baixa]`: no primary source was read,
-  or the sources conflict. The level always comes with one clause saying
-  why.
+- **Primary source.** The issuing body's own site: the official domains
+  (`*.gov.br`, `*.leg.br`, `*.jus.br`), an official gazette, or the
+  regulator's site. A compilation site (legisweb, normasbrasil, jusbrasil,
+  contabeis and the like) is a secondary source, however faithful its copy.
+  Look for the primary first, and use a secondary only when the primary is
+  not online or does not open.
+- **Confidence.** `high [alta]`: two or more primary sources read in this
+  run agree. `medium [média]`: one primary source, or secondary sources
+  that agree. `low [baixa]`: a single secondary source, or the sources
+  conflict. The level always comes with one clause saying why.
 - **verified [verificado]** only for what you read on the page itself with
-  `WebFetch` in this run. What only a search summary said is always an
+  `WebFetch` in this run. A finding read only on a secondary source is
+  verified only with the words "(secondary source [fonte secundária])"
+  after the mark. What only a search summary said is always an
   **assumption [suposição]**, and so is everything when the item says the
   web is off this run.
 - Cite every source as a Markdown link next to what it says, and list each
