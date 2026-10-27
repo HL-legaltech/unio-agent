@@ -242,12 +242,16 @@ unio_agent_dir() {
 # Python 3.9 or later, as a command line, for the session status: python3,
 # then the py launcher on Windows, then python. Only a run that exits 0
 # proves an interpreter: Windows' python3 and python can be Microsoft Store
-# aliases, and macOS's /usr/bin/python3 without the Command Line Tools is a
-# stub that offers to install them.
+# aliases. macOS's /usr/bin/python3 without the Command Line Tools is a stub
+# that opens an install dialog each time it runs, and every hook event would
+# run it, so it is tried only once xcode-select names a developer folder.
 unio_python() {
   if [ "$UNIO_OS" = windows ]; then set -- python3 'py -3' python; else set -- python3 python; fi
   for candidate; do
-    command -v "${candidate%% *}" >/dev/null 2>&1 || continue
+    unio_found=$(command -v "${candidate%% *}" 2>/dev/null) || continue
+    if [ "$UNIO_OS" = macos ] && [ "$unio_found" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then
+      continue
+    fi
     # shellcheck disable=SC2086 # the launcher and its flag are two words
     if $candidate -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1 </dev/null; then
       printf '%s' "$candidate"
