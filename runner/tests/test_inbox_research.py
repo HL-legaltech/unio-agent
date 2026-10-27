@@ -488,7 +488,7 @@ class Run(HomeCase):
                                                                                    "/v1/mcp")]
         self.assertEqual(calls[0], ("/v1/agents/inbox/progress", {"key": "comment:c-0001",
                                                                   "claimId": "claim-0001-fake",
-                                                                  "step": "reading_task", "mode": "research"}))
+                                                                  "step": "reading_task", "mode": "research", "stoppable": True}))
 
     def test_escalation_runs_research_under_the_same_claim(self):
         self.assertEqual(self.once("escalate", mention("@[Agent](user_agent) qual a alíquota de ISS?")), 0)
@@ -947,11 +947,11 @@ class ResearchProgress(unittest.TestCase):
         api = FakeCalls()
         p = self.progress(api)
         self.assertTrue(p.begin_research())
-        self.assertEqual(api.bodies[0], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research"})
+        self.assertEqual(api.bodies[0], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research", "stoppable": True})
         p.report("reading_source", 3, 2, "www.gov.example")
         p.tick(time.monotonic() + 3)
         self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_source", "mode": "research",
-                                          "searches": 3, "sources": 2, "domain": "www.gov.example"})
+                                          "searches": 3, "sources": 2, "domain": "www.gov.example", "stoppable": True})
         self.assertTrue(p.support["reading_source"])
         p.report("writing_reply", 3, 2, "www.gov.example")
         p.tick(time.monotonic() + 6)
@@ -974,6 +974,16 @@ class ResearchProgress(unittest.TestCase):
         p.report("researching", 4, 1)
         p.tick(time.monotonic() + 3)
         self.assertNotIn("searches", api.bodies[-1])
+
+    def test_a_server_without_stop_refuses_only_stoppable(self):
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "stoppable"})])
+        support = {"fields": True, "reading_source": None, "stoppable": True}
+        p = self.progress(api, support)
+        self.assertTrue(p.begin_research())
+        self.assertIn("stoppable", api.bodies[0])
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research"})
+        self.assertTrue(support["fields"], "counters survive a server that cannot stop runs")
+        self.assertFalse(support["stoppable"])
 
     def test_a_mark_the_server_never_took(self):
         for answer in ((500, {"code": "server_error"}), (409, {"code": "agent_inbox_not_claimed"})):

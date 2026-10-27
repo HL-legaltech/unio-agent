@@ -1554,7 +1554,7 @@ class Progress:
         # What the server took, for the life of the process (Runner.progress_support):
         # a server before research refuses the fields (422) and the reading_source step.
         # reading_source is None until the server first takes it.
-        self.support = support if support is not None else {"fields": True, "reading_source": None}
+        self.support = support if support is not None else {"fields": True, "reading_source": None, "stoppable": True}
         self.mode = None
         self.seen = None
         self.values = None
@@ -1596,6 +1596,9 @@ class Progress:
             body.update({k: min(int(v[k]), 999) for k in ("searches", "sources") if isinstance(v.get(k), int)})
             if step == "reading_source" and v.get("domain"):
                 body["domain"] = v["domain"]
+            # Unio offers "Parar" only for a run whose runner said it reads stop.
+            if self.support.get("stoppable", True):
+                body["stoppable"] = True
         return body
 
     def tick(self, now=None):
@@ -1636,10 +1639,14 @@ class Progress:
     def degrade(self, body, data):
         """After a 422: whether dropping what this server may not know changes the
         body, for the rest of the process. A refused reading_source falls back to
-        researching; a refused field drops mode, counters and domain alike."""
+        researching; a refused stoppable drops only itself; any other refused field
+        drops mode, counters and domain alike."""
         data = data if isinstance(data, dict) else {}
         fields = {m.get("field") for m in data.get("messages") or [] if isinstance(m, dict)}
         fields.add(data.get("field"))
+        if "stoppable" in body and "stoppable" in fields:
+            self.support["stoppable"] = False
+            return True
         if body.get("step") == "reading_source" and "step" in fields and self.support["reading_source"] is not False:
             self.support["reading_source"] = False
             return True
@@ -3444,7 +3451,7 @@ class Runner:
         # Whether this server takes usage and research on settlement (settle()).
         self.settle_extras = True
         # What this server took on progress, for the life of the process (Progress.support).
-        self.progress_support = {"fields": True, "reading_source": None}
+        self.progress_support = {"fields": True, "reading_source": None, "stoppable": True}
         # The teams GET /agents/me listed, for the responder's workspace section.
         self._team_rows = None
         # The agent's writing language, read with the teams; English until then.
