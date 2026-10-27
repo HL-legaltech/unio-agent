@@ -132,7 +132,9 @@ between passes) and UNIO_STATUS_DONE_AFTER (24 h between a project's last task
 closing and the runner finishing it).
 """
 import argparse
+import csv
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -272,6 +274,31 @@ RESEARCH_UNFINISHED = {
               "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# The runner's checks of a research run's files (PLAN 3, owner decisions O1-O2),
+# which the server's POST /agents/inbox/files repeats. 512 KiB keeps the JSON
+# body under the API's default 1 MB limit; 1,500 bytes is less than a file
+# worth attaching.
+FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,74}\.(md|csv)$")
+FILE_MIN_BYTES = 1500
+FILE_MAX_BYTES = 512 * 1024
+FILES_PER_RUN = 2
+CSV_MAX_COLUMNS = 50
+CSV_MAX_ROWS = 20000
+# A file most of whose lines the comment already holds repeats it.
+FILE_REPEATS = 0.7
+FILE_NOTE_CHARS = 200
+# An upload under a claim with less left than this would fail with 403 agent_scope_unclaimed.
+FILES_LEASE_LEFT = timedelta(seconds=45)
+MD_HTML = re.compile(r"<[A-Za-z!/][^>]*>")
+MD_IMAGE = re.compile(r"!\[[^\]]*\]\(")
+# A comment asking for the file on the task itself, in so many words (decision O1), on folded text.
+TASK_TARGET = re.compile(
+    r"\b(?:anex\w*|coloqu\w*|ponha|poe|salv\w*|sub\w*)\s+(?:\w+\s+){0,2}(?:n[ao]s?|[ao]s?)\s+(?:propria\s+)?"
+    r"(?:tarefa|card)\b|\b(?:attach|put|add|upload)\w*\s+(?:\w+\s+){0,2}(?:to|on)\s+the\s+(?:task|card)\b")
+FILE_FAILED = {
+    "en": "_The file {name} could not be attached._",
+    "pt-BR": "_O arquivo {name} não pôde ser anexado._",
+}
 # What a settlement carries beyond the receipt, on a server since DEV-672.
 SETTLE_EXTRAS = {"usage", "research"}
 # The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
@@ -2055,6 +2082,104 @@ def research_sources(urls, unio_hosts=()):
         if clean not in found and not re.search(r"[\s()\[\]<>]", clean):
             found.append(clean)
     return found[:UNFINISHED_SOURCES]
+
+
+def comment_lines(body):
+    return {" ".join(line.split()) for line in str(body or "").split("\n") if line.strip()}
+
+
+def rewrite_csv(text):
+    """The CSV as Excel in Brazil opens it: ';' between fields, UTF-8 with a BOM,
+    whatever separator the model used. Raises ValueError past the limits."""
+    try:
+        dialect = csv.Sniffer().sniff(text[:20000], delimiters=",;\t|")
+        rows = list(csv.reader(io.StringIO(text), dialect))
+    except csv.Error:
+        rows = list(csv.reader(io.StringIO(text), delimiter=";" if text.count(";") > text.count(",") else ","))
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(rows) < 2:
+        raise ValueError("no data rows")
+    if len(rows) > CSV_MAX_ROWS or max(len(row) for row in rows) > CSV_MAX_COLUMNS:
+        raise ValueError("too many rows or columns")
+    out = io.StringIO()
+    csv.writer(out, delimiter=";", lineterminator="\r\n").writerows(rows)
+    return "\ufeff" + out.getvalue()
+
+
+def check_files(folder, body, limit=FILES_PER_RUN):
+    """(kept, dropped) of a research run's folder: each kept file {name, content,
+    shown, render}, where `shown` is the name the comment gives it (<stem>.pdf for a
+    report Unio renders); each dropped one (name, reason). The comment must name a
+    file; a file mostly in the comment already repeats it."""
+    kept, dropped = [], []
+    try:
+        root = Path(os.path.realpath(folder))
+        entries = sorted(Path(folder).iterdir())
+    except OSError:
+        return kept, dropped
+    said = comment_lines(body)
+    for path in entries:
+        name = path.name
+        try:
+            if path.is_symlink() or not path.is_file() or Path(os.path.realpath(path)).parent != root:
+                dropped.append((name, "not_a_file"))
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            dropped.append((name, "unreadable"))
+            continue
+        if not FILE_NAME.match(name):
+            dropped.append((name, "name"))
+            continue
+        if not FILE_MIN_BYTES <= len(raw) <= FILE_MAX_BYTES or b"\0" in raw:
+            dropped.append((name, "size"))
+            continue
+        try:
+            text = raw.decode("utf-8").lstrip("\ufeff")
+        except UnicodeDecodeError:
+            dropped.append((name, "encoding"))
+            continue
+        stem = name.rsplit(".", 1)[0]
+        render = name.endswith(".md") and f"{stem}.pdf" in str(body or "")
+        shown = f"{stem}.pdf" if render else name
+        if shown not in str(body or ""):
+            dropped.append((name, "unnamed"))
+            continue
+        lines = comment_lines(text)
+        if lines and len(lines & said) > FILE_REPEATS * len(lines):
+            dropped.append((name, "repeats_comment"))
+            continue
+        if name.endswith(".csv"):
+            try:
+                text = rewrite_csv(text)
+            except ValueError as e:
+                dropped.append((name, f"csv: {e}"))
+                continue
+            if len(text.encode("utf-8")) > FILE_MAX_BYTES:
+                dropped.append((name, "size"))
+                continue
+        elif MD_HTML.search(text) or MD_IMAGE.search(text):
+            dropped.append((name, "markdown"))
+            continue
+        if render and any(f["render"] for f in kept):
+            dropped.append((name, "second_pdf"))
+            continue
+        if len(kept) >= limit:
+            dropped.append((name, "over_limit"))
+            continue
+        kept.append({"name": name, "content": text, "shown": shown, "render": render})
+    return kept, dropped
+
+
+def file_note(body, shown):
+    """Why a file is attached: the comment's line that names it, in plain words."""
+    line = next((ln for ln in str(body or "").split("\n") if shown in ln), "")
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    return short(re.sub(r"[*_`#>]+", "", line).strip(" -"), FILE_NOTE_CHARS) or None
+
+
+def wants_task_file(text):
+    return bool(TASK_TARGET.search(fold(MENTION_TOKEN.sub(" ", str(text or "")))))
 
 
 def unfinished_reply(language, sources, lead=None):
@@ -4051,6 +4176,9 @@ class Runner:
             end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
             research["log"]["end"] = end
             wire["research"] = {"end": end}
+            attached, problems = self.attach_files(api, item, claim, s, research.get("files"))
+            research["log"].update(files=attached or None, fileErrors=len(problems) or None)
+            wire["usage"] = {**(wire["usage"] or {}), "files": attached}
             if not limit:
                 outcome = v.outcome
             elif s.answer_id or note_error:
@@ -4256,12 +4384,67 @@ class Runner:
             partial = limit or not clean
             if body is None:
                 return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
-            return ("partial" if partial else "no_web" if no_web else "complete"), \
-                self.edit_comment(api, s.answer_id, text)
+            error = self.edit_comment(api, s.answer_id, text)
+            if error is None:
+                s.answer_body = text
+            return ("partial" if partial else "no_web" if no_web else "complete"), error
         if not limit:
             return ("no_web" if no_web else "complete"), None
         reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
         return "partial", self.post_research_reply(api, item, claim, reply)
+
+    def attach_files(self, api, item, claim, s, folder, now=None):
+        """Checks the run's files and uploads what passes to its answer, or to the
+        task when the comment asks for that in words and its author may change the
+        task (when the item does not say, the server decides). Returns
+        (attached, problems) and logs every file left out."""
+        now = now or utcnow()
+        if not folder or not s.answer_id or s.answer_body is None:
+            return 0, []
+        kept, dropped = check_files(folder, s.answer_body)
+        for name, reason in dropped:
+            self.state.log("file_dropped", key=item.get("key"), file=name, reason=reason)
+        comment = item.get("comment") or {}
+        author = comment.get("author") or {}
+        target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
+            else "comment"
+        attached, problems = 0, []
+        for f in kept:
+            if (claim.get("at") or now) + CLAIM_LEASE - utcnow() < FILES_LEASE_LEFT:
+                problems.append((f, "too little of the claim was left"))
+                continue
+            error = self.upload_file(api, item, claim, s, f, target)
+            if error and target == "task":
+                # The task refused it (rights, its last free slots): the answer keeps it.
+                self.state.log("file_target", key=item.get("key"), file=f["name"], error=error)
+                error = self.upload_file(api, item, claim, s, f, "comment")
+            if error:
+                problems.append((f, error))
+                self.state.log("file_failed", key=item.get("key"), file=f["name"], error=error)
+            else:
+                attached += 1
+        if problems:
+            lines = "\n".join(FILE_FAILED[self.language].format(name=f["shown"]) for f, _ in problems)
+            text = f"{s.answer_body.rstrip()}\n\n{lines}"
+            if self.edit_comment(api, s.answer_id, text) is None:
+                s.answer_body = text
+        return attached, problems
+
+    def upload_file(self, api, item, claim, s, f, target):
+        """POST /agents/inbox/files: JSON text, never multipart, under the token
+        alone, as progress is; the key and claim in the body name the run."""
+        body = self.receipt(item, claim, commentId=s.answer_id, name=f["name"], content=f["content"],
+                            note=file_note(s.answer_body, f["shown"]))
+        if target != "comment":
+            body["target"] = target
+        if f["render"]:
+            body["render"] = "pdf"
+        idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
+        try:
+            st, d = api.settle("POST", "/agents/inbox/files", body, idem, timeout=60)
+        except ApiUnreachable as e:
+            return str(e)
+        return None if 200 <= st < 300 else describe(st, d)
 
     def edit_comment(self, api, comment_id, content):
         """The runner's edit of the run's answer, under the token alone: the server
