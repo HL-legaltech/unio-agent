@@ -174,12 +174,17 @@ def main():
             "DISABLE_AUTOUPDATER": "1",
             "DISABLE_TELEMETRY": "1",
             "UNIO_E2E_TRACE": trace,
-            # The session status's state, with forward slashes, which both
-            # Git Bash and a Windows Python read.
-            "XDG_STATE_HOME": os.path.join(root, "state").replace("\\", "/"),
         })
+        # The session status's state inside the throwaway root, where each
+        # system keeps it: on Windows under LOCALAPPDATA, apart from the
+        # header helper's files under ~/.local/state, as on a real computer.
         if WINDOWS:
             env["PATH"] = windows_path_without_git_tools(env.get("PATH", ""))
+            env["LOCALAPPDATA"] = os.path.join(root, "localappdata")
+            sessions_dir = os.path.join(root, "localappdata", "unio", "sessions")
+        else:
+            env["XDG_STATE_HOME"] = os.path.join(root, "state")
+            sessions_dir = os.path.join(root, "state", "unio", "sessions")
 
         sh = posix_shell()
         conf = os.path.join(home, ".config", "unio")
@@ -227,7 +232,6 @@ def main():
         def mcp_tokens(entries):
             return {e.get("token") for e in entries if e.get("path") == "/v1/mcp"}
 
-        sessions_dir = os.path.join(root, "state", "unio", "sessions")
 
         def check_status(label, done, token, folder):
             """The session's presence and row reach the fake API with the
