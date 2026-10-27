@@ -813,3 +813,8 @@ class Protocol(unittest.TestCase):
                        "`high [alta]`: two or more primary sources read in this run agree",
                        "verified only with the words \"(secondary source [fonte secundária])\""):
             self.assertIn(phrase, self.text)
+
+    def test_the_law_itself_and_every_link_under_sources(self):
+        self.assertIn("For a point of law, open the law itself (planalto.gov.br for federal law, the city's or "
+                      "state's official legislation site otherwise) before citing it.", self.text)
+        self.assertIn('Every link in the answer appears under "Sources".', self.text)

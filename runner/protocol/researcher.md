@@ -33,7 +33,10 @@ else in Unio.
    a partial answer picks up from its "What I could not verify".
 4. Research. Search for the public terms the question needs, open the
    primary sources (the law, the official page, the dataset, the
-   documentation) with `WebFetch`, and note what each one says.
+   documentation) with `WebFetch`, and note what each one says. For a
+   point of law, open the law itself (planalto.gov.br for federal law, the
+   city's or state's official legislation site otherwise) before citing
+   it.
 5. Post your answer as one reply with `create_comment`, `reply_to` set to the
    comment id, as soon as you have a verified core finding, and no later
    than your 20th web call. End that first post with the checkpoint marker
@@ -96,7 +99,8 @@ The answer in two or three sentences.
   **assumption [suposição]**, and so is everything when the item says the
   web is off this run.
 - Cite every source as a Markdown link next to what it says, and list each
-  page you relied on under "Sources", with its domain.
+  page you relied on under "Sources", with its domain. Every link in the
+  answer appears under "Sources".
 - Leave out "What I could not verify" when nothing is left unverified.
 - Add a `### Decisions [Decisões]` section only when someone must decide
   something. Write each item as a need, led by **Decide:**, with the
