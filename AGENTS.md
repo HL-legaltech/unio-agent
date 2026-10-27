@@ -106,9 +106,10 @@ No AI attribution. Stage named paths only.
 
 - The plugin's scripts are POSIX `sh`: they run under dash, bash, macOS `sh`
   and Git Bash. They call POSIX utilities, plus `curl`, `mktemp` and
-  `date +%s`, which every supported system has; `lsof` on macOS and
-  `cygpath` and `powershell.exe` on Windows, where `UNIO_OS` says so. Check
-  any other tool on macOS and Git Bash before a script depends on it.
+  `date +%s`, which every supported system has; `lsof` and `xcode-select`
+  on macOS and `cygpath` and `powershell.exe` on Windows, where `UNIO_OS`
+  says so. Check any other tool on macOS and Git Bash before a script
+  depends on it.
 - On Windows Claude Code runs a hook in exec form (`args`) only when its
   `command` is an `.exe` on the PATH, and Git for Windows does not put
   `sh.exe` there. Hooks stay in shell form, which Claude Code runs through
@@ -143,8 +144,9 @@ No AI attribution. Stage named paths only.
   adds its line there and a branch to each file; the table lists only
   commands both files run.
 - `bin/unio.cmd` runs every command but `runner` and `resume` as `bin/unio`,
-  through Git for Windows' `sh.exe`, which is not on the PATH: it finds it
-  from `where git`. Those two run Python itself, in the person's console.
+  through Git for Windows' `sh.exe`, which is not on the PATH: it asks
+  `git --exec-path` where Git is installed. Those two run Python itself, in
+  the person's console.
 - On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
   `install.sh` and `install.ps1`'s plugin mode keep using a clone already at
   `~/.local/share/unio/agent`, since a Codex config names it.
