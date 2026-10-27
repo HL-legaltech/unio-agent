@@ -342,6 +342,16 @@ class Prompt(unittest.TestCase):
         self.assertIn("Repositories: none in a research run", text)
         self.assertNotIn("research answer (comment", text)
 
+    def test_research_leaves_out_the_reply_run_lines(self):
+        text = inbox.build_prompt(mention(), [], 1, research=self.facts())
+        reply = inbox.build_prompt(mention(), [], 1)
+        for line in ("pass team=ABC to search_tasks", "Author can update tasks", "can create labels",
+                     "Author clerk id: user_person", "Needs <first name>, Waiting on, Sessions"):
+            self.assertNotIn(line, text)
+            self.assertIn(line, reply)
+        self.assertIn("Team: Product, identifier ABC.\n", text)
+        self.assertIn("this line wins over any other language rule.\n", text)
+
     def test_follow_up_and_question(self):
         text = inbox.build_prompt(mention(), [], 1, research=self.facts(answer="c-9", question="ISS rates"))
         self.assertIn("This thread already has your research answer (comment c-9); start from its sources.", text)

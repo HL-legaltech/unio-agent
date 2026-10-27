@@ -2212,12 +2212,14 @@ def writing_language(me):
     return language if language in LANGUAGE_NAMES else "en"
 
 
-def language_line(language):
+def language_line(language, research=False):
     """Every prompt names the writing language, and this line outranks the
-    protocol: a configuration folder's older copy may still say English."""
-    return (f"Writing language: {LANGUAGE_NAMES.get(language, 'English')}. Write everything you post in it, "
-            "whatever language people wrote in; this line wins over any other language rule. Needs <first name>, "
-            "Waiting on, Sessions and Needs action stay in English.")
+    protocol: a configuration folder's older copy may still say English. A
+    research answer writes none of the English markers."""
+    line = (f"Writing language: {LANGUAGE_NAMES.get(language, 'English')}. Write everything you post in it, "
+            "whatever language people wrote in; this line wins over any other language rule.")
+    return line if research else line + (" Needs <first name>, Waiting on, Sessions and Needs action stay in "
+                                         "English.")
 
 
 def one_line(text, limit):
@@ -2355,6 +2357,7 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         lines += [
             f"Task: {task.get('key')} (id {task.get('id')})",
             f"URL: {task.get('url')}",
+            f"Team: {team.get('name')}, identifier {team.get('identifier')}." if research else
             f"Team: {team.get('name')}, identifier {team.get('identifier')}. Work only in this team: "
             f"pass team={team.get('identifier')} to search_tasks.",
         ]
@@ -2368,7 +2371,7 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         lines.append(f"This thread already has your research answer (comment {thread}). A reply that asks for more "
                      "of it (another place, period or source, or \"continue\") goes to research the same way; a "
                      "thanks or an acknowledgement does not.")
-    lines.append(language_line(language))
+    lines.append(language_line(language, bool(research)))
     if comment:
         lines += [
             f"Comment id: {comment.get('id')} (answer it with "
@@ -2376,15 +2379,17 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
             f"Thread root id: {comment.get('rootId') or comment.get('id')}",
             f"Author kind: {author.get('kind')}, written {comment.get('createdAt')}",
         ]
-    lines.append(f"Author can update tasks: {yes_no(author.get('canUpdateTasks'))}; "
-                 f"can create tasks: {yes_no(author.get('canCreateTasks'))}; "
-                 f"can create labels: {yes_no(author.get('canCreateLabels'))}; "
-                 f"can create projects: {yes_no(author.get('canCreateProjects'))}; "
-                 f"can update every project: {yes_no(author.get('canUpdateProjects'))} "
-                 "(they may also edit a project they lead or are a member of)")
-    if author.get("clerkId"):
-        lines.append(f"Author clerk id: {author.get('clerkId')} (pass \"author\" to name them: "
-                     "a project's lead or member, a task's assignee)")
+    if not research:
+        # A research run changes nothing but its answer comment.
+        lines.append(f"Author can update tasks: {yes_no(author.get('canUpdateTasks'))}; "
+                     f"can create tasks: {yes_no(author.get('canCreateTasks'))}; "
+                     f"can create labels: {yes_no(author.get('canCreateLabels'))}; "
+                     f"can create projects: {yes_no(author.get('canCreateProjects'))}; "
+                     f"can update every project: {yes_no(author.get('canUpdateProjects'))} "
+                     "(they may also edit a project they lead or are a member of)")
+        if author.get("clerkId"):
+            lines.append(f"Author clerk id: {author.get('clerkId')} (pass \"author\" to name them: "
+                         "a project's lead or member, a task's assignee)")
     if research:
         lines.append("Repositories: none in a research run")
     elif snapshots:
