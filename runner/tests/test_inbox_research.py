@@ -477,6 +477,18 @@ class Run(HomeCase):
         self.assertEqual(release["reason"], "usage_limit")
         self.assertNotIn("backoffUntil", {k for k, v in self.health().items() if v})
 
+    def test_a_held_follow_up_goes_straight_to_research_next_time(self):
+        self.thread()
+        h = json.loads((self.state / "health.json").read_text(encoding="utf-8"))
+        h["quota"] = {"five_hour": {"utilization": 0.97, "resetsAt": "2099-01-01T00:00:00Z",
+                                    "at": inbox.iso(inbox.utcnow())}}
+        (self.state / "health.json").write_text(json.dumps(h), encoding="utf-8")
+        item = mention("@[Agent](user_agent) e para Curitiba?", root="c-root")
+        self.assertEqual(self.once("escalate", item), 0)
+        r = inbox.Runner(inbox.Config(os.environ, workspace="org_test"))
+        self.assertEqual(r.research_ask(item, self.health()),
+                         {"why": "escalated", "question": "ISS rates for software", "answer": "c-answer"})
+
     def test_a_run_at_its_cap_swaps_the_marker_without_scope_headers(self):
         self.assertEqual(self.once("research_cap"), 0)
         edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")

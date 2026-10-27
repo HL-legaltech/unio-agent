@@ -3974,8 +3974,8 @@ class Runner:
         gate, *rest = self.research_gate(h, claim, now)
         if gate:
             detail, retry = rest
-            if ask["why"] == "escalated":
-                # The next claim goes straight to research, without asking a reply run again.
+            if "question" in ask:
+                # A reply run asked for it: the next claim goes straight to research, without asking again.
                 pending[item.get("key")] = {"question": ask.get("question"), "at": iso(now)}
             h["researchPending"] = {k: e for k, e in pending.items() if isinstance(e, dict)
                                     and (parse_iso(e.get("at")) or now) > now - timedelta(days=1)}
