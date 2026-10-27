@@ -128,6 +128,12 @@ No AI attribution. Stage named paths only.
 - The session hook's `additionalContext` carries fixed text only, never a name
   or CHANGELOG text: what someone types in Unio must not reach Claude's context
   through the hook.
+- The session status (`scripts/session-status.sh` and `scripts/unio_sessions/`)
+  is standard-library Python 3.9 or later and prints nothing: Python 3.9 reads
+  no `Z` in `datetime.fromisoformat`, so times go through `watch.stamp`. On
+  Linux and macOS its state folder, file names and lock names are those of the
+  hand-made hook it replaced, so a session that hook already watches is never
+  watched twice. Without Python it reports nothing.
 - Text a person reads at runtime (hook messages, command output) is Brazilian
   Portuguese: sentence case, no em dash, no emoji. Repository files are in
   English.

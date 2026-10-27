@@ -239,6 +239,24 @@ unio_agent_dir() {
   return 0
 }
 
+# Python 3.9 or later, as a command line, for the session status: python3,
+# then the py launcher on Windows, then python. Only a run that exits 0
+# proves an interpreter: Windows' python3 and python can be Microsoft Store
+# aliases, and macOS's /usr/bin/python3 without the Command Line Tools is a
+# stub that offers to install them.
+unio_python() {
+  if [ "$UNIO_OS" = windows ]; then set -- python3 'py -3' python; else set -- python3 python; fi
+  for candidate; do
+    command -v "${candidate%% *}" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2086 # the launcher and its flag are two words
+    if $candidate -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1 </dev/null; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # The installer's command that replaces workspace $1's token and installs
 # nothing, as the Agente de código page shows it for a renewal.
 unio_renew_command() {

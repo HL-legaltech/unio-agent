@@ -174,6 +174,7 @@ Type them as ordinary messages, in either language; the skill recognizes them.
 - **Which workspace a folder uses:** `~/.config/unio/projects` maps a folder to a workspace, one `<folder><TAB><workspace id>` line each, and the longest match wins. Every other folder uses the workspace named in `~/.config/unio/default-workspace`. The installer writes both.
 - **A setup from before the installer:** `~/.config/unio/token`, read only while `default-workspace` does not exist. The hand-setup command (`connect.sh`) still saves a token there, and refuses to while `default-workspace` exists.
 - **What the session notice remembers:** status codes, version numbers and days left, in the plugin's data folder. Never a name or a token.
+- **Session status:** with Python 3.9 or later on the PATH (`python3`, `python`, or `py -3` on Windows), the plugin shows each Claude Code session on the agent's page in Unio: what it is doing, its task, its tokens and active time per hour, and, to you alone, its title and the command that resumes it. A watcher process per session reads its transcripts in `~/.claude/projects` and keeps its state in `~/.local/state/unio/sessions` (`%LOCALAPPDATA%\unio\sessions` on Windows). No folder, branch or prompt text leaves the computer, and sessions that other sessions start, such as workflow agents, report nothing. Without Python nothing is reported.
 - **On Windows,** `~` is your profile folder (`%USERPROFILE%`), so the tokens are in `%USERPROFILE%\.config\unio\workspaces`. Git Bash names the folders in `projects` `/c/Users/...`; a line in the `C:\Users\...` or `C:/Users/...` form works too, and on Windows and macOS case does not matter.
 
 ### How a session finds its folder
@@ -249,7 +250,8 @@ If you wired Unio into Claude Code by hand, with a skill in `~/.claude/skills/un
    From the next session on, the plugin's server connects with the same token file.
 4. **Rename your rules.** The plugin's tools are `mcp__plugin_unio_unio__<tool>`, not `mcp__unio__<tool>`. In `~/.claude/settings.json`, copy each `mcp__unio__` permission rule to the same rule with `mcp__plugin_unio_unio__`, and widen each hook matcher `mcp__unio__.*` to `mcp__(plugin_unio_)?unio__.*`, once the scripts those hooks run accept both tool names.
 5. **Keep headless runners on their own setup.** A runner that passes its own MCP configuration keeps `--strict-mcp-config`, which keeps the plugin's server out, and adds `"enabledPlugins": {"unio@unio": false}` to the settings it passes with `--settings`, which also keeps the plugin's skill out.
-6. **Turn on auto-update** as above, then run `/unio:doctor`: it shows no `migration` lines, and `/mcp` lists `plugin:unio:unio`.
+6. **Retire a session status hook of your own.** If `~/.claude/settings.json` runs a hook that reports sessions to Unio, remove it there: the plugin's does the same, with each folder's own token, and keeps the same files in `~/.local/state/unio/sessions`, so a session your hook already watches keeps its one watcher.
+7. **Turn on auto-update** as above, then run `/unio:doctor`: it shows no `migration` lines, and `/mcp` lists `plugin:unio:unio`.
 
 To go back: `claude plugin uninstall unio@unio`, move `~/.local/share/unio/retired-skill` back to `~/.claude/skills/unio`, and run `claude mcp add-json unio --scope user "$(cat ~/.local/share/unio/retired-mcp.json)"`. If the saved entry holds a token in a fixed `Authorization` header, issue a new token instead of restoring that one.
 
