@@ -31,10 +31,20 @@ setlocal EnableDelayedExpansion
 exit /b 2
 
 :posix
-rem sh.exe sits in the bin folder beside git.exe's cmd folder. The script's
-rem path goes to sh with forward slashes, which bin\unio reads as its own.
+rem Git for Windows' sh.exe is not on the Path. git names its own install
+rem with --exec-path (<root>/mingw64/libexec/git-core), whether the git on
+rem the Path is Git's cmd\git.exe, its bin\git.exe or a shim such as
+rem Scoop's; a git that cannot answer falls back to the folder beside each
+rem git.exe that where finds. The script's path goes to sh with forward
+rem slashes, which bin\unio reads as its own.
 set "unio_sh="
-for /f "delims=" %%g in ('where git 2^>nul') do if not defined unio_sh if exist "%%~dpg..\bin\sh.exe" set "unio_sh=%%~dpg..\bin\sh.exe"
+set "unio_exec="
+for /f "delims=" %%e in ('git --exec-path 2^>nul') do if not defined unio_exec set "unio_exec=%%e"
+if defined unio_exec for %%r in ("%unio_exec:/=\%\..\..\..") do (
+  if exist "%%~fr\bin\sh.exe" set "unio_sh=%%~fr\bin\sh.exe"
+  if not defined unio_sh if exist "%%~fr\usr\bin\sh.exe" set "unio_sh=%%~fr\usr\bin\sh.exe"
+)
+if not defined unio_sh for /f "delims=" %%g in ('where git 2^>nul') do if not defined unio_sh if exist "%%~dpg..\bin\sh.exe" set "unio_sh=%%~dpg..\bin\sh.exe"
 if not defined unio_sh goto :no_git_bash
 set "unio_script=%unio_root:\=/%/bin/unio"
 "%unio_sh%" "%unio_script%" %*

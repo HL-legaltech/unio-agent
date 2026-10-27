@@ -227,6 +227,25 @@ jobs:
           & .\bin\unio.cmd runner --help
           if ($LASTEXITCODE) { throw "unio.cmd runner --help exited $LASTEXITCODE" }
 
+      - name: Find Git's sh through a git shim alone, as Scoop installs it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Neither Git's cmd nor its bin folder is on this Path, only a shim
+          # that runs it, so the folder beside git cannot lead to sh.exe.
+          $real = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+          $shells = @((Get-Command powershell).Source, (Get-Command pwsh).Source)
+          $shim = Join-Path $env:RUNNER_TEMP 'git-shim'
+          New-Item -ItemType Directory -Force -Path $shim | Out-Null
+          Set-Content -Path (Join-Path $shim 'git.cmd') -Value "@`"$real`" %*" -Encoding ascii
+          $env:Path = "$shim;$env:SystemRoot\System32;$env:SystemRoot"
+          $connect = & .\bin\unio.cmd help connect | Out-String
+          if ($LASTEXITCODE -or $connect -notmatch '^Uso: unio connect') { throw "unio.cmd through a shim: $connect" }
+          foreach ($shell in $shells) {
+            $found = "$(& $shell -NoProfile -NonInteractive -Command '. ([scriptblock]::Create((Get-Content -Raw install.ps1))); Find-GitSh')".Trim()
+            if (-not $found -or -not (Test-Path -LiteralPath $found -PathType Leaf)) { throw "${shell}: Find-GitSh found no sh.exe through a shim: $found" }
+          }
+
       # Last, since it leaves a folder on this machine's user Path.
       - name: Put a folder on the user's Path once, as install.ps1 -Runner does
         if: runner.os == 'Windows'
