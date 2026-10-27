@@ -48,6 +48,8 @@ def clean(text):
 
 
 def tilde(path):
+    if path is None:
+        return "pasta desconhecida"
     home = str(Path.home())
     return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
@@ -92,7 +94,7 @@ def sessions_named(arg):
         if TRANSCRIPT.match(path.name):
             at = path.stat().st_mtime
             if path.stem not in found or at > found[path.stem]["at"]:
-                found[path.stem] = {"id": path.stem, "cwd": started_in(path) or str(Path.home()), "at": at,
+                found[path.stem] = {"id": path.stem, "cwd": started_in(path), "at": at,
                                     "role": WORKED, "task": None}
     return sorted(found.values(), key=lambda s: -s["at"])
 
@@ -123,7 +125,7 @@ def sessions_for(ref):
         path = transcript(session_id)
         if not path:
             continue  # the transcript is gone, so it cannot be resumed
-        found.append({"id": session_id, "cwd": started_in(path) or str(Path.home()), "at": path.stat().st_mtime,
+        found.append({"id": session_id, "cwd": started_in(path), "at": path.stat().st_mtime,
                       "role": role, "task": task.get("key")})
     # The sessions that worked on it first, newest first within each.
     found.sort(key=lambda s: (s["role"] != WORKED, -s["at"]))
@@ -201,6 +203,11 @@ def main(argv):
                 return 1
             pick = int(answer)
     session = found[pick - 1]
+    if session["cwd"] is None:
+        # Never another folder in its place: claude --resume finds a session only where it started.
+        print(f"O registro da sessão {session['id']} não diz em que pasta ela começou. Rode claude --resume"
+              f" {session['id']} na pasta do projeto em que ela trabalhou.", file=sys.stderr)
+        return 1
     if not os.path.isdir(session["cwd"]):
         # A deleted worktree, often: the page offers this command for 30 days.
         print(f"A sessão começou em {tilde(session['cwd'])}, que não existe mais, e o claude --resume precisa"
