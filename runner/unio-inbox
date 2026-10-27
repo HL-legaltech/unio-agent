@@ -272,6 +272,8 @@ RESEARCH_UNFINISHED = {
               "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# What a settlement carries beyond the receipt, on a server since DEV-672.
+SETTLE_EXTRAS = {"usage", "research"}
 # The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
 COMMENT_CHARS = 20000
 UNFINISHED_SOURCES = 8
@@ -357,6 +359,7 @@ RESEARCH_STEPS = {**STEPS, "WebFetch": "reading_source"}
 # The server's hostname rule for a progress domain (validators/agents.ts):
 # lower-case labels, and never an IP literal.
 DOMAIN = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*$")
+MODEL_ID = re.compile(r"^[a-z0-9.\-\[\]]+$")
 # A project review is offered these two tools and nothing else: the server
 # registers only them under X-Unio-Review-Project, so any other tool at init
 # means the header did not take.
@@ -2259,6 +2262,48 @@ def run_usage(ev, assumed_usd=None):
     }
 
 
+def merge_usage(first, second):
+    """Two sessions of one claim (a reply run that handed over, then research) as one usage."""
+    if not first or not second:
+        return second or first
+    merged = dict(second)
+    for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "costUsd", "turns"):
+        values = [u.get(key) for u in (first, second) if isinstance(u.get(key), (int, float))]
+        merged[key] = sum(values) if values else None
+    merged["model"] = second.get("model") or first.get("model")
+    merged["estimated"] = bool(first.get("estimated") or second.get("estimated"))
+    return merged
+
+
+def usage_body(usage, web=None, files=None):
+    """A settlement's `usage` as the server validates it (validators/agents.ts):
+    integers in range, a model id of its characters, cost in list USD."""
+    if not usage and not web:
+        return None
+    usage, web = usage or {}, web or {}
+
+    def whole(value, top):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return min(max(int(value), 0), top)
+
+    model = usage.get("model")
+    model = model.lower() if isinstance(model, str) and len(model) <= 64 and MODEL_ID.match(model.lower()) else None
+    cost = usage.get("costUsd")
+    body = {
+        "turns": whole(usage.get("turns"), 999), "model": model,
+        **{key: whole(usage.get(key), 2 * 10**9)
+           for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")},
+        "costUsd": round(min(max(float(cost), 0.0), 1000.0), 4)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) else None,
+        "webSearches": whole(web.get("searches"), 999), "webFetches": whole(web.get("fetches"), 999),
+        "sources": whole(web.get("sources"), 999), "files": whole(files, 999),
+        "estimated": usage.get("estimated") if isinstance(usage.get("estimated"), bool) else None,
+    }
+    body = {k: v for k, v in body.items() if v is not None}
+    return body or None
+
+
 def made_project(content):
     """'[name](url)' of the project a create_project result names, or None."""
     text = result_text(content)
@@ -3135,6 +3180,12 @@ def link_key(url):
     return url.rstrip(".,;:!?/")
 
 
+def merge_web(first, second):
+    if not first or not second:
+        return second or first
+    return {key: (first.get(key) or 0) + (second.get(key) or 0) for key in ("searches", "fetches", "sources")}
+
+
 def progress_domain(url):
     """The host progress may name for a page: one the server's rule takes, never an IP."""
     try:
@@ -3201,6 +3252,8 @@ class Runner:
         # Observe mode, and a finish waiting out its day, log a project's decision when it changes.
         self.status_seen = {}
         self._workspace = None
+        # Whether this server takes usage and research on settlement (settle()).
+        self.settle_extras = True
         # What this server took on progress, for the life of the process (Progress.support).
         self.progress_support = {"fields": True, "reading_source": None}
         # The teams GET /agents/me listed, for the responder's workspace section.
@@ -3786,16 +3839,32 @@ class Runner:
         return {"key": item.get("key"), **({"claimId": claim["claimId"]} if claim.get("claimId") else {}), **body}
 
     def settle(self, api, action, item, claim, **fields):
-        """complete, fail or release this claim, with a note for the agent's page."""
+        """complete, fail or release this claim, with a note for the agent's page,
+        and the run's usage and research end where this server takes them."""
+        if not self.settle_extras:
+            fields = {k: v for k, v in fields.items() if k not in SETTLE_EXTRAS}
         body = self.receipt(item, claim, **{k: v for k, v in fields.items() if v is not None})
         idem = f"unio-inbox:{action}:{item.get('key')}:{claim['claimId']}"
         st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem)
-        if (st == 422 and isinstance(d, dict) and d.get("code") == "agent_field_forbidden"
-                and d.get("field") == "note" and "note" in body):
-            # A server without the agent status refuses the note, and the
-            # receipt must still land. Its own key: the refusal may be stored under the first.
-            body.pop("note")
-            st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem + ":plain")
+        for _ in range(2):
+            refused = d.get("field") if st == 422 and isinstance(d, dict) and \
+                d.get("code") == "agent_field_forbidden" else None
+            if refused == "note" and "note" in body:
+                # A server without the agent status refuses the note, and the
+                # receipt must still land. Its own key: the refusal may be stored under the first.
+                body.pop("note")
+                idem += ":plain"
+            elif st == 422 and SETTLE_EXTRAS & set(body):
+                # Never blocks settlement: one retry without them, and none
+                # asked again of a server that does not know them.
+                if refused in SETTLE_EXTRAS:
+                    self.settle_extras = False
+                for key in SETTLE_EXTRAS:
+                    body.pop(key, None)
+                idem += ":bare"
+            else:
+                break
+            st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem)
         return st, d
 
     def agent_teams(self, api):
@@ -3898,8 +3967,9 @@ class Runner:
                     v = self.classify(s)
                     if v.kind == "research" and self.research_ready(item):
                         # Charged now: the research run below is charged on its own.
-                        triage = {"costUsd": self.charge(h, s, started_at), "turns": (s.result or {}).get("num_turns"),
-                                  "run": out.name}
+                        usd = self.charge(h, s, started_at)
+                        triage = {"costUsd": usd, "turns": (s.result or {}).get("num_turns"), "run": out.name,
+                                  "usage": run_usage(s.result, usd), "web": s.web.counts()}
                         ask = {"why": "thread" if thread else "escalated", "question": v.question,
                                **({"answer": thread} if thread else {})}
                     elif v.kind == "research":
@@ -3935,13 +4005,16 @@ class Runner:
                  "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
                  "triage": triage}
+        # What the receipt records of the run: every session of this claim.
+        wire = {"usage": usage_body(merge_usage((triage or {}).get("usage"), stats["usage"]),
+                                    merge_web((triage or {}).get("web"), stats["web"]), files=0)}
         if len(s.projects) > 1:
             self.state.log("warn", **base, run=stats["run"], detail="create_project called more than once",
                            projects=s.projects)
 
         if v.kind == "release":
             st, d = self.settle(api, "release", item, claim, reason=wire_reason(v.reason), retryAfter=iso(v.retry),
-                                note=problem_message(v.reason, detail=v.detail))
+                                note=problem_message(v.reason, detail=v.detail), **wire)
             self.state.log("item", **base, **stats, result="released", reason=v.reason, error=v.error,
                            retryAfter=iso(v.retry), releaseError=None if st == 200 else describe(st, d))
             if v.reason in RESEARCH_GATE_REASONS:
@@ -3958,6 +4031,7 @@ class Runner:
             clean = v.kind == "ok" and not v.error and v.claimed is None
             end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
             research["log"]["end"] = end
+            wire["research"] = {"end": end}
             if not limit:
                 outcome = v.outcome
             elif s.answer_id or note_error:
@@ -3965,7 +4039,7 @@ class Runner:
             else:
                 outcome = "replied"
             self.complete(api, item, claim, h, base, stats, outcome,
-                          RESEARCH_PARTIAL_NOTE if limit else v.note, claimedOutcome=None if limit else v.claimed,
+                          RESEARCH_PARTIAL_NOTE if limit else v.note, wire, claimedOutcome=None if limit else v.claimed,
                           error=v.error, reason=None if limit else v.reason, noteError=note_error)
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
@@ -3978,7 +4052,7 @@ class Runner:
             if not s.succeeded & COMMENT_WRITES:
                 note = project_note(s, self.language) or TOO_LARGE_REPLY[self.language]
                 note_error = self.reply(api, item, note, f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE,
+            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE, wire,
                           error=v.error, noteError=note_error)
             return "continue"
 
@@ -3988,7 +4062,7 @@ class Runner:
             if not s.succeeded & COMMENT_WRITES and project_note(s):
                 note_error = self.reply(api, item, project_note(s, self.language),
                                         f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, v.outcome, v.note, claimedOutcome=v.claimed,
+            self.complete(api, item, claim, h, base, stats, v.outcome, v.note, wire, claimedOutcome=v.claimed,
                           error=v.error, reason=v.reason, noteError=note_error)
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
@@ -3997,7 +4071,7 @@ class Runner:
 
         self.state.record_error(h, f"{key}: {v.error}")
         public, message = FAIL_CAUSES[v.cause]
-        st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public])
+        st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public], **wire)
         h.setdefault("failed", []).append(iso(utcnow()))
         attempts = ((d or {}).get("data") or {}).get("attempts") if st == 200 else None
         final = isinstance(attempts, int) and attempts >= FINAL_ATTEMPT
@@ -4191,8 +4265,8 @@ class Runner:
         fallback = self.reply(api, item, content, f"unio-inbox:note:{item.get('key')}:{claim['claimId']}")
         return f"{error}; {fallback}" if fallback else None
 
-    def complete(self, api, item, claim, h, base, stats, outcome, note, **extra):
-        st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note)
+    def complete(self, api, item, claim, h, base, stats, outcome, note, wire=None, **extra):
+        st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note, **(wire or {}))
         if st == 200:
             h.setdefault("handled", []).append(iso(utcnow()))
             # The answer, the 👍 or the change is the signal now.

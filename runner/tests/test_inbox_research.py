@@ -472,6 +472,11 @@ class Run(HomeCase):
         self.assertTrue(item["run"].endswith("-research"))
         self.assertEqual(item["web"], {"searches": 1, "fetches": 1, "sources": 1})
         self.assertEqual(item["usage"]["model"], "claude-test")
+        self.assertEqual(done["research"], {"end": "complete"})
+        self.assertEqual(done["usage"], {"turns": 12, "model": "claude-test", "inputTokens": 10, "outputTokens": 5,
+                                         "cacheReadTokens": 1, "cacheWriteTokens": 2, "costUsd": 0.0123,
+                                         "webSearches": 1, "webFetches": 1, "sources": 1, "files": 0,
+                                         "estimated": False})
         health = self.health()
         self.assertEqual(health["researchThreads"]["c-0001"]["comment"], "c-session-reply")
         self.assertEqual(health["sessions"][-1]["kind"], "research")
@@ -494,6 +499,8 @@ class Run(HomeCase):
         self.assertEqual(len(self.fake.seen("POST", "/v1/agents/inbox/complete")), 1)
         item, = self.items()
         self.assertEqual((item["research"]["why"], item["triage"]["turns"]), ("escalated", 3))
+        usage = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["usage"]
+        self.assertEqual((usage["turns"], usage["costUsd"]), (15, 0.0246), "both sessions of the claim")
         self.assertEqual([s.get("kind") for s in self.health()["sessions"]], [None, "research"])
 
     def thread(self):
@@ -530,6 +537,7 @@ class Run(HomeCase):
         self.assertFalse(self.claude_log.exists())
         release = self.fake.seen("POST", "/v1/agents/inbox/release")[0]["body"]
         self.assertEqual(release["reason"], "usage_limit")
+        self.assertNotIn("usage", release)
         self.assertNotIn("backoffUntil", {k for k, v in self.health().items() if v})
 
     def test_a_held_follow_up_goes_straight_to_research_next_time(self):
@@ -930,3 +938,52 @@ class ResearchProgress(unittest.TestCase):
         for url in ("http://8.8.8.8/", "https://[2001:db8::1]/", "not a url", None, "https://xn--d1a.example/"):
             self.assertIn(inbox.progress_domain(url), (None, "xn--d1a.example"), url)
         self.assertIsNone(inbox.progress_domain("http://8.8.8.8/"))
+
+
+class Settlement(HomeCase):
+    def runner(self):
+        self.profile("org_test")
+        return inbox.Runner(inbox.Config(dict(os.environ), "org_test"))
+
+    def test_usage_body(self):
+        body = inbox.usage_body({"model": "Claude-Opus-5-5[1m]", "turns": 1200, "inputTokens": 3 * 10**9,
+                                 "outputTokens": -4, "costUsd": 1.234567, "estimated": False},
+                                {"searches": 6, "fetches": 9, "sources": 8}, files=1)
+        self.assertEqual(body, {"turns": 999, "model": "claude-opus-5-5[1m]", "inputTokens": 2 * 10**9,
+                                "outputTokens": 0, "costUsd": 1.2346, "webSearches": 6, "webFetches": 9,
+                                "sources": 8, "files": 1, "estimated": False})
+        self.assertEqual(inbox.usage_body({"model": "claude opus", "turns": 2}, {}), {"turns": 2})
+        self.assertIsNone(inbox.usage_body(None, None, files=0))
+        merged = inbox.merge_usage({"turns": 3, "costUsd": 0.2, "model": "a", "estimated": False},
+                                   {"turns": 12, "costUsd": 1.0, "model": "b", "inputTokens": 5, "estimated": True})
+        self.assertEqual((merged["turns"], merged["costUsd"], merged["model"], merged["estimated"]), (15, 1.2, "b", True))
+
+    def test_an_older_server_gets_one_retry_without_them(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "usage"}), (200, {"data": {}})])
+        api.settle = lambda method, path, body, key, timeout=20: (api.keys.append(key), api.call(method, path, body))[1]
+        api.keys = []
+        item, claim = {"key": "k"}, {"claimId": "c"}
+        st, _ = r.settle(api, "complete", item, claim, outcome="replied", note="n", usage={"turns": 1},
+                         research={"end": "complete"})
+        self.assertEqual(st, 200)
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "outcome": "replied", "note": "n"})
+        self.assertEqual(api.keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:bare"])
+        r.settle(api, "complete", item, claim, outcome="replied", usage={"turns": 1})
+        self.assertNotIn("usage", api.bodies[-1], "not asked again of this server")
+
+    def test_a_bad_value_drops_them_for_this_settlement_only(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"error": "Validation failed", "messages": [{"field": "usage.model"}]})])
+        api.settle = lambda method, path, body, key, timeout=20: api.call(method, path, body)
+        r.settle(api, "fail", {"key": "k"}, {"claimId": "c"}, error="e", usage={"model": "x"})
+        self.assertNotIn("usage", api.bodies[-1])
+        self.assertTrue(r.settle_extras)
+
+    def test_the_note_fallback_still_works(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "note"})])
+        keys = []
+        api.settle = lambda method, path, body, key, timeout=20: (keys.append(key), api.call(method, path, body))[1]
+        r.settle(api, "complete", {"key": "k"}, {"claimId": "c"}, outcome="replied", note="n")
+        self.assertEqual(keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:plain"])
