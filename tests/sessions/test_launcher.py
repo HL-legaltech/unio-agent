@@ -181,7 +181,7 @@ class Hooks(unittest.TestCase):
         for event, groups in hooks.items():
             for group in groups:
                 for h in group["hooks"]:
-                    if h["command"] == "%s %s" % (command, event):
+                    if h["command"] == command:
                         found[event] = (group.get("matcher"), bool(h.get("async")), h["timeout"])
         self.assertEqual(found, {
             # Async: a start that waits on Python competes with Claude Code's

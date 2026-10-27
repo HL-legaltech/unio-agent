@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\" SessionStart",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
             "timeout": 10,
             "async": true
           }
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\" UserPromptSubmit",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
             "async": true,
             "timeout": 10
           }
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\" PostToolUse",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
             "async": true,
             "timeout": 10
           }
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\" Stop",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
             "async": true,
             "timeout": 10
           }
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\" SessionEnd",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
             "timeout": 5
           }
         ]
