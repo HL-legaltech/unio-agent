@@ -76,8 +76,10 @@ class Subagents(unittest.TestCase):
 
 class Quota(unittest.TestCase):
     def test_both_windows_from_one_event(self):
-        s = read(fixture("subagent-p1.jsonl"))
-        self.assertEqual(s.rate_limits["seven_day"], {"utilization": 0.89, "resetsAt": "2026-10-28T12:00:00Z"})
+        with mock.patch.object(inbox, "utcnow", return_value=inbox.parse_iso("2026-10-27T11:58:00Z")):
+            s = read(fixture("subagent-p1.jsonl"))
+        self.assertEqual(s.rate_limits["seven_day"], {"utilization": 0.89, "resetsAt": "2026-10-28T12:00:00Z",
+                                                      "at": "2026-10-27T11:58:00Z"})
         self.assertEqual(s.rate_limits["five_hour"]["utilization"], 0.19)
 
     def test_one_window_without_unified_windows(self):
@@ -99,6 +101,14 @@ class Quota(unittest.TestCase):
         self.assertEqual(used, (0.91, inbox.parse_iso("2026-10-28T00:00:00Z")))
         self.assertIsNone(inbox.quota_used(h, "seven_day", at + inbox.timedelta(minutes=31)))
         self.assertIsNone(inbox.quota_used(h, "five_hour", at))
+
+    def test_health_keeps_when_the_session_read_it(self):
+        # A reading from the run's first minute is that old when the run is charged.
+        s = inbox.Session()
+        s.rate_limits = {"seven_day": {"utilization": 0.5, "resetsAt": None, "at": "2026-10-27T11:47:00Z"}}
+        h = {}
+        inbox.note_quota(h, s, inbox.parse_iso("2026-10-27T12:00:00Z"))
+        self.assertEqual(h["quota"]["seven_day"]["at"], "2026-10-27T11:47:00Z")
 
 
 def use(n, name, args, result=None, structured=None, error=False):

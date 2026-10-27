@@ -2116,12 +2116,13 @@ def rate_limits(event):
 
 
 def note_quota(h, s, now=None):
-    """health.json's quota: each window a session reported, with when it was read."""
+    """health.json's quota: each window a session reported, with when the
+    session read it (`now` for a reading that carries no time)."""
     if not s.rate_limits:
         return
     quota = h["quota"] = h["quota"] if isinstance(h.get("quota"), dict) else {}
     for name, window in s.rate_limits.items():
-        quota[name] = {**window, "at": iso(now or utcnow())}
+        quota[name] = {**window, "at": window.get("at") or iso(now or utcnow())}
 
 
 def quota_used(h, name, now):
@@ -2979,7 +2980,8 @@ class Session:
         self.timed_out = False
         self.interrupted = False
         self.stderr_tail = ""
-        # The subscription's windows as the last rate_limit_event gave them (rate_limits()).
+        # The subscription's windows as the last rate_limit_event gave them (rate_limits()),
+        # each with "at", when it arrived.
         self.rate_limits = {}
         self.web = WebTrack()
         # The run's answer comment, from its first create_comment the server took, and
@@ -3424,7 +3426,9 @@ class Runner:
                             if made and made not in s.projects:
                                 s.projects.append(made)
             elif kind == "rate_limit_event":
-                s.rate_limits.update(rate_limits(event))
+                # Stamped on arrival: the run is charged only when it ends, minutes later.
+                read_at = iso(utcnow())
+                s.rate_limits.update({name: {**w, "at": read_at} for name, w in rate_limits(event).items()})
             elif kind == "result":
                 s.result = event
 
