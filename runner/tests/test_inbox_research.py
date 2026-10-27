@@ -227,7 +227,10 @@ class Profile(HomeCase):
     def runner(self, **env):
         self.profile("org_test")
         cfg = inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on", **env}, "org_test")
-        return inbox.Runner(cfg)
+        runner = inbox.Runner(cfg)
+        # On Windows the argv's --settings is a file in the state folder.
+        runner.state.ensure()
+        return runner
 
     def test_argv(self):
         r = self.runner(UNIO_INBOX_RESEARCH_MODEL="claude-sonnet-test")
@@ -723,6 +726,7 @@ class DenyRules(HomeCase):
     def test_fetch_deny_rules(self):
         self.profile("org_test")
         r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        r.state.ensure()
         denied = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"))
         denied = denied[denied.index("--disallowedTools") + 1].split(",")
         for host in ("localhost", "127.0.0.1", "0.0.0.0", "api.unio.so", "unio.so"):
