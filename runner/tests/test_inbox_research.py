@@ -440,6 +440,34 @@ class Run(HomeCase):
         self.assertEqual(release["reason"], "usage_limit")
         self.assertNotIn("backoffUntil", {k for k, v in self.health().items() if v})
 
+    def test_a_run_at_its_cap_swaps_the_marker_without_scope_headers(self):
+        self.assertEqual(self.once("research_cap"), 0)
+        edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")
+        self.assertEqual(edit["body"]["content"], "Resposta de teste.\n\n" + inbox.RESEARCH_LIMIT["pt-BR"])
+        self.assertNotIn("X-Unio-Inbox-Claim", edit["headers"])
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual((done["outcome"], done["note"]), ("replied", inbox.RESEARCH_PARTIAL_NOTE))
+        item, = self.items()
+        self.assertEqual(item["research"]["end"], "partial")
+        self.assertIsNone(item.get("noteError"))
+
+    def test_a_run_that_posted_nothing_gets_the_runners_reply(self):
+        self.assertEqual(self.once("research_silent"), 0)
+        posts = [r for r in self.fake.seen("POST", "/v1/mcp")
+                 if r["body"]["params"]["arguments"]["body"].startswith("**Não consegui")]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["headers"]["X-Unio-Inbox-Claim"], "claim-0001-fake")
+        self.assertIn("[www.example.org](https://www.example.org/lei)", posts[0]["body"]["params"]["arguments"]["body"])
+        self.assertEqual(posts[0]["body"]["params"]["arguments"]["reply_to"], "c-0001")
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual(done["outcome"], "replied")
+        self.assertEqual(self.fake.seen("POST", "/v1/tasks/11111111-1111-4111-8111-111111111111/comments"), [])
+
+    def test_a_clean_end_needs_no_edit(self):
+        self.assertEqual(self.once("research"), 0)
+        self.assertEqual(self.fake.seen("PUT", "/v1/comments/c-session-reply"), [])
+        self.assertEqual(self.items()[0]["research"]["end"], "complete")
+
     def test_web_off_keeps_the_reply_run(self):
         os.environ["UNIO_INBOX_WEB"] = "off"
         self.assertEqual(self.once(""), 0)
@@ -526,3 +554,52 @@ class DenyRules(HomeCase):
         self.assertEqual(r.unio_hosts(), ("api.unio.so", "app.example.org"))
         search = r.research_args(Path("/m.json"), ("WebSearch",))
         self.assertNotIn("WebFetch(", search[search.index("--disallowedTools") + 1])
+
+
+class Endings(unittest.TestCase):
+    MARK = inbox.RESEARCH_MARKER["pt-BR"]
+    LIMIT = inbox.RESEARCH_LIMIT["pt-BR"]
+
+    def test_the_marker_gives_way_to_the_limit_line(self):
+        body = f"## Resposta\nA.\n\n{self.MARK}"
+        self.assertEqual(inbox.swap_marker(body, self.LIMIT), f"## Resposta\nA.\n\n{self.LIMIT}")
+        self.assertEqual(inbox.swap_marker(body), "## Resposta\nA.")
+
+    def test_a_marker_the_model_dressed_differently(self):
+        for mark in ("*Pesquisa em andamento: volto já.*", "_research in progress: soon_",
+                     inbox.RESEARCH_MARKER["en"]):
+            self.assertTrue(inbox.is_marker(mark), mark)
+        self.assertFalse(inbox.is_marker("A pesquisa em andamento mostrou"))
+        body = f"{self.MARK}\nA.\n\n{inbox.RESEARCH_MARKER['en']}"
+        self.assertEqual(inbox.swap_marker(body, self.LIMIT), f"A.\n\n{self.LIMIT}")
+
+    def test_without_the_marker(self):
+        self.assertEqual(inbox.swap_marker("A.", self.LIMIT, append=True), f"A.\n\n{self.LIMIT}")
+        self.assertEqual(inbox.swap_marker("A.", self.LIMIT), "A.")
+
+    def test_the_body_is_cut_never_the_line(self):
+        text = inbox.swap_marker("x" * 20000 + "\n\n" + self.MARK, self.LIMIT)
+        self.assertEqual(len(text), inbox.COMMENT_CHARS)
+        self.assertTrue(text.endswith(self.LIMIT))
+
+    def test_sources_a_reply_may_list(self):
+        urls = ["https://www.gov.example/lei?x=1#art7", "http://plain.example/", "https://user@a.example/",
+                "https://127.0.0.1/", "https://api.unio.so/v1/x", "https://www.gov.example/lei",
+                *(f"https://n{i}.example/p" for i in range(10))]
+        found = inbox.research_sources(urls, ("api.unio.so", "unio.so"))
+        self.assertEqual(found[0], "https://www.gov.example/lei")
+        self.assertEqual(len(found), 8)
+        self.assertTrue(all(u.startswith("https://") and "?" not in u for u in found))
+
+    def test_unfinished_reply(self):
+        text = inbox.unfinished_reply("pt-BR", ["https://www.gov.example/lei"])
+        self.assertEqual(text, "**Não consegui concluir esta pesquisa no tempo disponível.** Cheguei a abrir "
+                               "estas fontes, que podem ajudar:\n\n1. [www.gov.example](https://www.gov.example/lei)"
+                               "\n\nPeça um recorte menor (um tema, um período ou uma fonte) e me chame de novo.")
+        self.assertEqual(inbox.unfinished_reply("en", []),
+                         "**I could not finish this research in the time available.**\n\nAsk for a narrower cut "
+                         "(one topic, one period or one source) and mention me again.")
+
+    def test_every_language(self):
+        for table in (inbox.RESEARCH_LIMIT, inbox.RESEARCH_UNFINISHED):
+            self.assertEqual(set(table), set(inbox.LANGUAGE_NAMES))

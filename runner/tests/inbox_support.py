@@ -176,6 +176,8 @@ class FakeUnio:
             return 200, {"data": {}}
         if method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/comments"):
             return 201, {"data": {"id": "c-runner-reply"}}
+        if method == "PUT" and path.startswith("/v1/comments/"):
+            return 200, {"data": {"id": path.rsplit("/", 1)[1]}}
         if method == "POST" and path == "/v1/mcp":
             name = ((body.get("params") or {}).get("name"))
             # create_comment's answer (write_tools.ts): the new comment's id, its time and its task.

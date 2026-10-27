@@ -236,6 +236,27 @@ RESEARCH_MARKER = {
     "en": "_Research in progress: I will complete this answer here in a few minutes._",
     "pt-BR": "_Pesquisa em andamento: completo esta resposta aqui em alguns minutos._",
 }
+# What replaces the marker when a run ends before it removed it: the time or
+# turn cap, the web check, or an error after the answer was out.
+RESEARCH_LIMIT = {
+    "en": ("_I stopped at this research's limit. What is above was checked against the cited sources; to go "
+           "further, reply “continue” or ask for a narrower cut (one topic, one period or one source)._"),
+    "pt-BR": ("_Parei no limite desta pesquisa. O que está acima foi conferido nas fontes citadas; para ir além, "
+              "responda “continue” ou peça um recorte menor (um tema, um período ou uma fonte)._"),
+}
+# The runner's own reply when a run ended at its limit before posting anything.
+RESEARCH_UNFINISHED = {
+    "en": {"lead": "**I could not finish this research in the time available.**",
+           "opened": "I got to open these sources, which may help:",
+           "end": "Ask for a narrower cut (one topic, one period or one source) and mention me again."},
+    "pt-BR": {"lead": "**Não consegui concluir esta pesquisa no tempo disponível.**",
+              "opened": "Cheguei a abrir estas fontes, que podem ajudar:",
+              "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
+}
+RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
+COMMENT_CHARS = 20000
+UNFINISHED_SOURCES = 8
 RESEARCH_NO_WEB = {
     "en": ("I did not search the web this time: this week's usage limit is nearly spent. What follows was not "
            "checked against sources; confirm it before you use it."),
@@ -1258,9 +1279,11 @@ class Mcp:
     """Unio's MCP endpoint as a plain JSON-RPC client, for the runner's own
     writes: one tools/call per request, no handshake and no session."""
 
-    def __init__(self, url, token):
+    def __init__(self, url, token, headers=None):
         self.url = url
         self.token = token
+        # A claim's scope headers, for a write made on the item's behalf.
+        self.headers = dict(headers or {})
         self.next_id = 0
 
     def call_tool(self, name, arguments, timeout=30):
@@ -1277,6 +1300,8 @@ class Mcp:
         req.add_header("Accept", "application/json, text/event-stream")
         req.add_header("MCP-Protocol-Version", MCP_PROTOCOL)
         req.add_header("User-Agent", f"unio-inbox/{VERSION}")
+        for name, value in self.headers.items():
+            req.add_header(name, value)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status, ctype, raw = resp.status, resp.headers.get("Content-Type"), resp.read()
@@ -1782,6 +1807,65 @@ def fetch_problem(url, unio_hosts=()):
     if "@" in parts.netloc:
         return "userinfo"
     return private_host(host, unio_hosts)
+
+
+def is_marker(line):
+    """Whether a line is a checkpoint marker, in any writing language, however the model dressed it."""
+    text = line.strip().strip("*_ ").casefold()
+    return any(text.startswith(m.strip("_").split(":")[0].casefold()) for m in RESEARCH_MARKER.values())
+
+
+def has_marker(body):
+    return any(is_marker(line) for line in str(body or "").split("\n"))
+
+
+def swap_marker(body, line=None, append=False):
+    """The answer with its marker line replaced by `line`, or removed when `line`
+    is None; without a marker, `line` goes at the end when `append`. The body is
+    cut, never the line, to keep the comment within the server's cap."""
+    lines = str(body or "").split("\n")
+    marks = [n for n, text in enumerate(lines) if is_marker(text)]
+    kept = []
+    for n, text in enumerate(lines):
+        if n not in marks:
+            kept.append(text)
+        elif n == marks[-1] and line is not None:
+            kept.append(line)
+    text = "\n".join(kept).rstrip()
+    if line is not None and not marks and append:
+        text = f"{text}\n\n{line}" if text else line
+    if line is not None and len(text) > COMMENT_CHARS:
+        head = text[:len(text) - len(line)].rstrip()[:COMMENT_CHARS - len(line) - 2].rstrip()
+        text = f"{head}\n\n{line}"
+    return text
+
+
+def research_sources(urls, unio_hosts=()):
+    """The pages a run read that a reply may list: https on a public host, no
+    user or password, query and fragment dropped, at most UNFINISHED_SOURCES."""
+    found = []
+    for url in urls:
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            continue
+        if parts.scheme != "https" or fetch_problem(url, unio_hosts):
+            continue
+        clean = urllib.parse.urlunsplit(("https", parts.netloc.lower(), parts.path or "/", "", ""))
+        if clean not in found and not re.search(r"[\s()\[\]<>]", clean):
+            found.append(clean)
+    return found[:UNFINISHED_SOURCES]
+
+
+def unfinished_reply(language, sources, lead=None):
+    """The runner's reply to a research run that ended before posting: its
+    lead, the pages it opened, and what to ask next."""
+    words = RESEARCH_UNFINISHED[language]
+    lead = lead or words["lead"]
+    if not sources:
+        return f"{lead}\n\n{words['end']}"
+    listed = "\n".join(f"{n}. [{urllib.parse.urlsplit(url).hostname}]({url})" for n, url in enumerate(sources, 1))
+    return f"{lead} {words['opened']}\n\n{listed}\n\n{words['end']}"
 
 
 def asks_research(text):
@@ -3609,6 +3693,25 @@ class Runner:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
             return "stop"
 
+        if research and v.kind in ("too_large", "ok"):
+            limit = v.kind == "too_large"
+            clean = v.kind == "ok" and not v.error and v.claimed is None
+            end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
+            research["log"]["end"] = end
+            if not limit:
+                outcome = v.outcome
+            elif s.answer_id or note_error:
+                outcome = written_outcome(s.succeeded)
+            else:
+                outcome = "replied"
+            self.complete(api, item, claim, h, base, stats, outcome,
+                          RESEARCH_PARTIAL_NOTE if limit else v.note, claimedOutcome=None if limit else v.claimed,
+                          error=v.error, reason=None if limit else v.reason, noteError=note_error)
+            if v.pause:
+                self.pause(h, v.reason, v.error, v.pause, api, v.detail)
+                return "stop"
+            return "continue"
+
         if v.kind == "too_large":
             outcome = written_outcome(s.succeeded)
             note_error = None
@@ -3758,6 +3861,57 @@ class Runner:
         if v.kind == "research":
             v = Verdict("fail", cause="no_outcome", error="a research run asked for research")
         return s, v, info
+
+    def end_research(self, api, item, claim, s, limit, clean, no_web=False):
+        """(how the research ended, error): its answer comment closed, or the
+        runner's own reply when a run at its limit posted none. `limit`: the run
+        stopped at a cap, a timeout or the web check; `clean`: it ended as its
+        protocol says. A marker left in the answer gives way to the limit line,
+        except after a clean end, where it just goes."""
+        language = self.language
+        if s.answer_id:
+            body = s.answer_body
+            if limit:
+                text = swap_marker(body, RESEARCH_LIMIT[language], append=True)
+            elif has_marker(body):
+                text = swap_marker(body, None if clean else RESEARCH_LIMIT[language])
+            else:
+                return ("no_web" if no_web else "complete"), None
+            partial = limit or not clean
+            if body is None:
+                return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
+            return ("partial" if partial else "no_web" if no_web else "complete"), \
+                self.edit_comment(api, s.answer_id, text)
+        if not limit:
+            return ("no_web" if no_web else "complete"), None
+        reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
+        return "partial", self.post_research_reply(api, item, claim, reply)
+
+    def edit_comment(self, api, comment_id, content):
+        """The runner's edit of the run's answer, under the token alone: the server
+        admits an agent's edit of its own comment (agentGuard.commentOwner), and
+        no scope header ties it to a claim that may be ending."""
+        try:
+            st, d = api.settle("PUT", f"/comments/{comment_id}", {"content": content}, None)
+        except ApiUnreachable as e:
+            return str(e)
+        return None if 200 <= st < 300 else describe(st, d)
+
+    def post_research_reply(self, api, item, claim, content):
+        """The runner's reply under the item's claim, through MCP so the server's
+        content guard applies; REST when MCP refuses it twice. create_comment
+        answers a retry within 10 minutes with the comment it already posted."""
+        comment = item.get("comment") or {}
+        mcp = Mcp(self.cfg.mcp_url, api.token, scope_headers(item, claim))
+        arguments = {"task": (item.get("task") or {}).get("key") or (item.get("task") or {}).get("id"),
+                     "body": content, **({"reply_to": comment["id"]} if comment.get("id") else {})}
+        error = None
+        for _ in range(2):
+            answer, error = mcp.call_tool("create_comment", arguments)
+            if answer is not None:
+                return None
+        fallback = self.reply(api, item, content, f"unio-inbox:note:{item.get('key')}:{claim['claimId']}")
+        return f"{error}; {fallback}" if fallback else None
 
     def complete(self, api, item, claim, h, base, stats, outcome, note, **extra):
         st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note)
