@@ -78,15 +78,13 @@ rem and claude must start in this console, so Python runs here and not
 rem under Git's sh. Its help is bin\unio's, which sh prints.
 for %%a in (%*) do if /i "%%~a"=="-h" goto :posix
 for %%a in (%*) do if /i "%%~a"=="--help" goto :posix
-rem As for runner, an argument holding "&", "|" or "^" breaks these lines;
-rem keys, task ids and session ids never hold one.
-set "unio_args=%*"
-set "unio_args=%unio_args:*resume=%"
+rem The arguments go on in their own slots, never through a variable:
+rem expanding one would let a quoted "&" or "|" end the line.
 set "unio_python="
 call py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=py -3"
 if not defined unio_python call python -c "import sys; sys.exit(sys.version_info < (3, 9))" <nul >nul 2>nul && set "unio_python=python"
 if not defined unio_python goto :no_python
-%unio_python% -X utf8 -I "%unio_root%\plugins\unio\scripts\sessions.py" resume%unio_args%
+%unio_python% -X utf8 -I "%unio_root%\plugins\unio\scripts\sessions.py" resume %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
 
 :help
