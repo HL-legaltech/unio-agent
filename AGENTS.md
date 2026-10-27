@@ -141,9 +141,9 @@ No AI attribution. Stage named paths only.
   table of commands, and `bin/unio.cmd` prints the same lines. A new command
   adds its line there and a branch to each file; the table lists only
   commands both files run.
-- `bin/unio.cmd` runs every command but `runner` as `bin/unio`, through Git
-  for Windows' `sh.exe`, which is not on the PATH: it finds it from
-  `where git`.
+- `bin/unio.cmd` runs every command but `runner` and `resume` as `bin/unio`,
+  through Git for Windows' `sh.exe`, which is not on the PATH: it finds it
+  from `where git`. Those two run Python itself, in the person's console.
 - On Windows both installers clone to `%LOCALAPPDATA%\unio\agent`, but
   `install.sh` and `install.ps1`'s plugin mode keep using a clone already at
   `~/.local/share/unio/agent`, since a Codex config names it.

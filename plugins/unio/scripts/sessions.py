@@ -1,9 +1,10 @@
 """Coding sessions on the agent's page in Unio. session-status.sh runs it for
-Claude Code's hooks.
+Claude Code's hooks; bin/unio and bin/unio.cmd run it for `unio resume`.
 
     sessions.py hook                      one hook event, as JSON on stdin
     sessions.py watch --session <id> ...  the session's watcher (detached)
     sessions.py send-presence <id> <seq>  one presence report (detached)
+    sessions.py resume <task|id> [--list|--print]
 
 It runs under python -I, which leaves this folder off sys.path, so it puts it
 there itself. A hook always exits 0.
@@ -16,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def main(argv):
     command, rest = (argv[0], argv[1:]) if argv else ("", [])
+    if command == "resume":
+        from unio_sessions import resume
+        return resume.main(rest)
     try:
         if command == "hook":
             from unio_sessions import hook

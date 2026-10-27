@@ -149,6 +149,7 @@ The installers put a `unio` command on your PATH: [`bin/unio`](bin/unio) in the 
 | `unio doctor` | The same checks as `/unio:doctor`, for the current folder. `--codex` checks Codex instead; `--json` prints one item per check, for scripts. |
 | `unio update` | Installs the newest plugin, clone and answering service, as installed. |
 | `unio disconnect` | Deletes a workspace's token and folder lines from this computer (`--workspace org_…`, or the current folder's). The token stays valid in Unio until you revoke it. |
+| `unio resume` | Resumes in Claude Code, in the folder it started in, the newest session that worked on a task (`DEV-12`, its link or its id), or one session by the id the agent's page shows you. `--list` lists them; `--print` prints the command instead. Needs Python 3.9 or later. |
 | `unio runner` | The [answering service](#answering-service)'s commands. |
 
 `unio help <command>` and `unio <command> --help` show each command's options. The command exits with 0 when everything worked, 1 when something failed or is missing, and 2 for a usage error, and never waits for an answer without a terminal.
