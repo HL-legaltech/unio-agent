@@ -16,6 +16,15 @@
 
 # An inbox run is not a coding session.
 [ "${UNIO_INBOX_RUN:-}" = 1 ] && exit 0
+
+# $1 is the hook's event, as hooks.json names it. On Windows the MCP header
+# helper finds the session's folder through powershell.exe, which is slow to
+# start, while a session opens; a Python started beside it made the helper
+# miss Claude Code's deadline, and the connection went out with no token.
+# Both events run async, so the wait holds nobody up.
+case $UNIO_OS:${1:-} in
+  windows:SessionStart|windows:UserPromptSubmit) sleep 2 ;;
+esac
 python=$(unio_python) || exit 0
 
 file=$(unio_token_file "${CLAUDE_PROJECT_DIR:-$PWD}")
