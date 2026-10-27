@@ -152,6 +152,18 @@ class Usage(unittest.TestCase):
         self.assertEqual(inbox.run_usage({}, 3.0), {"costUsd": 3.0, "estimated": True})
         self.assertIsNone(inbox.run_usage(None))
 
+    def test_tokens_are_the_main_models_and_cost_is_every_models(self):
+        # The real research run of 2026-10-27: Haiku's page reading was 422,947 of 422,975 input tokens.
+        usage = inbox.run_usage({"total_cost_usd": 1.9, "num_turns": 40, "modelUsage": {
+            "claude-haiku-4-5": {"inputTokens": 422947, "outputTokens": 9000, "cacheReadInputTokens": 0,
+                                 "cacheCreationInputTokens": 0, "costUSD": 0.47},
+            "claude-opus-5-5": {"inputTokens": 28, "outputTokens": 12000, "cacheReadInputTokens": 900000,
+                                "cacheCreationInputTokens": 80000, "costUSD": 1.43}}})
+        self.assertEqual(usage["model"], "claude-opus-5-5")
+        self.assertEqual((usage["inputTokens"], usage["outputTokens"], usage["cacheReadTokens"],
+                          usage["cacheWriteTokens"]), (28, 12000, 900000, 80000))
+        self.assertEqual(usage["costUsd"], 1.9)
+
 
 class Intent(unittest.TestCase):
     def test_asking_words_in_portuguese_and_english(self):

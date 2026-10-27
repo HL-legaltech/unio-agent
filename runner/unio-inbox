@@ -2166,22 +2166,24 @@ def session_text(s):
 
 def run_usage(ev, assumed_usd=None):
     """What a session spent, from its result event: the model that cost the
-    most, tokens summed over every model (the Haiku calls behind WebSearch and
-    WebFetch included), the list-price cost and its turns. A session stopped
-    before its result counts `assumed_usd`, marked estimated."""
+    most and its own tokens, the list-price cost of every model and the
+    turns. The Haiku calls behind WebSearch and WebFetch read whole pages:
+    summed in, they made nearly all of a research run's input tokens. A
+    session stopped before its result counts `assumed_usd`, marked estimated."""
     if not isinstance(ev, dict) or not ev:
         return {"costUsd": assumed_usd, "estimated": True} if assumed_usd is not None else None
     models = {name: m for name, m in (ev.get("modelUsage") or {}).items() if isinstance(m, dict)} \
         if isinstance(ev.get("modelUsage"), dict) else {}
+    model = max(models, key=lambda name: models[name].get("costUSD") or 0) if models else None
 
-    def total(field):
-        values = [m.get(field) for m in models.values()]
-        return sum(v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)) if models else None
+    def tokens(field):
+        value = models[model].get(field) if model else None
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
     return {
-        "model": max(models, key=lambda name: models[name].get("costUSD") or 0) if models else None,
-        "inputTokens": total("inputTokens"), "outputTokens": total("outputTokens"),
-        "cacheReadTokens": total("cacheReadInputTokens"), "cacheWriteTokens": total("cacheCreationInputTokens"),
+        "model": model,
+        "inputTokens": tokens("inputTokens"), "outputTokens": tokens("outputTokens"),
+        "cacheReadTokens": tokens("cacheReadInputTokens"), "cacheWriteTokens": tokens("cacheCreationInputTokens"),
         "costUsd": ev.get("total_cost_usd"), "turns": ev.get("num_turns"), "estimated": False,
     }
 
