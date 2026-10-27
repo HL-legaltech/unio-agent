@@ -1130,6 +1130,8 @@ class FileChecks(HomeCase):
     def test_note_and_target(self):
         self.assertEqual(inbox.file_note(self.BODY, "aliquotas-iss-2026.csv"),
                          "Anexei aliquotas-iss-2026.csv: as 80 linhas com município e alíquota.")
+        self.assertEqual(len(inbox.file_note("Anexei **a-2026.md**: " + "x" * 400, "a-2026.md")), 200)
+        self.assertIsNone(inbox.file_note("**", "**"))
         for text in ("pesquise e anexe na tarefa", "coloque no card a planilha", "Anexe a planilha na própria tarefa",
                      "please attach it to the task", "@[Agent](u) research and put the CSV on the task"):
             self.assertTrue(inbox.wants_task_file(text), text)

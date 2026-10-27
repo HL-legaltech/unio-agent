@@ -2172,7 +2172,8 @@ def check_files(folder, body, limit=FILES_PER_RUN):
 
 
 def file_note(body, shown):
-    """Why a file is attached: the comment's line that names it, in plain words."""
+    """Why a file is attached: the comment's line that names it, in plain words.
+    The server requires one line of 1 to 200 characters."""
     line = next((ln for ln in str(body or "").split("\n") if shown in ln), "")
     line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
     return short(re.sub(r"[*_`#>]+", "", line).strip(" -"), FILE_NOTE_CHARS) or None
@@ -4434,7 +4435,7 @@ class Runner:
         """POST /agents/inbox/files: JSON text, never multipart, under the token
         alone, as progress is; the key and claim in the body name the run."""
         body = self.receipt(item, claim, commentId=s.answer_id, name=f["name"], content=f["content"],
-                            note=file_note(s.answer_body, f["shown"]))
+                            note=file_note(s.answer_body, f["shown"]) or f["shown"])
         if target != "comment":
             body["target"] = target
         if f["render"]:
