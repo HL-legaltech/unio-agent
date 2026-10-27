@@ -118,6 +118,7 @@ closing and the runner finishing it).
 """
 import argparse
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -371,6 +372,25 @@ RESEARCH_INTENT = re.compile(r"^(pesquis[ea]r?|pesquisa|investigu?e|levante|apur
 # How Unio writes a mention in a comment (agent_inbox_service.ts ANY_MENTION).
 MENTION_TOKEN = re.compile(r"@\[[^\]]+\]\([^)]+\)")
 RESEARCH_QUESTION_CHARS = 300
+# What a research query or address must never carry, checked on every WebSearch
+# and WebFetch the stream shows: a hit stops the session. It detects a leak,
+# since the call may already be out; it cannot prevent one. Digit runs are
+# fenced so a longer number (a 13-digit timestamp) is not read as a CPF.
+PRIVATE_TEXT = (
+    ("cpf", re.compile(r"(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)")),
+    ("cnpj", re.compile(r"(?<!\d)\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}(?!\d)")),
+    ("case_number", re.compile(r"(?<!\d)\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}(?!\d)")),
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
+)
+# WebFetch runs on the operator's machine, beside its dev servers. Measured on
+# 2.1.311 under -p --restricted (probe G1, 2026-10-27): WebFetch(domain:localhost)
+# and WebFetch(domain:127.0.0.1) deny rules refuse those hosts, but 127.0.0.2 went
+# out, so the deny rules name the usual hosts and fetch_problem() is the control.
+FETCH_DENIED = ("localhost", "127.0.0.1", "0.0.0.0")
+LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".lan")
+CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# inet_aton's forms (127.1, 0x7f000001, 2130706433) reach the loopback as surely as 127.0.0.1.
+NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$")
 # The server's claim lasts 15 minutes from claimed_at, and nothing extends it
 # (agent_inbox_receipt_service.ts). A research run ends RESEARCH_MARGIN before
 # that, for its closing writes and settlement, and does not start with less
@@ -1707,6 +1727,63 @@ def fold(text):
     return "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
 
 
+def private_text(text, task_key=None):
+    """What private kind of text a query or an address carries, or None."""
+    text = urllib.parse.unquote(str(text or ""))
+    for kind, pattern in PRIVATE_TEXT:
+        if pattern.search(text):
+            return kind
+    if task_key and re.search(rf"(?<![A-Za-z0-9]){re.escape(task_key)}(?!\d)", text, re.I):
+        return "task_key"
+    return None
+
+
+def host_address(host):
+    """The IP address a host names literally, in any form a resolver reads, or None."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if not NUMERIC_HOST.match(host):
+            return None
+        try:
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return None
+    return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
+
+
+def private_host(host, unio_hosts=()):
+    """Why a host is off limits to WebFetch, or None for a public one."""
+    host = str(host or "").lower().strip("[]").rstrip(".")
+    if not host:
+        return "no_host"
+    ip = host_address(host)
+    if ip is not None:
+        private = ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified \
+            or ip.is_multicast or (ip.version == 4 and ip in CGNAT)
+        return "private_address" if private else None
+    if host == "localhost" or host.endswith(LOCAL_SUFFIXES) or "." not in host:
+        return "local_name"
+    if any(host == h or host.endswith("." + h) for h in unio_hosts):
+        return "unio_host"
+    return None
+
+
+def fetch_problem(url, unio_hosts=()):
+    """Why WebFetch must not read this address, or None: http(s) only, no
+    user or password in it, and a public host."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or "").strip())
+        host = parts.hostname
+    except ValueError:
+        return "unreadable"
+    if parts.scheme.lower() not in ("http", "https"):
+        return "scheme"
+    if "@" in parts.netloc:
+        return "userinfo"
+    return private_host(host, unio_hosts)
+
+
 def asks_research(text):
     """Whether a comment's first words, past its mentions and punctuation, ask to find something out."""
     text = fold(MENTION_TOKEN.sub(" ", str(text or "")))
@@ -2692,6 +2769,9 @@ class Session:
         # the latest body sent to it: no agent route reads a comment back.
         self.answer_id = None
         self.answer_body = None
+        # A research run's checks ({"key", "hosts"}), and the first one its calls broke.
+        self.guard = None
+        self.violation = None
 
     @property
     def bad_init(self):
@@ -2843,7 +2923,8 @@ class Runner:
             "--settings", self.settings_arg(),
             "--tools", ",".join(web),
             "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web]),
-            "--disallowedTools", ",".join(RESEARCH_DENIED),
+            "--disallowedTools", ",".join([*RESEARCH_DENIED, *(
+                f"WebFetch(domain:{host})" for host in self.fetch_denied() if "WebFetch" in web)]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
             "--append-system-prompt-file", str(self.cfg.researcher),
             "--max-turns", str(self.cfg.research_max_turns), "--max-budget-usd", self.cfg.research_max_budget,
@@ -2851,6 +2932,19 @@ class Runner:
         if self.cfg.research_model:
             args += ["--model", self.cfg.research_model]
         return args
+
+    def unio_hosts(self):
+        """Unio's own hosts, which research never reads: the API's and the web app's."""
+        hosts = [urllib.parse.urlsplit(self.cfg.api).hostname]
+        app = (self._workspace or {}).get("appUrl")
+        if isinstance(app, str):
+            hosts.append(urllib.parse.urlsplit(app).hostname)
+        elif hosts[0] and hosts[0].startswith("api."):
+            hosts.append(hosts[0][4:])
+        return tuple(dict.fromkeys(h.lower() for h in hosts if h))
+
+    def fetch_denied(self):
+        return tuple(dict.fromkeys([*FETCH_DENIED, *self.unio_hosts()]))
 
     def review_args(self, mcp_path):
         # `--tools ""` takes the built-in tools away; no --add-dir: a review reads no code.
@@ -2983,6 +3077,7 @@ class Runner:
             if research is not None:
                 argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
                 s = Session(required=RESEARCH_REQUIRED, builtin=set(research))
+                s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
                 required = PROJECT_REQUIRED_TOOLS if item_subject(item) == "project" else REQUIRED_TOOLS
@@ -3015,7 +3110,7 @@ class Runner:
                         break
                     except subprocess.TimeoutExpired:
                         pass
-                    if s.bad_init:
+                    if s.bad_init or s.violation:
                         self.kill(proc)
                     elif stopping.is_set():
                         s.interrupted = True
@@ -3078,6 +3173,8 @@ class Runner:
                         s.tool_uses[block.get("id")] = name
                         s.tool_inputs[block.get("id")] = block.get("input") or {}
                         s.web.use(block)
+                        if s.guard and not s.violation and name in ("WebSearch", "WebFetch"):
+                            Runner._check_web(proc, s, name, block.get("input"))
                         filing = name == "mcp__unio__create_task" and (block.get("input") or {}).get("project")
                         s.step = "updating_project" if filing else s.steps.get(name, s.step)
                     elif block.get("type") == "tool_result" and block.get("is_error"):
@@ -3093,7 +3190,11 @@ class Runner:
                                                 block.get("content"))
                         if name == "WebFetch" and len(content) == 1:
                             # Its structured answer sits beside the message, one per event.
-                            s.web.answer(block.get("tool_use_id"), event.get("tool_use_result"))
+                            answer = event.get("tool_use_result")
+                            s.web.answer(block.get("tool_use_id"), answer)
+                            if s.guard and not s.violation and isinstance(answer, dict):
+                                # Where a redirect landed.
+                                Runner._check_web(proc, s, name, {"url": answer.get("url")})
                         if name == POST_UPDATE:
                             health = (s.tool_inputs.get(block.get("tool_use_id")) or {}).get("health")
                             s.posted_health = health if isinstance(health, str) else s.posted_health
@@ -3105,6 +3206,22 @@ class Runner:
                 s.rate_limits.update(rate_limits(event))
             elif kind == "result":
                 s.result = event
+
+    @staticmethod
+    def _check_web(proc, s, name, args):
+        """Stops the session when a search or an address carries private text, or
+        an address leads off the public web; the kind of problem is kept, never the text."""
+        args = args if isinstance(args, dict) else {}
+        if name == "WebSearch":
+            problem = private_text(args.get("query"), s.guard.get("key"))
+        else:
+            url = args.get("url")
+            if url is None:
+                return
+            problem = fetch_problem(url, s.guard.get("hosts") or ()) or private_text(url, s.guard.get("key"))
+        if problem:
+            s.violation = f"{name} {problem}"
+            stop_group(proc)
 
     @staticmethod
     def _note_answer(s, name, args, content):
@@ -3197,6 +3314,8 @@ class Runner:
             return Verdict("release", reason="interrupted", error="the runner stopped during the session",
                            retry=now + INTERRUPTED_RETRY)
         ev = s.result or {}
+        if s.violation:
+            return Verdict("too_large", error=f"stopped by the web check: {s.violation}")
         if s.timed_out:
             return Verdict("too_large", error=f"timed out after {int(timeout)} s")
         if ev.get("subtype") in CAP_SUBTYPES:
@@ -3456,6 +3575,9 @@ class Runner:
             out = research.get("out") or out
             if s.answer_id:
                 self.remember_thread(h, item, s.answer_id)
+            if s.violation:
+                research["log"]["violation"] = s.violation
+                self.state.log("guard_violation", **base, kind=s.violation)
         else:
             usd = self.charge(h, s, started_at)
         stats = {"attempt": attempt, "claimId": claim.get("claimId"), "run": f"{run_dir.name}/{out.name}",

@@ -118,11 +118,11 @@ def fetch(n, url, code=200, final=None):
 class Usage(unittest.TestCase):
     def test_web_counts(self):
         s = read([*use(1, "WebSearch", {"query": "aliquota iss", "mode": "standard"}),
-                  *fetch(2, "https://www.planalto.gov.br/a"), *fetch(3, "https://portal.stf.jus.br/t", 504),
-                  *fetch(4, "https://www.planalto.gov.br/a"),
+                  *fetch(2, "https://www.gov.example/a"), *fetch(3, "https://portal.court.example/t", 504),
+                  *fetch(4, "https://www.gov.example/a"),
                   *use(5, "WebFetch", {"url": "https://x.example/"}, "connect ECONNREFUSED", "Error: x", True)])
         self.assertEqual(s.web.counts(), {"searches": 1, "fetches": 4, "sources": 1})
-        self.assertEqual(s.web.sources, ["https://www.planalto.gov.br/a"])
+        self.assertEqual(s.web.sources, ["https://www.gov.example/a"])
         self.assertEqual(s.step, "researching")
 
     def test_a_redirect_is_kept_where_it_landed(self):
@@ -447,3 +447,82 @@ class Run(HomeCase):
         self.assertIn("Web research: not available.", session["prompt"])
         self.assertTrue(session["argv"][session["argv"].index("--append-system-prompt-file") + 1]
                         .endswith("responder.md"))
+
+
+class WebGuard(unittest.TestCase):
+    def test_private_text(self):
+        for text, kind in (("cpf 123.456.789-09", "cpf"), ("12345678909 situacao", "cpf"),
+                           ("cnpj 12.345.678/0001-95", "cnpj"), ("12345678000195", "cnpj"),
+                           ("processo 0001234-56.2026.8.26.0100", "case_number"),
+                           ("00012345620268260100", "case_number"), ("contato ana@example.com", "email"),
+                           ("ABC-12 prazo", "task_key"), ("https://x.example/?q=abc-12", "task_key"),
+                           ("https://x.example/a%40b.example.com", "email")):
+            self.assertEqual(inbox.private_text(text, "ABC-12"), kind, text)
+        for text in ("aliquota iss software 2026", "lei 13709 2018 art 7", "https://x.example/n/1793188800123",
+                     "ABC-123 is another task", "LC 116/2003", None):
+            self.assertIsNone(inbox.private_text(text, "ABC-12"), text)
+
+    def test_hosts(self):
+        unio = ("api.unio.so", "unio.so")
+        for url, problem in (("http://localhost:3001/", "local_name"), ("http://127.0.0.2:9/", "private_address"),
+                             ("http://10.0.0.5/", "private_address"), ("http://192.168.1.1/", "private_address"),
+                             ("http://172.16.0.1/", "private_address"), ("http://169.254.169.254/", "private_address"),
+                             ("http://100.64.1.1/", "private_address"), ("http://[::1]/", "private_address"),
+                             ("http://[::ffff:127.0.0.1]/", "private_address"), ("http://0.0.0.0/", "private_address"),
+                             ("http://2130706433/", "private_address"), ("http://0x7f.1/", "private_address"),
+                             ("http://127.1/", "private_address"), ("http://printer.local/", "local_name"),
+                             ("http://db.internal/", "local_name"), ("http://intranet/", "local_name"),
+                             ("https://api.unio.so/v1/tasks", "unio_host"), ("https://unio.so/app", "unio_host"),
+                             ("https://user:pw@example.org/", "userinfo"), ("file:///etc/passwd", "scheme"),
+                             ("ftp://example.org/", "scheme")):
+            self.assertEqual(inbox.fetch_problem(url, unio), problem, url)
+        for url in ("https://www.gov.example/ccivil_03/leis/l13709.htm", "http://8.8.8.8/",
+                    "https://beef.cafe.example/", "https://unio.so.example/"):
+            self.assertIsNone(inbox.fetch_problem(url, unio), url)
+
+    def checked(self, lines):
+        s = inbox.Session(required=(), builtin={"WebSearch", "WebFetch"})
+        s.guard = {"key": "ABC-1", "hosts": ("api.unio.so",)}
+        return read(lines, s)
+
+    def test_a_private_query_stops_the_session(self):
+        s = self.checked([*use(1, "WebSearch", {"query": "ABC-1 prazo"}),
+                          *use(2, "WebSearch", {"query": "ana@example.com"})])
+        self.assertEqual(s.violation, "WebSearch task_key")
+        self.assertEqual(s.proc.stopped, 1)
+
+    def test_a_private_fetch_stops_it(self):
+        s = self.checked(use(1, "WebFetch", {"url": "http://127.0.0.2:9/"}))
+        self.assertEqual(s.violation, "WebFetch private_address")
+
+    def test_a_redirect_to_a_private_host_stops_it(self):
+        s = self.checked(fetch(1, "https://short.example/x", 200, "http://192.168.0.1/admin"))
+        self.assertEqual(s.violation, "WebFetch private_address")
+
+    def test_public_calls_pass(self):
+        s = self.checked([*use(1, "WebSearch", {"query": "aliquota iss software"}),
+                          *fetch(2, "https://www.gov.example/a")])
+        self.assertIsNone(s.violation)
+        self.assertEqual(s.proc.stopped, 0)
+
+    def test_a_violation_ends_like_a_cap(self):
+        r = inbox.Runner.__new__(inbox.Runner)
+        s = inbox.Session()
+        s.result, s.returncode, s.violation = {"subtype": "success"}, 0, "WebSearch cpf"
+        v = r._ended(s, inbox.utcnow(), 780)
+        self.assertEqual(v.kind, "too_large")
+        self.assertIn("WebSearch cpf", v.error)
+
+
+class DenyRules(HomeCase):
+    def test_fetch_deny_rules(self):
+        self.profile("org_test")
+        r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        denied = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"))
+        denied = denied[denied.index("--disallowedTools") + 1].split(",")
+        for host in ("localhost", "127.0.0.1", "0.0.0.0", "api.unio.so", "unio.so"):
+            self.assertIn(f"WebFetch(domain:{host})", denied)
+        r._workspace = {"appUrl": "https://app.example.org"}
+        self.assertEqual(r.unio_hosts(), ("api.unio.so", "app.example.org"))
+        search = r.research_args(Path("/m.json"), ("WebSearch",))
+        self.assertNotIn("WebFetch(", search[search.index("--disallowedTools") + 1])
