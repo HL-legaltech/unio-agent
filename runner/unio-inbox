@@ -275,8 +275,9 @@ RESEARCH_UNFINISHED = {
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
 RESEARCH_STOPPED_NOTE = "research stopped on request"
-# A person stopped the run from the thread (PLAN 1, state 15). The server may
-# name them in the progress answer; without a name the line names nobody.
+# A person stopped the run from the thread (PLAN 1, state 15). Unio's progress
+# answer carries `stop` alone (DEV-674), so the line names nobody; a
+# `stoppedBy: {name}` beside it would name them.
 RESEARCH_STOPPED = {
     "en": {"by": "Research stopped by {name}.", "anon": "Research stopped.",
            "line": "_{stopped} What is above was checked against the cited sources._"},

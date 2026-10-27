@@ -116,8 +116,8 @@ class FakeUnio:
         self.research_mark_status = None
         # An HTTP status every runner create_comment over MCP gets, or None.
         self.mcp_comment_status = None
-        # The name of whoever stops a research run, or None.
-        self.stop_research = None
+        # Whether a person stops a research run once it reports past its start.
+        self.stop_research = False
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -184,11 +184,11 @@ class FakeUnio:
             with self.lock:
                 research = [r for r in self.requests if r["path"] == path and isinstance(r["body"], dict)
                             and r["body"].get("mode") == "research"]
-            # A person stops a research run once it has reported past its start.
-            if self.stop_research and len(research) >= 2:
-                return 200, {"data": {"step": body.get("step"), "mode": "research", "stop": True,
-                                      "stoppedBy": {"name": self.stop_research}}}
-            return 200, {"data": {}}
+            # The answer's shape (report_agent_inbox_progress_controller.ts, DEV-674): who stopped
+            # the run is not in it.
+            stop = bool(self.stop_research and len(research) >= 2)
+            return 200, {"data": {"key": body.get("key"), "claimId": body.get("claimId"), "step": body.get("step"),
+                                  "mode": "research" if research else "reply", "stop": stop}}
         if method in ("PUT", "DELETE") and path == "/v1/agents/reactions":
             return 200, {"data": {}}
         if method == "PUT" and path.startswith("/v1/agents/presence/"):
