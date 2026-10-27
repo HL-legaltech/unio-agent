@@ -102,7 +102,7 @@ class Once(HomeCase):
         answer = self.fake.seen("POST", "/v1/mcp")[0]
         self.assertEqual(answer["headers"]["X-Unio-Inbox-Item"], "comment:c-0001")
         self.assertEqual(answer["headers"]["X-Unio-Inbox-Claim"], "claim-0001-fake")
-        self.assertEqual(answer["body"]["params"]["arguments"]["content"], "Resposta de teste.")
+        self.assertEqual(answer["body"]["params"]["arguments"]["body"], "Resposta de teste.")
 
         complete = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
         self.assertEqual((complete["key"], complete["claimId"], complete["outcome"]),
