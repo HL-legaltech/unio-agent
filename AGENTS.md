@@ -73,6 +73,7 @@ bash tests/run.sh
 sh tests/check_versions.sh origin/main
 python3 -I tests/e2e/claude_session.py
 python3 -m unittest discover -s runner/tests -v
+python3 -m unittest discover -s tests/sessions -v
 ```
 
 - `tests/e2e/claude_session.py` runs the real Claude Code with the plugin
