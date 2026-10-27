@@ -279,6 +279,8 @@ STEPS = {
     "mcp__unio__create_milestone": "updating_project",
     "mcp__unio__update_milestone": "updating_project",
     "mcp__unio__post_project_update": "updating_project",
+    "WebSearch": "researching",
+    "WebFetch": "researching",
 }
 # A project review is offered these two tools and nothing else: the server
 # registers only them under X-Unio-Review-Project, so any other tool at init
