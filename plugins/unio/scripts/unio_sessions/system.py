@@ -190,6 +190,9 @@ def _kernel32():
         k.GetProcessTimes.restype = wintypes.BOOL
         k.CloseHandle.argtypes = [handle]
         k.CloseHandle.restype = wintypes.BOOL
+        k.QueryFullProcessImageNameW.argtypes = [handle, wintypes.DWORD, wintypes.LPWSTR,
+                                                 ctypes.POINTER(wintypes.DWORD)]
+        k.QueryFullProcessImageNameW.restype = wintypes.BOOL
         _K32 = k
     return _K32
 
@@ -320,9 +323,32 @@ def is_child(pid):
     return any(v.startswith(CHILD_MARK) for v in env or [])
 
 
+def _windows_image(pid):
+    """The full path of process `pid`'s executable, case-folded, or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    k = _kernel32()
+    h = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return None
+        return os.path.normcase(buf.value)
+    finally:
+        k.CloseHandle(h)
+
+
 def _windows_claude_above(pid):
+    """Another Claude Code above `pid`. Only one running the same executable
+    counts: Claude Desktop's process is Claude.exe too, and the sessions it
+    starts are top-level ones."""
     table = _windows_table()
     own = _windows_start(pid)
+    image = _windows_image(pid)
     seen = {int(pid)}
     current = table.get(int(pid), (None, None))[1]
     for _ in range(12):
@@ -334,7 +360,7 @@ def _windows_claude_above(pid):
         # A parent id Windows has since given to a newer process is no parent.
         if started is None or own is not None and int(started) > int(own):
             return False
-        if name == "claude":
+        if name == "claude" and (image is None or _windows_image(current) in (image, None)):
             return True
         current = parent
     return False

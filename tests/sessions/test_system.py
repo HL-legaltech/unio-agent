@@ -186,12 +186,22 @@ class OtherSystems(unittest.TestCase):
         table = {10: ("explorer", 1), 20: ("claude", 10), 30: ("bash", 20), 40: ("claude", 30), 50: ("pwsh", 10),
                  60: ("claude", 50)}
         start = {pid: str(pid * 1000) for pid in table}
+        cli = "c:\\users\\x\\.local\\bin\\claude.exe"
+        image = {20: cli, 40: cli, 60: cli}
         with mock.patch.object(system, "WINDOWS", True), \
                 mock.patch.object(system, "_windows_table", return_value=table), \
+                mock.patch.object(system, "_windows_image", side_effect=lambda pid: image.get(pid)), \
                 mock.patch.object(system, "_windows_start", side_effect=lambda pid: start.get(pid)):
             self.assertTrue(system.is_child(40), "a claude started from another session's shell")
             self.assertFalse(system.is_child(60))
             self.assertFalse(system.is_child(20))
+            # Claude Desktop's process is Claude.exe too, from another folder:
+            # the sessions it starts are top-level ones.
+            image[20] = "c:\\users\\x\\appdata\\local\\anthropicclaude\\claude.exe"
+            self.assertFalse(system.is_child(40), "a session Claude Desktop started")
+            # An ancestor whose path cannot be read still counts, as before.
+            del image[20]
+            self.assertTrue(system.is_child(40))
             # A parent id that Windows reused for a newer process is no parent.
             start[30] = str(10 ** 9)
             self.assertFalse(system.is_child(40))
