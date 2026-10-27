@@ -1160,6 +1160,9 @@ class Watcher:
         self.state_path = hook.STATE / f"{args.session}.watch.json"
         self.binding_path = hook.STATE / f"{args.session}.json"
         self.stop = False
+        # Liveness checks failed in a row: one ps that times out on a loaded
+        # Mac must not end a session whose Claude Code still runs.
+        self.missed = 0
         self.code = code_stamp()
         self.code_refused = None
         self.task, self.binding_stamp = None, None
@@ -1363,7 +1366,8 @@ class Watcher:
         if continued and (self.model.s.get("lastActivityAt") or 0) <= continued:
             self.finish("continued")
             return False
-        if not self.alive() and now - self.model.s["lastGrowthAt"] >= TIMES["endAfter"]:
+        self.missed = 0 if self.alive() else self.missed + 1
+        if self.missed >= 3 and now - self.model.s["lastGrowthAt"] >= TIMES["endAfter"]:
             self.finish("process_gone")
             return False
         if now - self.ghost_at >= TIMES["ghostEvery"]:
