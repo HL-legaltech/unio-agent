@@ -453,7 +453,8 @@ class Model:
             for name in names:
                 if not name.endswith(".jsonl"):
                     continue
-                key = os.path.relpath(os.path.join(dirpath, name), base)
+                # Keys use / on every system: the rest of the watcher names them so.
+                key = os.path.relpath(os.path.join(dirpath, name), base).replace(os.sep, "/")
                 f = self.file(key)
                 if f is None:
                     if name == "journal.jsonl":
