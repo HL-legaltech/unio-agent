@@ -189,6 +189,8 @@ MAX_RETRY_AHEAD = timedelta(hours=24) - timedelta(minutes=5)
 REPO_REFRESH = timedelta(minutes=10)
 LOG_MAX_BYTES = 5 * 1024 * 1024
 RUN_RETENTION = timedelta(days=14)
+# A research run's transcript is the only record of what it searched and read.
+RESEARCH_RETENTION = timedelta(days=30)
 FINAL_ATTEMPT = 3
 FETCH_LIMIT = 10
 # The server stores a change of state, task or item at once, but a write that
@@ -1568,10 +1570,13 @@ class State:
         the caller holds the poll lock)."""
         for f in self.mcp_dir.iterdir():
             f.unlink(missing_ok=True)
-        cutoff = time.time() - RUN_RETENTION.total_seconds()
+        now = time.time()
         for d in self.runs_dir.iterdir():
             try:
-                if d.is_dir() and d.stat().st_mtime < cutoff:
+                if not d.is_dir():
+                    continue
+                kept = RESEARCH_RETENTION if any(a.name.endswith("-research") for a in d.iterdir()) else RUN_RETENTION
+                if d.stat().st_mtime < now - kept.total_seconds():
                     shutil.rmtree(d, ignore_errors=True)
             except OSError:
                 pass

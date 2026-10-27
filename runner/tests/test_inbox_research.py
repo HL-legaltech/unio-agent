@@ -4,6 +4,7 @@ import io
 import json
 import os
 import signal
+import time
 import unittest
 from datetime import timedelta
 from pathlib import Path, PureWindowsPath
@@ -603,3 +604,16 @@ class Endings(unittest.TestCase):
     def test_every_language(self):
         for table in (inbox.RESEARCH_LIMIT, inbox.RESEARCH_UNFINISHED):
             self.assertEqual(set(table), set(inbox.LANGUAGE_NAMES))
+
+
+class Retention(HomeCase):
+    def test_research_transcripts_stay_thirty_days(self):
+        self.profile("org_test")
+        state = inbox.State(inbox.Config(dict(os.environ), "org_test"))
+        state.ensure()
+        old = time.time() - 20 * 86400
+        for name, attempt in (("comment-reply", "attempt-1-abcdefgh"), ("comment-research", "attempt-1-abcdefgh-research")):
+            (state.runs_dir / name / attempt).mkdir(parents=True)
+            os.utime(state.runs_dir / name, (old, old))
+        state.sweep()
+        self.assertEqual(sorted(d.name for d in state.runs_dir.iterdir()), ["comment-research"])
