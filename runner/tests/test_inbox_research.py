@@ -133,9 +133,23 @@ class Usage(unittest.TestCase):
                   *fetch(2, "https://www.gov.example/a"), *fetch(3, "https://portal.court.example/t", 504),
                   *fetch(4, "https://www.gov.example/a"),
                   *use(5, "WebFetch", {"url": "https://x.example/"}, "connect ECONNREFUSED", "Error: x", True)])
-        self.assertEqual(s.web.counts(), {"searches": 1, "fetches": 4, "sources": 1})
+        self.assertEqual(s.web.counts("[Lei](https://www.gov.example/a)"),
+                         {"searches": 1, "fetches": 4, "sources": 1})
+        self.assertEqual(s.web.counts(), {"searches": 1, "fetches": 4, "sources": 0})
         self.assertEqual(s.web.sources, ["https://www.gov.example/a"])
         self.assertEqual(s.step, "researching")
+
+    def test_sources_are_the_pages_the_answer_links(self):
+        s = read([*fetch(1, "https://a.gov.example/lei"),
+                  *fetch(2, "https://b.example/old", 200, "https://b.example/new"),
+                  *fetch(3, "https://c.example/read-and-dropped"), *fetch(4, "https://d.example/x/"),
+                  *fetch(5, "https://e.example/broken", 404)])
+        body = ("Rates ([Lei](https://a.gov.example/lei)) and ([Old](https://b.example/old)), "
+                "see https://d.example/x. Also [Broken](https://e.example/broken).")
+        self.assertEqual(s.web.cited(body), ["https://a.gov.example/lei", "https://b.example/new",
+                                             "https://d.example/x/"])
+        self.assertEqual(s.web.counts(body)["sources"], 3)
+        self.assertEqual(s.web.counts(None)["sources"], 0)
 
     def test_a_redirect_is_kept_where_it_landed(self):
         s = read(fetch(1, "https://a.example/old", 200, "https://b.example/new"))

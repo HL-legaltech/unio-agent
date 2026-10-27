@@ -339,7 +339,8 @@ if "# Unio Bot: researching" in protocol:
     if mode == "research_cap":
         result("", "error_max_turns", 60)
         sys.exit(1)
-    use(6, "mcp__unio__update_comment", {"comment_id": answer_id, "body": content + " Final."}, True,
+    use(6, "mcp__unio__update_comment", {"comment_id": answer_id,
+                                       "body": content + " Final ([lei](https://www.example.org/lei))."}, True,
         json.dumps({"id": answer_id}))
     result(content + "\n{\"outcome\":\"replied\",\"note\":\"researched\"}", turns=12)
     sys.exit(0)

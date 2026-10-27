@@ -3009,6 +3009,8 @@ class WebTrack:
         self.fetches = 0
         self.asked = {}
         self.fetched = {}
+        # Each landing address's asked addresses: an answer may link either.
+        self.via = {}
 
     def use(self, block):
         name, args = block.get("name"), block.get("input") if isinstance(block.get("input"), dict) else {}
@@ -3029,14 +3031,30 @@ class WebTrack:
         final = result.get("url") if isinstance(result.get("url"), str) else url
         if isinstance(code, int) and not isinstance(code, bool):
             self.fetched[final] = code
+            self.via.setdefault(final, set()).add(url)
 
     @property
     def sources(self):
         """The addresses read with a 2xx answer, first read first."""
         return [url for url, code in self.fetched.items() if 200 <= code < 300]
 
-    def counts(self):
-        return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.sources)}
+    def cited(self, body):
+        """The sources `body` links to, by the address asked or where it landed."""
+        linked = {link_key(m.group(0)) for m in LINK.finditer(body or "")}
+        return [url for url in self.sources if {link_key(u) for u in (url, *self.via.get(url, ()))} & linked]
+
+    def counts(self, answer=None):
+        """`sources` counts the pages read that the answer links to: a page read
+        and left out of it was not a source of anything."""
+        return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.cited(answer))}
+
+
+# An address in an answer's Markdown, up to the parenthesis that closes its link.
+LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
+
+
+def link_key(url):
+    return url.rstrip(".,;:!?/")
 
 
 class Verdict:
@@ -3820,7 +3838,8 @@ class Runner:
                  "steps": progress.count or None, "progressError": progress.error,
                  "repos": [f"{x['repo']}@{x['commit']}" for x in snapshots] or None,
                  "projects": len(s.projects) or None,
-                 "usage": run_usage(ev, usd if s.started else None), "web": s.web.counts() if s.started else None,
+                 "usage": run_usage(ev, usd if s.started else None),
+                 "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
                  "triage": triage}
         if len(s.projects) > 1:
