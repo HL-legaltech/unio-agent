@@ -213,6 +213,7 @@ FETCH_LIMIT = 10
 # dropping the others silently; the extra second absorbs latency.
 PRESENCE_SPACING = 11
 PROGRESS_SPACING = 3
+PROGRESS_HEARTBEAT = 15
 STATUS_TIMEOUT = 3
 TOO_LARGE_NOTE = "too large to answer automatically"
 # The subscription windows a rate_limit_event reports. A reading older than
@@ -1488,15 +1489,19 @@ class Presence:
 
 
 class Progress:
-    """The step a session is on, posted to its claim at most every PROGRESS_SPACING
-    seconds; a step replaced inside that window is never posted."""
+    """The step a session is on, posted to its claim, latest first: a change goes
+    out once PROGRESS_SPACING has passed since the last post, and the latest
+    values go out again every PROGRESS_HEARTBEAT even unchanged, so a step that
+    arrived inside the spacing is never lost. tick() sends what is due; the
+    session's wait loop calls it twice a second."""
 
     def __init__(self, api, receipt, on_step):
         self.api = api
         self.receipt = receipt
         self.on_step = on_step
         self.seen = None
-        self.posted = None
+        self.want = None
+        self.sent = None
         self.at = None
         self.count = 0
         self.error = None
@@ -1505,16 +1510,26 @@ class Progress:
         if step != self.seen:
             self.seen = step
             self.on_step(step)
-        if step == self.posted or (self.at is not None and time.monotonic() - self.at < PROGRESS_SPACING):
+        self.want = {**self.receipt, "step": step}
+        self.tick()
+
+    def tick(self, now=None):
+        if self.want is None:
             return
-        self.at = time.monotonic()
-        self.posted = step
+        now = time.monotonic() if now is None else now
+        if self.at is not None and now - self.at < (PROGRESS_SPACING if self.want != self.sent else PROGRESS_HEARTBEAT):
+            return
+        self.post(self.want, now)
+
+    def post(self, body, now):
+        self.at = now
         try:
-            st, d = self.api.call("POST", "/agents/inbox/progress", {**self.receipt, "step": step},
-                                  timeout=STATUS_TIMEOUT)
+            st, d = self.api.call("POST", "/agents/inbox/progress", body, timeout=STATUS_TIMEOUT)
             error = None if st == 200 else describe(st, d)
         except ApiUnreachable as e:
             error = str(e)
+        # A refused post is not repeated at once: the heartbeat sends the latest again.
+        self.sent = body
         if error:
             self.error = self.error or error
         else:

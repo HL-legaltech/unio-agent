@@ -829,3 +829,43 @@ class Protocol(unittest.TestCase):
 
     def test_the_final_message_is_the_json_line_alone(self):
         self.assertIn("Your final message is the JSON line alone", self.text)
+
+
+class FakeCalls:
+    def __init__(self, answers=None):
+        self.bodies = []
+        self.answers = list(answers or [])
+
+    def call(self, method, path, body=None, idempotency_key=None, timeout=20):
+        self.bodies.append(dict(body))
+        return self.answers.pop(0) if self.answers else (200, {"data": {}})
+
+
+class LatestWins(unittest.TestCase):
+    def progress(self, api):
+        p = inbox.Progress(api, {"key": "k", "claimId": "c"}, lambda step: None)
+        return p
+
+    def test_a_step_inside_the_spacing_goes_out_later(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        with mock.patch.object(inbox.time, "monotonic", return_value=100.0):
+            p.report("reading_task")
+        with mock.patch.object(inbox.time, "monotonic", return_value=101.0):
+            p.report("researching")
+            p.report("writing_reply")
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_task"])
+        p.tick(102.9)
+        p.tick(103.0)
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_task", "writing_reply"])
+
+    def test_heartbeat_repeats_the_latest(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        with mock.patch.object(inbox.time, "monotonic", return_value=100.0):
+            p.report("researching")
+        p.tick(114.9)
+        self.assertEqual(len(api.bodies), 1)
+        p.tick(115.0)
+        self.assertEqual([b["step"] for b in api.bodies], ["researching", "researching"])
+        self.assertEqual(p.count, 2)
