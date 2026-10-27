@@ -3,7 +3,7 @@
 ## 1.3.2
 
 - As sessões do Claude Code aparecem na página do agente no Unio, em qualquer computador (macOS, Linux ou Windows): o que cada uma está fazendo, a tarefa, o uso por hora e, só para você, o comando que a retoma. Pasta e branch nunca saem do computador.
-- Precisa do Python 3.9 ou mais novo; sem ele, nada é enviado.
+- Precisa do Python 3.9 ou mais novo; sem ele, nada é enviado e /unio:doctor diz como instalar.
 
 ## 1.3.1
 

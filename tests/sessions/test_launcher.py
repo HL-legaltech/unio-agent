@@ -1,6 +1,6 @@
-"""session-status.sh, the hook Claude Code runs: Python found or not, and the
-token handed over only as a file path, resolved per folder as the MCP header
-helper resolves it."""
+"""session-status.sh, the hook Claude Code runs, and the doctor's line about
+it: Python found or not, and the token handed over only as a file path,
+resolved per folder as the MCP header helper resolves it."""
 import json
 import os
 import subprocess
@@ -145,6 +145,30 @@ class Launcher(unittest.TestCase):
                 if (Path(folder) / name).exists() and not (bare / name).exists():
                     (bare / name).symlink_to(Path(folder) / name)
         return bare
+
+
+@unittest.skipIf(WINDOWS, ON_WINDOWS)
+class Doctor(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="unio-doctor-test-"))
+        self.addCleanup(remove_tree, self.tmp)
+
+    def doctor(self, path):
+        env = base_env(self.tmp, PATH=path)
+        return subprocess.run(["sh", str(SCRIPTS / "doctor.sh"), "claude-code"], capture_output=True, text=True,
+                              env=env, stdin=subprocess.DEVNULL, timeout=60, encoding="utf-8").stdout
+
+    def test_it_says_whether_the_session_status_is_on(self):
+        report = self.doctor(posix_path())
+        self.assertIn("ok core sessions: as sessões do Claude Code neste computador aparecem no Unio", report)
+
+    def test_without_python_it_says_how_to_turn_it_on(self):
+        bare = Launcher.bare_path(self)
+        report = self.doctor(str(bare))
+        line = next((x for x in report.splitlines() if "core sessions:" in x), "")
+        self.assertTrue(line.startswith("info core sessions: as sessões do Claude Code neste computador não "
+                                        "aparecem no Unio, porque falta o Python 3.9 ou mais novo; "), report)
+        self.assertIn("xcode-select --install" if sys.platform == "darwin" else "instale o pacote python3", line)
 
 
 class Hooks(unittest.TestCase):
