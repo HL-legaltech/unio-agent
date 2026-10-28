@@ -629,8 +629,8 @@ class WebGuard(unittest.TestCase):
         # Bare digit runs whose check digits fail: public ids, not documents.
         for text in ("aliquota iss software 2026", "lei 13709 2018 art 7", "https://x.example/n/1793188800123",
                      "ABC-123 is another task", "LC 116/2003", None, "00012345620268260100",
-                     "https://g1.globo.com/noticia/2026/10/11987654321.ghtml",
-                     "https://www.in.gov.br/web/dou/-/portaria-12345678901", "11111111111"):
+                     "https://news.example/noticia/2026/10/11987654321.ghtml",
+                     "https://gazette.example/web/dou/-/portaria-12345678901", "11111111111"):
             self.assertIsNone(inbox.private_text(text, "ABC-12"), text)
 
     def test_hosts(self):
@@ -654,12 +654,12 @@ class WebGuard(unittest.TestCase):
             self.assertIsNone(inbox.fetch_problem(url, unio), url)
 
     def test_a_public_name_for_a_private_address(self):
-        answers = {"127.0.0.1.nip.io": ("127.0.0.1",), "localtest.me": ("::1", "127.0.0.1"),
-                   "169.254.169.254.nip.io": ("169.254.169.254",), "mixed.example": ("93.184.215.14", "10.0.0.7"),
+        answers = {"loopback.example": ("127.0.0.1",), "loopback-pair.example": ("::1", "127.0.0.1"),
+                   "metadata.example": ("169.254.169.254",), "mixed.example": ("93.184.215.14", "10.0.0.7"),
                    "v6.example": ("::ffff:192.168.0.1",), "www.gov.example": ("93.184.215.14", "2606:2800::1")}
         with mock.patch.object(inbox, "resolve_host", side_effect=lambda host: answers.get(host, ())):
-            for url in ("http://127.0.0.1.nip.io:3355/v1/", "http://localtest.me:3001/",
-                        "http://169.254.169.254.nip.io/latest/meta-data/", "https://mixed.example/",
+            for url in ("http://loopback.example:3355/v1/", "http://loopback-pair.example:3001/",
+                        "http://metadata.example/latest/meta-data/", "https://mixed.example/",
                         "https://v6.example/"):
                 self.assertEqual(inbox.fetch_problem(url), "private_resolution", url)
             self.assertIsNone(inbox.fetch_problem("https://www.gov.example/lei"))
@@ -673,7 +673,7 @@ class WebGuard(unittest.TestCase):
         found = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
                  (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 0, 0, 0))]
         with mock.patch.object(socket, "getaddrinfo", return_value=found):
-            self.assertEqual(REAL_RESOLVE_HOST("localtest.me"), ("127.0.0.1", "::1"))
+            self.assertEqual(REAL_RESOLVE_HOST("loopback-pair.example"), ("127.0.0.1", "::1"))
         with mock.patch.object(socket, "getaddrinfo", side_effect=socket.gaierror("no name")):
             self.assertEqual(REAL_RESOLVE_HOST("gone.example"), ())
         with mock.patch.object(socket, "getaddrinfo", side_effect=slow), \
@@ -842,8 +842,9 @@ class Protocol(unittest.TestCase):
             self.assertIn(phrase, self.text)
 
     def test_the_law_itself_and_every_link_under_sources(self):
-        self.assertIn("For a point of law, open the law itself (planalto.gov.br for federal law, the city's or "
-                      "state's official legislation site otherwise) before citing it.", self.text)
+        self.assertIn("For a point of law, open the law itself (the federal government's official legislation "
+                      "portal for federal law, the city's or state's official legislation site otherwise) before "
+                      "citing it.", self.text)
         self.assertIn('Every link in the answer appears under "Sources".', self.text)
 
     def test_a_title_in_another_language_is_quoted(self):
