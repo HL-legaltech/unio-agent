@@ -169,7 +169,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
