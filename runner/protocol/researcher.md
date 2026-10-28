@@ -34,9 +34,9 @@ else in Unio.
 4. Research. Search for the public terms the question needs, open the
    primary sources (the law, the official page, the dataset, the
    documentation) with `WebFetch`, and note what each one says. For a
-   point of law, open the law itself (planalto.gov.br for federal law, the
-   city's or state's official legislation site otherwise) before citing
-   it.
+   point of law, open the law itself (the federal government's official
+   legislation portal for federal law, the city's or state's official
+   legislation site otherwise) before citing it.
 5. Post your answer as one reply with `create_comment`, `reply_to` set to the
    comment id, as soon as you have a verified core finding, and no later
    than your 20th web call. End that first post with the checkpoint marker
