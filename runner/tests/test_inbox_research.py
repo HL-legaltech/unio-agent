@@ -618,8 +618,39 @@ class Run(HomeCase):
         self.assertEqual(upload["headers"]["Idempotency-Key"],
                          "unio-inbox:file:comment:c-0001:claim-0001-fake:dados-teste-2026.csv:comment")
         self.assertNotIn("X-Unio-Inbox-Claim", upload["headers"])
+        # Raw UTF-8, not \u escapes: the note's "município" counts its bytes, not six per letter.
+        self.assertEqual(int(upload["headers"]["Content-Length"]),
+                         len(json.dumps(body, ensure_ascii=False).encode("utf-8")))
+        self.assertEqual(upload["headers"]["Content-Type"], "application/json")
         done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
         self.assertEqual(done["usage"]["files"], 1)
+
+    def test_a_body_with_a_lone_surrogate_still_goes(self):
+        sent = []
+
+        class Answer:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def urlopen(req, timeout):
+            sent.append(req.data)
+            return Answer()
+
+        with mock.patch.object(inbox.urllib.request, "urlopen", urlopen):
+            api = inbox.Api("http://127.0.0.1:9/v1", "t")
+            api.call("POST", "/x", {"content": "alíquota"}, ascii_only=False)
+            api.call("POST", "/x", {"content": "a\ud800"}, ascii_only=False)
+            api.call("POST", "/x", {"content": "alíquota"})
+        self.assertEqual(sent, ['{"content": "alíquota"}'.encode("utf-8"), b'{"content": "a\\ud800"}',
+                                b'{"content": "al\\u00edquota"}'])
 
     def test_a_task_file_falls_back_to_the_answer(self):
         self.fake.task_files_refused = True
@@ -650,6 +681,47 @@ class Run(HomeCase):
             "**Pesquisa interrompida.** Cheguei a abrir estas fontes"))
         done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
         self.assertEqual((done["outcome"], done["research"]), ("replied", {"end": "stopped"}))
+
+    def test_a_stop_after_the_session_skips_the_closing_work(self):
+        classify = inbox.Runner.classify
+
+        def stop_once_ended(runner, s, **kw):
+            # The research session has ended: no wait loop posts any more.
+            if "timeout" in kw:
+                self.fake.stop_now = True
+            return classify(runner, s, **kw)
+
+        with mock.patch.object(inbox.Runner, "classify", stop_once_ended):
+            self.assertEqual(self.once("research_file"), 0)
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/files"), [])
+        edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")
+        self.assertTrue(edit["body"]["content"].endswith(
+            "\n\n_Pesquisa interrompida. O que está acima foi conferido nas fontes citadas._"))
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual((done["note"], done["research"], done["usage"]["files"]),
+                         (inbox.RESEARCH_STOPPED_NOTE, {"end": "stopped"}, 0))
+        item, = self.items()
+        self.assertEqual(item["research"]["end"], "stopped")
+
+    def test_a_stop_between_uploads_skips_the_rest(self):
+        self.fake.stop_after_upload = True
+        self.assertEqual(self.once("research_files"), 0)
+        upload, = self.fake.seen("POST", "/v1/agents/inbox/files")
+        edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")
+        self.assertTrue(edit["body"]["content"].endswith("_Pesquisa interrompida. O que está acima foi conferido "
+                                                         "nas fontes citadas._"))
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual((done["note"], done["research"], done["usage"]["files"]),
+                         (inbox.RESEARCH_STOPPED_NOTE, {"end": "stopped"}, 1))
+        skipped = [e for e in map(json.loads, (self.state / "log.jsonl").read_text(encoding="utf-8").splitlines())
+                   if e["event"] == "file_dropped"]
+        self.assertEqual([e["reason"] for e in skipped], ["stopped on request"])
+        self.assertNotEqual(skipped[0]["file"], upload["body"]["name"])
+
+    def test_without_a_stop_both_files_go(self):
+        self.assertEqual(self.once("research_files"), 0)
+        self.assertEqual(len(self.fake.seen("POST", "/v1/agents/inbox/files")), 2)
+        self.assertEqual(self.fake.seen("PUT", "/v1/comments/c-session-reply"), [])
 
     def test_web_off_keeps_the_reply_run(self):
         os.environ["UNIO_INBOX_WEB"] = "off"
