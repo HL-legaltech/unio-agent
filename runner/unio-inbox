@@ -1967,6 +1967,9 @@ def research_sources(urls, unio_hosts=()):
     user or password, query and fragment dropped, at most UNFINISHED_SOURCES."""
     found = []
     for url in urls:
+        # Each check can wait on a name lookup inside the run's closing margin.
+        if len(found) >= UNFINISHED_SOURCES:
+            break
         try:
             parts = urllib.parse.urlsplit(url)
         except ValueError:
@@ -1976,7 +1979,7 @@ def research_sources(urls, unio_hosts=()):
         clean = urllib.parse.urlunsplit(("https", parts.netloc.lower(), parts.path or "/", "", ""))
         if clean not in found and not re.search(r"[\s()\[\]<>]", clean):
             found.append(clean)
-    return found[:UNFINISHED_SOURCES]
+    return found
 
 
 def unfinished_reply(language, sources, lead=None):
