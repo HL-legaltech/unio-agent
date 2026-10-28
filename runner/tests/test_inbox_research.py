@@ -616,7 +616,8 @@ class Run(HomeCase):
         self.assertTrue(body["content"].startswith("\ufeffmunicipio;aliquota;fonte\r\n"))
         self.assertTrue(body["note"].startswith("Anexei dados-teste-2026.csv:"))
         self.assertEqual(upload["headers"]["Idempotency-Key"],
-                         "unio-inbox:file:comment:c-0001:claim-0001-fake:dados-teste-2026.csv:comment")
+                         inbox.file_idempotency_key("comment:c-0001", "claim-0001-fake",
+                                                    "dados-teste-2026.csv", "comment"))
         self.assertNotIn("X-Unio-Inbox-Claim", upload["headers"])
         # Raw UTF-8, not \u escapes: the note's "município" counts its bytes, not six per letter.
         self.assertEqual(int(upload["headers"]["Content-Length"]),
@@ -1139,6 +1140,26 @@ class Settlement(HomeCase):
         api.settle = lambda method, path, body, key, timeout=20: (keys.append(key), api.call(method, path, body))[1]
         r.settle(api, "complete", {"key": "k"}, {"claimId": "c"}, outcome="replied", note="n")
         self.assertEqual(keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:plain"])
+
+
+class FileIdempotencyKey(unittest.TestCase):
+    def test_a_long_name_stays_inside_what_unio_takes(self):
+        # Unio refuses an Idempotency-Key past 128 visible characters (422).
+        claim = "d0166acf-319f-42a4-8885-249267f890cf"
+        name = "a" * 76 + ".csv"
+        for key in ("comment:533896b2-1922-40a3-99c4-561fd1c8c354",
+                    "assignment:a7f9d81d-ff96-4974-9f3c-0f1b2c3d4e5f"):
+            for target in ("comment", "task"):
+                idem = inbox.file_idempotency_key(key, claim, name, target)
+                self.assertLessEqual(len(idem), 128, idem)
+                self.assertTrue(idem.isprintable() and " " not in idem, idem)
+
+    def test_each_file_and_place_gets_its_own_key(self):
+        keys = {inbox.file_idempotency_key("comment:c", "claim", name, target)
+                for name in ("a.csv", "b.csv") for target in ("comment", "task")}
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(inbox.file_idempotency_key("comment:c", "claim", "a.csv", "task"),
+                         inbox.file_idempotency_key("comment:c", "claim", "a.csv", "task"))
 
 
 class FilesProfile(HomeCase):

@@ -169,7 +169,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -2109,6 +2109,14 @@ def swap_marker(body, line=None, append=False):
         head = text[:len(text) - len(line)].rstrip()[:COMMENT_CHARS - len(line) - 2].rstrip()
         text = f"{head}\n\n{line}"
     return text
+
+
+def file_idempotency_key(key, claim_id, name, target):
+    """The key one file's upload is retried under. Unio takes 1 to 128 visible
+    characters, and a file name alone may run to 80, so the item, name and target
+    go in as a digest beside the claim that scopes them."""
+    digest = hashlib.sha256(f"{key}\0{name}\0{target}".encode("utf-8")).hexdigest()[:32]
+    return f"unio-inbox:file:{claim_id}:{digest}"
 
 
 def research_sources(urls, unio_hosts=()):
@@ -4539,7 +4547,7 @@ class Runner:
             body["target"] = target
         if f["render"]:
             body["render"] = "pdf"
-        idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
+        idem = file_idempotency_key(item.get("key"), claim.get("claimId"), f["name"], target)
         try:
             # Raw UTF-8: \u escapes would make accented text up to six times larger
             # against the API's body limit.
