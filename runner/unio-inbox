@@ -2111,6 +2111,14 @@ def swap_marker(body, line=None, append=False):
     return text
 
 
+def file_idempotency_key(key, claim_id, name, target):
+    """The key one file's upload is retried under. Unio takes 1 to 128 visible
+    characters, and a file name alone may run to 80, so the item, name and target
+    go in as a digest beside the claim that scopes them."""
+    digest = hashlib.sha256(f"{key}\0{name}\0{target}".encode("utf-8")).hexdigest()[:32]
+    return f"unio-inbox:file:{claim_id}:{digest}"
+
+
 def research_sources(urls, unio_hosts=()):
     """The pages a run read that a reply may list: https on a public host, no
     user or password, query and fragment dropped, at most UNFINISHED_SOURCES."""
@@ -4539,7 +4547,7 @@ class Runner:
             body["target"] = target
         if f["render"]:
             body["render"] = "pdf"
-        idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
+        idem = file_idempotency_key(item.get("key"), claim.get("claimId"), f["name"], target)
         try:
             # Raw UTF-8: \u escapes would make accented text up to six times larger
             # against the API's body limit.
