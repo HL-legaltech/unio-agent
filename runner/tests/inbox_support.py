@@ -116,6 +116,8 @@ class FakeUnio:
         self.research_mark_status = None
         # An HTTP status every runner create_comment over MCP gets, or None.
         self.mcp_comment_status = None
+        # Whether a person stops a research run once it reports past its start.
+        self.stop_research = False
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -179,7 +181,14 @@ class FakeUnio:
         if method == "POST" and path == "/v1/agents/inbox/progress":
             if self.research_mark_status and body.get("mode") == "research":
                 return self.research_mark_status, {"error": "Erro.", "code": "server_error"}
-            return 200, {"data": {}}
+            with self.lock:
+                research = [r for r in self.requests if r["path"] == path and isinstance(r["body"], dict)
+                            and r["body"].get("mode") == "research"]
+            # The answer's shape (report_agent_inbox_progress_controller.ts, DEV-674): who stopped
+            # the run is not in it.
+            stop = bool(self.stop_research and len(research) >= 2)
+            return 200, {"data": {"key": body.get("key"), "claimId": body.get("claimId"), "step": body.get("step"),
+                                  "mode": "research" if research else "reply", "stop": stop}}
         if method in ("PUT", "DELETE") and path == "/v1/agents/reactions":
             return 200, {"data": {}}
         if method == "PUT" and path.startswith("/v1/agents/presence/"):
@@ -249,11 +258,13 @@ research. A research run (the researcher protocol) searches, reads a page,
 posts its checkpoint with the prompt's marker and edits it without the marker;
 research_cap stops at the turn cap after the checkpoint, research_silent
 before it; research_file also writes a CSV into the prompt's files folder and
-names it."""
+names it; research_slow waits a minute after the checkpoint, and
+research_slow_silent before it, to be stopped."""
 import json
 import os
 import re
 import sys
+import time
 import urllib.request
 
 args = sys.argv[1:]
@@ -342,6 +353,8 @@ if "# Unio Bot: researching" in protocol:
     if "WebFetch" in builtin:
         use(4, "WebFetch", {"url": "https://www.example.org/lei", "prompt": "rates"}, True, "rates",
             {"bytes": 5, "code": 200, "codeText": "OK", "result": "rates", "url": "https://www.example.org/lei"})
+    if mode == "research_slow_silent":
+        time.sleep(60)
     if mode == "research_silent":
         result("", "error_max_turns", 60)
         sys.exit(1)
@@ -353,6 +366,8 @@ if "# Unio Bot: researching" in protocol:
         use(5, "Write", {"file_path": os.path.join(folder, "dados-teste-2026.csv")}, True, "written")
         content += "\n\nAnexei **dados-teste-2026.csv**: as 80 linhas com município e alíquota, para filtrar."
     answer_id = post_comment(content + "\n\n" + marker)
+    if mode == "research_slow":
+        time.sleep(60)
     if mode == "research_cap":
         result("", "error_max_turns", 60)
         sys.exit(1)
