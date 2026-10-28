@@ -132,7 +132,9 @@ between passes) and UNIO_STATUS_DONE_AFTER (24 h between a project's last task
 closing and the runner finishing it).
 """
 import argparse
+import csv
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -167,7 +169,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.1.0"
+VERSION = "2.3.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -213,6 +215,7 @@ FETCH_LIMIT = 10
 # dropping the others silently; the extra second absorbs latency.
 PRESENCE_SPACING = 11
 PROGRESS_SPACING = 3
+PROGRESS_HEARTBEAT = 15
 STATUS_TIMEOUT = 3
 TOO_LARGE_NOTE = "too large to answer automatically"
 # The subscription windows a rate_limit_event reports. A reading older than
@@ -271,6 +274,37 @@ RESEARCH_UNFINISHED = {
               "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# The runner's checks of a research run's files (PLAN 3, owner decisions O1-O2),
+# which the server's POST /agents/inbox/files repeats. 512 KiB keeps the JSON
+# body under the API's default 1 MB limit; 1,500 bytes is less than a file
+# worth attaching.
+FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,74}\.(md|csv)$")
+FILE_MIN_BYTES = 1500
+FILE_MAX_BYTES = 512 * 1024
+FILES_PER_RUN = 2
+CSV_MAX_COLUMNS = 50
+CSV_MAX_ROWS = 20000
+# A file most of whose lines the comment already holds repeats it.
+FILE_REPEATS = 0.7
+FILE_NOTE_CHARS = 200
+# An upload under a claim with less left than this would fail with 403 agent_scope_unclaimed.
+FILES_LEASE_LEFT = timedelta(seconds=45)
+MD_HTML = re.compile(r"<[A-Za-z!/][^>]*>")
+MD_IMAGE = re.compile(r"!\[[^\]]*\]\(")
+# A comment asking for the file on the task itself, in so many words (decision O1), on folded text.
+# Whole verb forms only: a stem would read "subsídios" or "substituição" as "suba".
+TASK_TARGET = re.compile(
+    r"\b(?:anex(?:e|a|ar|em)|coloqu(?:e|em)|coloca(?:r)?|ponha(?:m)?|poe|salv(?:e|a|ar|em)|sub(?:a|ir|am)|"
+    r"carreg(?:ue|uem|ar))\s+(?:\w+\s+){0,2}(?:n[ao]s?|[ao]s?)\s+(?:propria\s+)?(?:tarefa|card)\b|"
+    r"\b(?:attach(?:es|ed|ing)?|put|add|upload)\s+(?:\w+\s+){0,2}(?:to|on)\s+the\s+(?:task|card)\b")
+# "não anexe na tarefa", "não precisa anexar na tarefa", "don't put it on the task".
+TASK_TARGET_DENIED = re.compile(r"\b(?:nao|nem|nunca|sem|don['’]?t|do\s+not|never|not)\s+(?:\w+\s+)?$")
+FILE_FAILED = {
+    "en": "_The file {name} could not be attached._",
+    "pt-BR": "_O arquivo {name} não pôde ser anexado._",
+}
+# What a settlement carries beyond the receipt, on a server since DEV-672.
+SETTLE_EXTRAS = {"usage", "research"}
 # The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
 COMMENT_CHARS = 20000
 UNFINISHED_SOURCES = 8
@@ -318,10 +352,11 @@ PROBLEMS = {
     "research_runs": "the day's research runs are spent",
     "research_reserve": "research may not spend the reserve of the daily budget",
     "research_session_window": "the Claude session window is nearly spent",
+    "research_unmarked": "Unio did not take the request as research",
 }
 # The wire reason of a research gate's release.
 RESEARCH_GATE_REASONS = {"research_lease": "other", "research_runs": "budget", "research_reserve": "budget",
-                         "research_session_window": "usage_limit"}
+                         "research_session_window": "usage_limit", "research_unmarked": "unio_unavailable"}
 # The server refuses any step outside its codes (422), and the web app words
 # each one; a tool missing here keeps the previous step.
 STEPS = {
@@ -350,6 +385,13 @@ STEPS = {
     "WebSearch": "researching",
     "WebFetch": "researching",
 }
+# A research run tells reading a page from searching; reading_source falls back
+# to researching on a server that predates it (Progress.degrade).
+RESEARCH_STEPS = {**STEPS, "WebFetch": "reading_source"}
+# The server's hostname rule for a progress domain (validators/agents.ts):
+# lower-case labels, and never an IP literal.
+DOMAIN = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*$")
+MODEL_ID = re.compile(r"^[a-z0-9.\-\[\]]+$")
 # A project review is offered these two tools and nothing else: the server
 # registers only them under X-Unio-Review-Project, so any other tool at init
 # means the header did not take.
@@ -1488,37 +1530,104 @@ class Presence:
 
 
 class Progress:
-    """The step a session is on, posted to its claim at most every PROGRESS_SPACING
-    seconds; a step replaced inside that window is never posted."""
+    """The step a session is on, posted to its claim, latest first: a change goes
+    out once PROGRESS_SPACING has passed since the last post, and the latest
+    values go out again every PROGRESS_HEARTBEAT even unchanged, so a step that
+    arrived inside the spacing is never lost. tick() sends what is due; the
+    session's wait loop calls it twice a second."""
 
-    def __init__(self, api, receipt, on_step):
+    def __init__(self, api, receipt, on_step, support=None):
         self.api = api
         self.receipt = receipt
         self.on_step = on_step
+        # What the server took, for the life of the process (Runner.progress_support):
+        # a server before research refuses the fields (422) and the reading_source step.
+        # reading_source is None until the server first takes it.
+        self.support = support if support is not None else {"fields": True, "reading_source": None}
+        self.mode = None
         self.seen = None
-        self.posted = None
+        self.values = None
+        self.want = None
+        self.sent = None
         self.at = None
         self.count = 0
         self.error = None
 
-    def report(self, step):
+    def report(self, step, searches=None, sources=None, domain=None):
         if step != self.seen:
             self.seen = step
             self.on_step(step)
-        if step == self.posted or (self.at is not None and time.monotonic() - self.at < PROGRESS_SPACING):
+        self.values = {"step": step, "searches": searches, "sources": sources, "domain": domain}
+        self.want = self.body()
+        self.tick()
+
+    def begin_research(self, step="reading_task"):
+        """Marks the claim a research claim now, before the research session
+        connects: the server narrows that connection's tools by it. Whether the
+        session may start: the server took the mark, or it predates the mark
+        (a 422 on the field), so only the runner's own narrowing applies."""
+        self.mode = "research"
+        self.values = {**(self.values or {}), "step": step}
+        self.want = self.body()
+        return self.post(self.want, time.monotonic()) and ("mode" in self.sent or not self.support["fields"])
+
+    def body(self):
+        v = self.values
+        step = v["step"]
+        if step == "reading_source" and self.support["reading_source"] is False:
+            step = "researching"
+        body = {**self.receipt, "step": step}
+        if self.mode and self.support["fields"]:
+            body["mode"] = self.mode
+            body.update({k: min(int(v[k]), 999) for k in ("searches", "sources") if isinstance(v.get(k), int)})
+            if step == "reading_source" and v.get("domain"):
+                body["domain"] = v["domain"]
+        return body
+
+    def tick(self, now=None):
+        if self.want is None:
             return
-        self.at = time.monotonic()
-        self.posted = step
+        now = time.monotonic() if now is None else now
+        if self.at is not None and now - self.at < (PROGRESS_SPACING if self.want != self.sent else PROGRESS_HEARTBEAT):
+            return
+        self.post(self.want, now)
+
+    def post(self, body, now):
+        self.at = now
         try:
-            st, d = self.api.call("POST", "/agents/inbox/progress", {**self.receipt, "step": step},
-                                  timeout=STATUS_TIMEOUT)
+            st, d = self.api.call("POST", "/agents/inbox/progress", body, timeout=STATUS_TIMEOUT)
+            for _ in range(2):
+                if st != 422 or not self.degrade(body, d):
+                    break
+                body = self.want = self.body()
+                st, d = self.api.call("POST", "/agents/inbox/progress", body, timeout=STATUS_TIMEOUT)
             error = None if st == 200 else describe(st, d)
         except ApiUnreachable as e:
             error = str(e)
+        # A refused post is not repeated at once: the heartbeat sends the latest again.
+        self.sent = body
         if error:
             self.error = self.error or error
-        else:
-            self.count += 1
+            return False
+        self.count += 1
+        if body.get("step") == "reading_source":
+            self.support["reading_source"] = True
+        return True
+
+    def degrade(self, body, data):
+        """After a 422: whether dropping what this server may not know changes the
+        body, for the rest of the process. A refused reading_source falls back to
+        researching; a refused field drops mode, counters and domain alike."""
+        data = data if isinstance(data, dict) else {}
+        fields = {m.get("field") for m in data.get("messages") or [] if isinstance(m, dict)}
+        fields.add(data.get("field"))
+        if body.get("step") == "reading_source" and "step" in fields and self.support["reading_source"] is not False:
+            self.support["reading_source"] = False
+            return True
+        if self.support["fields"] and any(k in body for k in ("mode", "searches", "sources", "domain")):
+            self.support["fields"] = False
+            return True
+        return False
 
 
 class State:
@@ -1982,6 +2091,119 @@ def research_sources(urls, unio_hosts=()):
     return found
 
 
+def comment_lines(body):
+    return {" ".join(line.split()) for line in str(body or "").split("\n") if line.strip()}
+
+
+# Excel and LibreOffice run a cell that opens with one of these as a formula
+# (OWASP CSV injection), and a CSV's cells come from pages the run read.
+CSV_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+CSV_NUMBER = re.compile(r"^[-+]?\d+(?:[.,]\d+)*%?$")
+
+
+def inert_cell(cell):
+    """The cell as text a spreadsheet shows and never runs: a leading quote
+    before a formula's first character, numbers (-5, +2,5%) as they are."""
+    return f"'{cell}" if cell.startswith(CSV_FORMULA_START) and not CSV_NUMBER.match(cell) else cell
+
+
+def rewrite_csv(text):
+    """The CSV as Excel in Brazil opens it: ';' between fields, UTF-8 with a BOM,
+    whatever separator the model used, and no cell a spreadsheet would run.
+    Raises ValueError past the limits."""
+    try:
+        dialect = csv.Sniffer().sniff(text[:20000], delimiters=",;\t|")
+        rows = list(csv.reader(io.StringIO(text), dialect))
+    except csv.Error:
+        rows = list(csv.reader(io.StringIO(text), delimiter=";" if text.count(";") > text.count(",") else ","))
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(rows) < 2:
+        raise ValueError("no data rows")
+    if len(rows) > CSV_MAX_ROWS or max(len(row) for row in rows) > CSV_MAX_COLUMNS:
+        raise ValueError("too many rows or columns")
+    out = io.StringIO()
+    csv.writer(out, delimiter=";", lineterminator="\r\n").writerows([inert_cell(c) for c in row] for row in rows)
+    return "\ufeff" + out.getvalue()
+
+
+def check_files(folder, body, limit=FILES_PER_RUN):
+    """(kept, dropped) of a research run's folder: each kept file {name, content,
+    shown, render}, where `shown` is the name the comment gives it (<stem>.pdf for a
+    report Unio renders); each dropped one (name, reason). The comment must name a
+    file; a file mostly in the comment already repeats it."""
+    kept, dropped = [], []
+    try:
+        root = Path(os.path.realpath(folder))
+        entries = sorted(Path(folder).iterdir())
+    except OSError:
+        return kept, dropped
+    said = comment_lines(body)
+    for path in entries:
+        name = path.name
+        try:
+            if path.is_symlink() or not path.is_file() or Path(os.path.realpath(path)).parent != root:
+                dropped.append((name, "not_a_file"))
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            dropped.append((name, "unreadable"))
+            continue
+        if not FILE_NAME.match(name):
+            dropped.append((name, "name"))
+            continue
+        if not FILE_MIN_BYTES <= len(raw) <= FILE_MAX_BYTES or b"\0" in raw:
+            dropped.append((name, "size"))
+            continue
+        try:
+            text = raw.decode("utf-8").lstrip("\ufeff")
+        except UnicodeDecodeError:
+            dropped.append((name, "encoding"))
+            continue
+        stem = name.rsplit(".", 1)[0]
+        render = name.endswith(".md") and f"{stem}.pdf" in str(body or "")
+        shown = f"{stem}.pdf" if render else name
+        if shown not in str(body or ""):
+            dropped.append((name, "unnamed"))
+            continue
+        lines = comment_lines(text)
+        if lines and len(lines & said) > FILE_REPEATS * len(lines):
+            dropped.append((name, "repeats_comment"))
+            continue
+        if name.endswith(".csv"):
+            try:
+                text = rewrite_csv(text)
+            except ValueError as e:
+                dropped.append((name, f"csv: {e}"))
+                continue
+            if len(text.encode("utf-8")) > FILE_MAX_BYTES:
+                dropped.append((name, "size"))
+                continue
+        elif MD_HTML.search(text) or MD_IMAGE.search(text):
+            dropped.append((name, "markdown"))
+            continue
+        if render and any(f["render"] for f in kept):
+            dropped.append((name, "second_pdf"))
+            continue
+        if len(kept) >= limit:
+            dropped.append((name, "over_limit"))
+            continue
+        kept.append({"name": name, "content": text, "shown": shown, "render": render})
+    return kept, dropped
+
+
+def file_note(body, shown):
+    """Why a file is attached: the comment's line that names it, in plain words.
+    The server requires one line of 1 to 200 characters."""
+    line = next((ln for ln in str(body or "").split("\n") if shown in ln), "")
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    return short(re.sub(r"[*_`#>]+", "", line).strip(" -"), FILE_NOTE_CHARS) or None
+
+
+def wants_task_file(text):
+    text = fold(MENTION_TOKEN.sub(" ", str(text or "")))
+    return any(not TASK_TARGET_DENIED.search(text[:m.start()]) for m in TASK_TARGET.finditer(text))
+
+
 def unfinished_reply(language, sources, lead=None):
     """The runner's reply to a research run that ended before posting: its
     lead, the pages it opened, and what to ask next."""
@@ -2191,6 +2413,48 @@ def run_usage(ev, assumed_usd=None):
     }
 
 
+def merge_usage(first, second):
+    """Two sessions of one claim (a reply run that handed over, then research) as one usage."""
+    if not first or not second:
+        return second or first
+    merged = dict(second)
+    for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "costUsd", "turns"):
+        values = [u.get(key) for u in (first, second) if isinstance(u.get(key), (int, float))]
+        merged[key] = sum(values) if values else None
+    merged["model"] = second.get("model") or first.get("model")
+    merged["estimated"] = bool(first.get("estimated") or second.get("estimated"))
+    return merged
+
+
+def usage_body(usage, web=None, files=None):
+    """A settlement's `usage` as the server validates it (validators/agents.ts):
+    integers in range, a model id of its characters, cost in list USD."""
+    if not usage and not web:
+        return None
+    usage, web = usage or {}, web or {}
+
+    def whole(value, top):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return min(max(int(value), 0), top)
+
+    model = usage.get("model")
+    model = model.lower() if isinstance(model, str) and len(model) <= 64 and MODEL_ID.match(model.lower()) else None
+    cost = usage.get("costUsd")
+    body = {
+        "turns": whole(usage.get("turns"), 999), "model": model,
+        **{key: whole(usage.get(key), 2 * 10**9)
+           for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")},
+        "costUsd": round(min(max(float(cost), 0.0), 1000.0), 4)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) else None,
+        "webSearches": whole(web.get("searches"), 999), "webFetches": whole(web.get("fetches"), 999),
+        "sources": whole(web.get("sources"), 999), "files": whole(files, 999),
+        "estimated": usage.get("estimated") if isinstance(usage.get("estimated"), bool) else None,
+    }
+    body = {k: v for k, v in body.items() if v is not None}
+    return body or None
+
+
 def made_project(content):
     """'[name](url)' of the project a create_project result names, or None."""
     text = result_text(content)
@@ -2284,6 +2548,14 @@ def item_subject(item):
     return None
 
 
+def files_rule(folder, windows=None):
+    """The rule that lets Write into `folder` and nowhere else. Measured on 2.1.311:
+    an Edit(//abs/dir/**) allow rule admits Write inside dir, while every
+    Write(...) form tried never matched; --restricted refuses any path outside
+    the working folder either way."""
+    return f"Edit({rule_path(folder, windows)}/**)"
+
+
 def scope_headers(item, claim):
     """What scopes a connection to an item's claim on the server."""
     return {"X-Unio-Inbox-Item": str(item.get("key")),
@@ -2329,6 +2601,8 @@ def research_lines(research, language="en"):
         f"Checkpoint marker: end your first post with this line, and remove it in your last edit: "
         f"{RESEARCH_MARKER[language]}",
     ]
+    if research.get("files"):
+        lines.append(f"Files: write only into {research['files']}, and only when the \"Files\" rules allow it.")
     if research.get("answer"):
         lines.append(f"This thread already has your research answer (comment {research['answer']}); start from "
                      "its sources.")
@@ -3014,6 +3288,8 @@ class WebTrack:
         self.fetched = {}
         # Each landing address's asked addresses: an answer may link either.
         self.via = {}
+        # The host of the page being read, as progress may name it.
+        self.domain = None
 
     def use(self, block):
         name, args = block.get("name"), block.get("input") if isinstance(block.get("input"), dict) else {}
@@ -3023,6 +3299,7 @@ class WebTrack:
             self.fetches += 1
             if isinstance(args.get("url"), str):
                 self.asked[block.get("id")] = args["url"]
+            self.domain = progress_domain(args.get("url"))
 
     def answer(self, use_id, result):
         """A WebFetch answer: {bytes, code, codeText, result, durationMs, url} on 2.1.311,
@@ -3051,6 +3328,10 @@ class WebTrack:
         and left out of it was not a source of anything."""
         return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.cited(answer))}
 
+    def progress(self):
+        """The live row: every page read so far, since no answer is final yet."""
+        return {"searches": self.searches, "sources": len(self.sources), "domain": self.domain}
+
 
 # An address in an answer's Markdown, up to the parenthesis that closes its link.
 LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
@@ -3058,6 +3339,26 @@ LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
 
 def link_key(url):
     return url.rstrip(".,;:!?/")
+
+
+def merge_web(first, second):
+    if not first or not second:
+        return second or first
+    return {key: (first.get(key) or 0) + (second.get(key) or 0) for key in ("searches", "fetches", "sources")}
+
+
+def progress_domain(url):
+    """The host progress may name for a page: one the server's rule takes, never
+    an IP, and without a leading "www." that only lengthens the row."""
+    try:
+        host = (urllib.parse.urlsplit(str(url or "")).hostname or "").rstrip(".")
+    except ValueError:
+        return None
+    if host.startswith("www.") and "." in host[4:]:
+        host = host[4:]
+    if not host or len(host) > 253 or not DOMAIN.match(host) or all(p.isdigit() for p in host.split(".")):
+        return None
+    return host
 
 
 class Verdict:
@@ -3115,6 +3416,10 @@ class Runner:
         # Observe mode, and a finish waiting out its day, log a project's decision when it changes.
         self.status_seen = {}
         self._workspace = None
+        # Whether this server takes usage and research on settlement (settle()).
+        self.settle_extras = True
+        # What this server took on progress, for the life of the process (Progress.support).
+        self.progress_support = {"fields": True, "reading_source": None}
         # The teams GET /agents/me listed, for the responder's workspace section.
         self._team_rows = None
         # The agent's writing language, read with the teams; English until then.
@@ -3156,15 +3461,17 @@ class Runner:
             args += ["--disallowedTools"] + [f"Read({rule_path(path)}/**/{g})" for path in paths for g in SECRET_GLOBS]
         return args
 
-    def research_args(self, mcp_path, web):
+    def research_args(self, mcp_path, web, files=None):
         """A research run: the web tools `web` names (none when the weekly gate holds
-        them back), five unio tools by name, no repository: no code can reach a query."""
+        them back), five unio tools by name, no repository: no code can reach a query.
+        With `files`, a folder of its own, Write confined to it."""
+        tools = [*web, *(["Write"] if files else [])]
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
             "--settings", self.settings_arg(),
-            "--tools", ",".join(web),
-            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web]),
+            "--tools", ",".join(tools),
+            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web, *([files_rule(files)] if files else [])]),
             "--disallowedTools", ",".join([*RESEARCH_DENIED, *(
                 f"WebFetch(domain:{host})" for host in self.fetch_denied() if "WebFetch" in web)]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
@@ -3294,7 +3601,7 @@ class Runner:
             proc.wait()
 
     def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False, research=None,
-                    timeout=None):
+                    timeout=None, files=None):
         """`review` is a project id: the session then reviews that project, with
         its own scope, tools and limits, and no item. `needs` makes it a needs
         check: no scope header, two tools, its own limits. `research`, the web
@@ -3317,8 +3624,9 @@ class Runner:
         else:
             headers.update(scope_headers(item, claim))
             if research is not None:
-                argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
-                s = Session(required=RESEARCH_REQUIRED, builtin=set(research), refused=RESEARCH_INIT_REFUSED)
+                argv, timeout = self.research_args(mcp_path, research, files), timeout or self.cfg.research_timeout
+                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS,
+                            builtin={*research, *(["Write"] if files else [])}, refused=RESEARCH_INIT_REFUSED)
                 s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
@@ -3697,16 +4005,32 @@ class Runner:
         return {"key": item.get("key"), **({"claimId": claim["claimId"]} if claim.get("claimId") else {}), **body}
 
     def settle(self, api, action, item, claim, **fields):
-        """complete, fail or release this claim, with a note for the agent's page."""
+        """complete, fail or release this claim, with a note for the agent's page,
+        and the run's usage and research end where this server takes them."""
+        if not self.settle_extras:
+            fields = {k: v for k, v in fields.items() if k not in SETTLE_EXTRAS}
         body = self.receipt(item, claim, **{k: v for k, v in fields.items() if v is not None})
         idem = f"unio-inbox:{action}:{item.get('key')}:{claim['claimId']}"
         st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem)
-        if (st == 422 and isinstance(d, dict) and d.get("code") == "agent_field_forbidden"
-                and d.get("field") == "note" and "note" in body):
-            # A server without the agent status refuses the note, and the
-            # receipt must still land. Its own key: the refusal may be stored under the first.
-            body.pop("note")
-            st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem + ":plain")
+        for _ in range(2):
+            refused = d.get("field") if st == 422 and isinstance(d, dict) and \
+                d.get("code") == "agent_field_forbidden" else None
+            if refused == "note" and "note" in body:
+                # A server without the agent status refuses the note, and the
+                # receipt must still land. Its own key: the refusal may be stored under the first.
+                body.pop("note")
+                idem += ":plain"
+            elif st == 422 and SETTLE_EXTRAS & set(body):
+                # Never blocks settlement: one retry without them, and none
+                # asked again of a server that does not know them.
+                if refused in SETTLE_EXTRAS:
+                    self.settle_extras = False
+                for key in SETTLE_EXTRAS:
+                    body.pop(key, None)
+                idem += ":bare"
+            else:
+                break
+            st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem)
         return st, d
 
     def agent_teams(self, api):
@@ -3778,12 +4102,13 @@ class Runner:
         working = {"itemKey": key, **({"taskId": record.get("id")} if subject == "task" else {})}
         self.presence.set("working", **working)
         progress = Progress(api, self.receipt(item, claim),
-                            lambda step: self.presence.set("working", step=step, **working))
+                            lambda step: self.presence.set("working", step=self.presence_step(step), **working),
+                            self.progress_support)
         next_ack = [time.monotonic() + self.cfg.interval]
 
         def on_wait(s):
             if s.step:
-                progress.report(s.step)
+                progress.report(s.step, **(s.web.progress() if progress.mode else {}))
             if time.monotonic() > next_ack[0]:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
@@ -3808,15 +4133,16 @@ class Runner:
                     v = self.classify(s)
                     if v.kind == "research" and self.research_ready(item):
                         # Charged now: the research run below is charged on its own.
-                        triage = {"costUsd": self.charge(h, s, started_at), "turns": (s.result or {}).get("num_turns"),
-                                  "run": out.name}
+                        usd = self.charge(h, s, started_at)
+                        triage = {"costUsd": usd, "turns": (s.result or {}).get("num_turns"), "run": out.name,
+                                  "usage": run_usage(s.result, usd), "web": s.web.counts()}
                         ask = {"why": "thread" if thread else "escalated", "question": v.question,
                                **({"answer": thread} if thread else {})}
                     elif v.kind == "research":
                         v = Verdict("fail", cause="research_unavailable",
                                     error="the session asked for research, which this item cannot get")
                 if ask is not None:
-                    s, v, research = self.research(item, h, claim, ask, run_dir, on_wait, teams, rerun)
+                    s, v, research = self.research(item, h, claim, ask, run_dir, on_wait, teams, rerun, progress)
         except Exception as e:  # a runner bug must still spend the attempt, or the item loops forever
             s, v = Session(), Verdict("fail", cause="runner_error",
                                       error=f"runner error: {type(e).__name__}: {short(e, 200)}")
@@ -3845,13 +4171,16 @@ class Runner:
                  "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
                  "triage": triage}
+        # What the receipt records of the run: every session of this claim.
+        wire = {"usage": usage_body(merge_usage((triage or {}).get("usage"), stats["usage"]),
+                                    merge_web((triage or {}).get("web"), stats["web"]), files=0)}
         if len(s.projects) > 1:
             self.state.log("warn", **base, run=stats["run"], detail="create_project called more than once",
                            projects=s.projects)
 
         if v.kind == "release":
             st, d = self.settle(api, "release", item, claim, reason=wire_reason(v.reason), retryAfter=iso(v.retry),
-                                note=problem_message(v.reason, detail=v.detail))
+                                note=problem_message(v.reason, detail=v.detail), **wire)
             self.state.log("item", **base, **stats, result="released", reason=v.reason, error=v.error,
                            retryAfter=iso(v.retry), releaseError=None if st == 200 else describe(st, d))
             if v.reason in RESEARCH_GATE_REASONS:
@@ -3868,6 +4197,10 @@ class Runner:
             clean = v.kind == "ok" and not v.error and v.claimed is None
             end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
             research["log"]["end"] = end
+            wire["research"] = {"end": end}
+            attached, problems = self.attach_files(api, item, claim, s, research.get("files"))
+            research["log"].update(files=attached or None, fileErrors=len(problems) or None)
+            wire["usage"] = {**(wire["usage"] or {}), "files": attached}
             if not limit:
                 outcome = v.outcome
             elif s.answer_id or note_error:
@@ -3875,7 +4208,7 @@ class Runner:
             else:
                 outcome = "replied"
             self.complete(api, item, claim, h, base, stats, outcome,
-                          RESEARCH_PARTIAL_NOTE if limit else v.note, claimedOutcome=None if limit else v.claimed,
+                          RESEARCH_PARTIAL_NOTE if limit else v.note, wire, claimedOutcome=None if limit else v.claimed,
                           error=v.error, reason=None if limit else v.reason, noteError=note_error)
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
@@ -3888,7 +4221,7 @@ class Runner:
             if not s.succeeded & COMMENT_WRITES:
                 note = project_note(s, self.language) or TOO_LARGE_REPLY[self.language]
                 note_error = self.reply(api, item, note, f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE,
+            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE, wire,
                           error=v.error, noteError=note_error)
             return "continue"
 
@@ -3898,7 +4231,7 @@ class Runner:
             if not s.succeeded & COMMENT_WRITES and project_note(s):
                 note_error = self.reply(api, item, project_note(s, self.language),
                                         f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, v.outcome, v.note, claimedOutcome=v.claimed,
+            self.complete(api, item, claim, h, base, stats, v.outcome, v.note, wire, claimedOutcome=v.claimed,
                           error=v.error, reason=v.reason, noteError=note_error)
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
@@ -3907,7 +4240,7 @@ class Runner:
 
         self.state.record_error(h, f"{key}: {v.error}")
         public, message = FAIL_CAUSES[v.cause]
-        st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public])
+        st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public], **wire)
         h.setdefault("failed", []).append(iso(utcnow()))
         attempts = ((d or {}).get("data") or {}).get("attempts") if st == 200 else None
         final = isinstance(attempts, int) and attempts >= FINAL_ATTEMPT
@@ -3927,6 +4260,11 @@ class Runner:
             h.setdefault("sessions", []).append({"at": iso(at), "usd": usd, **({"kind": kind} if kind else {})})
         note_quota(h, s)
         return usd
+
+    def presence_step(self, step):
+        """A presence write has no fallback of its own: reading_source goes there
+        only once a progress post showed the server takes it."""
+        return "researching" if step == "reading_source" and not self.progress_support["reading_source"] else step
 
     def research_status(self, h):
         """The research block of health.json, which `unio runner status` prints: its limits as this process runs them."""
@@ -4005,7 +4343,7 @@ class Runner:
         week = quota_used(h, "seven_day", now)
         return None, bool(week and week[0] >= QUOTA_GATE), left
 
-    def research(self, item, h, claim, ask, run_dir, on_wait, teams, rerun):
+    def research(self, item, h, claim, ask, run_dir, on_wait, teams, rerun, progress=None):
         """(session, verdict, research) for a research run under this claim, or
         for the gate that holds it back (a release, with no session)."""
         now = utcnow()
@@ -4013,6 +4351,10 @@ class Runner:
         pending = h.get("researchPending") if isinstance(h.get("researchPending"), dict) else {}
         pending.pop(item.get("key"), None)
         gate, *rest = self.research_gate(h, claim, now)
+        if not gate and progress and not progress.begin_research():
+            # The server narrows the run's unio tools to its thread by this mark; a
+            # run it did not take would connect with every tool.
+            gate, rest = "research_unmarked", [progress.error, now + UNIO_RETRY]
         if gate:
             detail, retry = rest
             if "question" in ask:
@@ -4026,12 +4368,21 @@ class Runner:
         no_web, left = rest
         web = () if no_web else tuple(self.cfg.web_tools)
         timeout = min(self.cfg.research_timeout, (left - RESEARCH_MARGIN).total_seconds())
-        info["out"] = run_dir / f"attempt-{claim['attempt']}-{str(claim.get('claimId') or 'unnamed')[:8]}-research"
+        claim8 = str(claim.get("claimId") or "unnamed")[:8]
+        info["out"] = run_dir / f"attempt-{claim['attempt']}-{claim8}-research"
+        # Fresh for each attempt, so a retry can never attach what an earlier one wrote.
+        files = info["files"] = run_dir / "work" / f"files-{claim8}"
+        remove_tree(files)
+        files.mkdir(parents=True, exist_ok=True)
         info["log"].update(noWeb=no_web or None, timeoutS=int(timeout))
         facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
-                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
+                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question"),
+                 "files": files}
         prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
-        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
+        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout, files=files)
+        if s.refused.get("Write"):
+            # The run goes on without files; the answer offers one instead.
+            self.state.log("files_unavailable", key=item.get("key"), error=s.refused["Write"])
         v = self.classify(s, timeout=timeout)
         if v.kind == "research":
             v = Verdict("fail", cause="no_outcome", error="a research run asked for research")
@@ -4055,12 +4406,67 @@ class Runner:
             partial = limit or not clean
             if body is None:
                 return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
-            return ("partial" if partial else "no_web" if no_web else "complete"), \
-                self.edit_comment(api, s.answer_id, text)
+            error = self.edit_comment(api, s.answer_id, text)
+            if error is None:
+                s.answer_body = text
+            return ("partial" if partial else "no_web" if no_web else "complete"), error
         if not limit:
             return ("no_web" if no_web else "complete"), None
         reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
         return "partial", self.post_research_reply(api, item, claim, reply)
+
+    def attach_files(self, api, item, claim, s, folder, now=None):
+        """Checks the run's files and uploads what passes to its answer, or to the
+        task when the comment asks for that in words and its author may change the
+        task (when the item does not say, the server decides). Returns
+        (attached, problems) and logs every file left out."""
+        now = now or utcnow()
+        if not folder or not s.answer_id or s.answer_body is None:
+            return 0, []
+        kept, dropped = check_files(folder, s.answer_body)
+        for name, reason in dropped:
+            self.state.log("file_dropped", key=item.get("key"), file=name, reason=reason)
+        comment = item.get("comment") or {}
+        author = comment.get("author") or {}
+        target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
+            else "comment"
+        attached, problems = 0, []
+        for f in kept:
+            if (claim.get("at") or now) + CLAIM_LEASE - utcnow() < FILES_LEASE_LEFT:
+                problems.append((f, "too little of the claim was left"))
+                continue
+            error = self.upload_file(api, item, claim, s, f, target)
+            if error and target == "task":
+                # The task refused it (rights, its last free slots): the answer keeps it.
+                self.state.log("file_target", key=item.get("key"), file=f["name"], error=error)
+                error = self.upload_file(api, item, claim, s, f, "comment")
+            if error:
+                problems.append((f, error))
+                self.state.log("file_failed", key=item.get("key"), file=f["name"], error=error)
+            else:
+                attached += 1
+        if problems:
+            lines = "\n".join(FILE_FAILED[self.language].format(name=f["shown"]) for f, _ in problems)
+            text = f"{s.answer_body.rstrip()}\n\n{lines}"
+            if self.edit_comment(api, s.answer_id, text) is None:
+                s.answer_body = text
+        return attached, problems
+
+    def upload_file(self, api, item, claim, s, f, target):
+        """POST /agents/inbox/files: JSON text, never multipart, under the token
+        alone, as progress is; the key and claim in the body name the run."""
+        body = self.receipt(item, claim, commentId=s.answer_id, name=f["name"], content=f["content"],
+                            note=file_note(s.answer_body, f["shown"]) or f["shown"])
+        if target != "comment":
+            body["target"] = target
+        if f["render"]:
+            body["render"] = "pdf"
+        idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
+        try:
+            st, d = api.settle("POST", "/agents/inbox/files", body, idem, timeout=60)
+        except ApiUnreachable as e:
+            return str(e)
+        return None if 200 <= st < 300 else describe(st, d)
 
     def edit_comment(self, api, comment_id, content):
         """The runner's edit of the run's answer, under the token alone: the server
@@ -4094,8 +4500,8 @@ class Runner:
         fallback = self.reply(api, item, content, f"unio-inbox:note:{item.get('key')}:{claim['claimId']}")
         return f"{error}; {fallback}" if fallback else None
 
-    def complete(self, api, item, claim, h, base, stats, outcome, note, **extra):
-        st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note)
+    def complete(self, api, item, claim, h, base, stats, outcome, note, wire=None, **extra):
+        st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note, **(wire or {}))
         if st == 200:
             h.setdefault("handled", []).append(iso(utcnow()))
             # The answer, the 👍 or the change is the signal now.

