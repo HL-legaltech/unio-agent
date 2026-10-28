@@ -118,6 +118,9 @@ class FakeUnio:
         self.mcp_comment_status = None
         # Whether a person stops a research run once it reports past its start.
         self.stop_research = False
+        # Whether every progress answer from now on says stop, or only those after a file upload.
+        self.stop_now = False
+        self.stop_after_upload = False
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -186,7 +189,10 @@ class FakeUnio:
                             and r["body"].get("mode") == "research"]
             # The answer's shape (report_agent_inbox_progress_controller.ts, DEV-674): who stopped
             # the run is not in it.
-            stop = bool(self.stop_research and len(research) >= 2)
+            with self.lock:
+                uploaded = any(r["path"] == "/v1/agents/inbox/files" for r in self.requests)
+            stop = bool(self.stop_research and len(research) >= 2 or self.stop_now
+                        or self.stop_after_upload and uploaded)
             return 200, {"data": {"key": body.get("key"), "claimId": body.get("claimId"), "step": body.get("step"),
                                   "mode": "research" if research else "reply", "stop": stop}}
         if method in ("PUT", "DELETE") and path == "/v1/agents/reactions":
@@ -258,7 +264,7 @@ research. A research run (the researcher protocol) searches, reads a page,
 posts its checkpoint with the prompt's marker and edits it without the marker;
 research_cap stops at the turn cap after the checkpoint, research_silent
 before it; research_file also writes a CSV into the prompt's files folder and
-names it; research_slow waits a minute after the checkpoint, and
+names it, and research_files a Markdown file as well; research_slow waits a minute after the checkpoint, and
 research_slow_silent before it, to be stopped."""
 import json
 import os
@@ -358,13 +364,19 @@ if "# Unio Bot: researching" in protocol:
     if mode == "research_silent":
         result("", "error_max_turns", 60)
         sys.exit(1)
-    if mode == "research_file":
+    if mode in ("research_file", "research_files"):
         folder = re.search(r"^Files: write only into (.+), and only when", prompt, re.M).group(1)
         rows = ["municipio,aliquota,fonte"] + [f"Cidade {n},{n % 5}%,https://www.example.org/{n}" for n in range(80)]
         with open(os.path.join(folder, "dados-teste-2026.csv"), "w", encoding="utf-8") as f:
             f.write("\n".join(rows) + "\n")
         use(5, "Write", {"file_path": os.path.join(folder, "dados-teste-2026.csv")}, True, "written")
         content += "\n\nAnexei **dados-teste-2026.csv**: as 80 linhas com município e alíquota, para filtrar."
+    if mode == "research_files":
+        notes = ["# Notas da pesquisa", ""] + [f"- Cidade {n}: alíquota de {n % 5}% desde a lei {1000 + n}." for n in range(80)]
+        with open(os.path.join(folder, "notas-teste-2026.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(notes) + "\n")
+        use(7, "Write", {"file_path": os.path.join(folder, "notas-teste-2026.md")}, True, "written")
+        content += "\n\nAnexei também **notas-teste-2026.md**, com a lei de cada município."
     answer_id = post_comment(content + "\n\n" + marker)
     if mode == "research_slow":
         time.sleep(60)
