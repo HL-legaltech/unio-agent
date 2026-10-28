@@ -1287,11 +1287,17 @@ class Api:
         self.base = base
         self.token = token
 
-    def call(self, method, path, body=None, idempotency_key=None, timeout=20):
+    def call(self, method, path, body=None, idempotency_key=None, timeout=20, ascii_only=True):
         if stopping.is_set():
             # systemd's TimeoutStopSec bounds the whole shutdown.
             timeout = min(timeout, 5)
-        data = json.dumps(body).encode() if body is not None else None
+        data = None
+        if body is not None:
+            try:
+                data = json.dumps(body, ensure_ascii=ascii_only).encode("utf-8")
+            except UnicodeEncodeError:
+                # A lone surrogate has no UTF-8 form; the \u escape still carries it.
+                data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Accept", "application/json")
@@ -1310,12 +1316,12 @@ class Api:
             raise ApiUnreachable(f"{self.base} unreachable: {reason}",
                                  untrusted=isinstance(reason, ssl.SSLCertVerificationError)) from None
 
-    def settle(self, method, path, body, idempotency_key, timeout=20):
+    def settle(self, method, path, body, idempotency_key, timeout=20, ascii_only=True):
         """Writes that must land: a lost one leaves the item claimed for 15 minutes."""
         status, data = 0, {}
         for attempt in range(3):
             try:
-                status, data = self.call(method, path, body, idempotency_key, timeout=timeout)
+                status, data = self.call(method, path, body, idempotency_key, timeout=timeout, ascii_only=ascii_only)
             except ApiUnreachable as e:
                 status, data = 0, {"error": str(e)}
             if 0 < status < 500:
@@ -4535,7 +4541,9 @@ class Runner:
             body["render"] = "pdf"
         idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
         try:
-            st, d = api.settle("POST", "/agents/inbox/files", body, idem, timeout=60)
+            # Raw UTF-8: \u escapes would make accented text up to six times larger
+            # against the API's body limit.
+            st, d = api.settle("POST", "/agents/inbox/files", body, idem, timeout=60, ascii_only=False)
         except ApiUnreachable as e:
             return str(e)
         return None if 200 <= st < 300 else describe(st, d)

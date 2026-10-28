@@ -618,8 +618,39 @@ class Run(HomeCase):
         self.assertEqual(upload["headers"]["Idempotency-Key"],
                          "unio-inbox:file:comment:c-0001:claim-0001-fake:dados-teste-2026.csv:comment")
         self.assertNotIn("X-Unio-Inbox-Claim", upload["headers"])
+        # Raw UTF-8, not \u escapes: the note's "município" counts its bytes, not six per letter.
+        self.assertEqual(int(upload["headers"]["Content-Length"]),
+                         len(json.dumps(body, ensure_ascii=False).encode("utf-8")))
+        self.assertEqual(upload["headers"]["Content-Type"], "application/json")
         done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
         self.assertEqual(done["usage"]["files"], 1)
+
+    def test_a_body_with_a_lone_surrogate_still_goes(self):
+        sent = []
+
+        class Answer:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def urlopen(req, timeout):
+            sent.append(req.data)
+            return Answer()
+
+        with mock.patch.object(inbox.urllib.request, "urlopen", urlopen):
+            api = inbox.Api("http://127.0.0.1:9/v1", "t")
+            api.call("POST", "/x", {"content": "alíquota"}, ascii_only=False)
+            api.call("POST", "/x", {"content": "a\ud800"}, ascii_only=False)
+            api.call("POST", "/x", {"content": "alíquota"})
+        self.assertEqual(sent, ['{"content": "alíquota"}'.encode("utf-8"), b'{"content": "a\\ud800"}',
+                                b'{"content": "al\\u00edquota"}'])
 
     def test_a_task_file_falls_back_to_the_answer(self):
         self.fake.task_files_refused = True
