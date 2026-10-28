@@ -499,7 +499,7 @@ LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".lan")
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 # inet_aton's forms (127.1, 0x7f000001, 2130706433) reach the loopback as surely as 127.0.0.1.
 NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$")
-# A public name can point at a private address (127.0.0.1.nip.io, localtest.me), so
+# A public name can point at a private address (wildcard DNS services do), so
 # a name is also resolved here and each address checked. The lookup is not the
 # one WebFetch makes, so a name that rebinds between the two still passes: only
 # a PreToolUse hook (probe G2, unproven) would refuse the call before it goes.
@@ -2102,6 +2102,9 @@ def research_sources(urls, unio_hosts=()):
     user or password, query and fragment dropped, at most UNFINISHED_SOURCES."""
     found = []
     for url in urls:
+        # Each check can wait on a name lookup inside the run's closing margin.
+        if len(found) >= UNFINISHED_SOURCES:
+            break
         try:
             parts = urllib.parse.urlsplit(url)
         except ValueError:
@@ -2111,7 +2114,7 @@ def research_sources(urls, unio_hosts=()):
         clean = urllib.parse.urlunsplit(("https", parts.netloc.lower(), parts.path or "/", "", ""))
         if clean not in found and not re.search(r"[\s()\[\]<>]", clean):
             found.append(clean)
-    return found[:UNFINISHED_SOURCES]
+    return found
 
 
 def comment_lines(body):
