@@ -1636,6 +1636,14 @@ class Progress:
             self.stopped_by = who.get("name") if isinstance(who, dict) else None
         return True
 
+    def check_stop(self):
+        """Whether a person stopped the run, asked once more with the latest
+        values: once the session ends no wait loop posts, yet the closing work
+        after it must still honour a stop. Only a body that says it reads stop."""
+        if not self.stop and self.want is not None and "stoppable" in self.want:
+            self.post(self.want, time.monotonic())
+        return self.stop
+
     def degrade(self, body, data):
         """After a 422: whether dropping what this server may not know changes the
         body, for the rest of the process. A refused reading_source falls back to
@@ -4235,12 +4243,25 @@ class Runner:
             return "stop"
 
         if research and v.kind in ("too_large", "ok"):
-            limit = v.kind == "too_large"
+            def stopped():
+                if progress.check_stop() and s.stopped_by is None:
+                    s.stopped_by = progress.stopped_by or ""
+                return s.stopped_by is not None
+
+            # A stop that came after the session's last post still ends the run as stopped.
+            stopped()
+            limit = v.kind == "too_large" or s.stopped_by is not None
             clean = v.kind == "ok" and not v.error and v.claimed is None
-            end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
+            no_web = research["log"].get("noWeb")
+            end, note_error = self.end_research(api, item, claim, s, limit, clean, no_web)
+            attached, problems = self.attach_files(api, item, claim, s, research.get("files"), stopped=stopped)
+            if s.stopped_by is not None and end != "stopped":
+                # Stopped between uploads: the answer still gets the stopped line.
+                limit = True
+                end, error = self.end_research(api, item, claim, s, limit, clean, no_web)
+                note_error = note_error or error
             research["log"]["end"] = end
             wire["research"] = {"end": end}
-            attached, problems = self.attach_files(api, item, claim, s, research.get("files"))
             research["log"].update(files=attached or None, fileErrors=len(problems) or None)
             wire["usage"] = {**(wire["usage"] or {}), "files": attached}
             if not limit:
@@ -4462,11 +4483,12 @@ class Runner:
         reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()), lead)
         return ("stopped" if stopped else "partial"), self.post_research_reply(api, item, claim, reply)
 
-    def attach_files(self, api, item, claim, s, folder, now=None):
+    def attach_files(self, api, item, claim, s, folder, now=None, stopped=None):
         """Checks the run's files and uploads what passes to its answer, or to the
         task when the comment asks for that in words and its author may change the
-        task (when the item does not say, the server decides). Returns
-        (attached, problems) and logs every file left out."""
+        task (when the item does not say, the server decides). `stopped`, asked
+        between uploads, says whether a person stopped the run, which skips the
+        rest. Returns (attached, problems) and logs every file left out."""
         now = now or utcnow()
         if not folder or not s.answer_id or s.answer_body is None:
             return 0, []
@@ -4478,7 +4500,10 @@ class Runner:
         target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
             else "comment"
         attached, problems = 0, []
-        for f in kept:
+        for n, f in enumerate(kept):
+            if s.stopped_by is not None or (n and stopped and stopped()):
+                self.state.log("file_dropped", key=item.get("key"), file=f["name"], reason="stopped on request")
+                continue
             if (claim.get("at") or now) + CLAIM_LEASE - utcnow() < FILES_LEASE_LEFT:
                 problems.append((f, "too little of the claim was left"))
                 continue
