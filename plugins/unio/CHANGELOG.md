@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- As sessões passam a informar, para cada hora, o modelo, o modo rápido, a duração do cache e o número de chamadas, da conversa principal e dos subagentes. Com isso, a página do agente no Unio mostra quanto o uso custaria em preço de API.
+
 ## 1.4.0
 
 - No Codex, a sessão sugere unio update quando há versão nova, no macOS, no Linux e no Windows.
