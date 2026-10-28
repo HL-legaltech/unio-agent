@@ -123,6 +123,23 @@ class Commands(unittest.TestCase):
         self.assertIn("  atualização automática: desligada (UNIO_RUNNER_AUTOUPDATE=off)", out)
         self.assertIn("  última linha do registro: 2026-10-23T11:00:30Z idle items=0", out)
 
+    def test_status_shows_the_research_limits(self):
+        self.make_profile(lines=[{"at": "2026-10-23T11:00:00Z", "event": "start", "version": "2.1.0"}])
+        research = {"web": "on", "protocol": True,
+                    "configError": "UNIO_INBOX_RESEARCH_MAX_BUDGET_USD=0.01 is not a number from 0.05 to 50",
+                    "caps": {"turns": 60, "usd": 3.0, "runsPerDay": 8, "reserveUsd": 9.5, "timeoutS": 780,
+                             "quotaGate": 0.9}}
+        (self.state / "health.json").write_text(json.dumps({"research": research}), encoding="utf-8")
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  pesquisa: ligada, busca e páginas", out)
+        self.assertIn("  limites da pesquisa: 8 por dia, 60 turnos e US$ 3 cada; para com US$ 9,5 gastos em 24 h, "
+                      "e sem web com 90% da semana usados", out)
+        self.assertIn("  configuração da pesquisa ignorada, valem os padrões: UNIO_INBOX_RESEARCH_MAX_BUDGET_USD=0.01 "
+                      "is not a number from 0.05 to 50", out)
+        code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
+        self.assertEqual(json.loads(out)["workspaces"][0]["research"], research)
+
     def test_logs(self):
         self.make_profile(lines=[{"at": "t%d" % n, "event": "poll", "listed": n} for n in range(5)])
         with open(self.state / "log.jsonl", "a", encoding="utf-8") as f:
@@ -235,9 +252,10 @@ class Commands(unittest.TestCase):
         in_clone = (ur.CLONE / ".git").exists()
         self.assertEqual(json.loads(out), {"workspaces": [
             {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
-             "lastLog": None, "projectStatus": None},
+             "lastLog": None, "projectStatus": None, "research": None},
             {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
-             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}, "projectStatus": None}]})
+             "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}, "projectStatus": None,
+             "research": None}]})
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
 

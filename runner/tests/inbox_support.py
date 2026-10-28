@@ -36,6 +36,9 @@ def load_runner():
 
 
 inbox = load_runner()
+# No test resolves a real name: the web check's lookup answers "does not resolve".
+REAL_RESOLVE_HOST = inbox.resolve_host
+inbox.resolve_host = lambda host: ()
 
 
 def non_utf8_locale(env):
@@ -108,6 +111,8 @@ class FakeUnio:
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
         # What GET /agents/inbox lists; a completed item leaves it.
         self.items = []
+        # An HTTP status every runner create_comment over MCP gets, or None.
+        self.mcp_comment_status = None
         self.requests = []
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
@@ -176,9 +181,16 @@ class FakeUnio:
             return 200, {"data": {}}
         if method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/comments"):
             return 201, {"data": {"id": "c-runner-reply"}}
+        if method == "PUT" and path.startswith("/v1/comments/"):
+            return 200, {"data": {"id": path.rsplit("/", 1)[1]}}
         if method == "POST" and path == "/v1/mcp":
             name = ((body.get("params") or {}).get("name"))
-            answer = {"comment": {"id": "c-session-reply"}} if name == "create_comment" else {}
+            if name == "create_comment" and self.mcp_comment_status:
+                code = "agent_research_comment_cap" if self.mcp_comment_status == 409 else "unavailable"
+                return self.mcp_comment_status, {"error": "Recusado.", "code": code}
+            # create_comment's answer (write_tools.ts): the new comment's id, its time and its task.
+            answer = {"id": "c-session-reply", "createdAt": "2026-10-27T12:00:00.000Z",
+                      "task": {"key": "ABC-1"}} if name == "create_comment" else {}
             return 200, {"jsonrpc": "2.0", "id": body.get("id"),
                          "result": {"content": [{"type": "text", "text": json.dumps(answer)}]}}
         return 404, {"error": "Não encontrado.", "code": "not_found"}
@@ -220,9 +232,14 @@ FAKE_CLAUDE = r'''
 says it is signed in. A session (-p) reads its prompt on stdin, writes what
 it was given as one JSON line to $FAKE_CLAUDE_LOG, makes the folder Claude
 Code keeps for its working folder, and prints a canned stream-json run:
-init, get_task, then a create_comment it really sends to the MCP server in
-its --mcp-config, then a result with the outcome line. FAKE_CLAUDE_MODE=
-too_large ends at the turn cap instead, having written nothing."""
+init (its --tools and the unio tools the server registers), get_task, then a
+create_comment it really sends to the MCP server in its --mcp-config, then a
+result with the outcome line. FAKE_CLAUDE_MODE=too_large ends at the turn cap
+instead, having written nothing; escalate makes a reply run hand the item to
+research. A research run (the researcher protocol) searches, reads a page,
+posts its checkpoint with the prompt's marker and edits it without the marker;
+research_cap stops at the turn cap after the checkpoint, research_silent
+before it."""
 import json
 import os
 import re
@@ -260,38 +277,81 @@ def emit(event):
     sys.stdout.flush()
 
 
-def use(n, name, arguments, ok, text):
+def use(n, name, arguments, ok, text, structured=None):
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": f"tu{n}", "name": name, "input": arguments}]}})
-    emit({"type": "user", "message": {"content": [
+    answer = {"type": "user", "message": {"content": [
         {"type": "tool_result", "tool_use_id": f"tu{n}", "is_error": not ok,
-         "content": [{"type": "text", "text": text}]}]}})
+         "content": [{"type": "text", "text": text}]}]}}
+    if structured is not None:
+        answer["tool_use_result"] = structured
+    emit(answer)
 
 
+def result(text, subtype="success", turns=3):
+    emit({"type": "result", "subtype": subtype, "is_error": subtype != "success", "num_turns": turns,
+          "total_cost_usd": 0.0123, "result": text,
+          "modelUsage": {"claude-test": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 1,
+                                         "cacheCreationInputTokens": 2, "costUSD": 0.0123}}})
+
+
+def post_comment(body):
+    """create_comment through the MCP server in --mcp-config, as Claude Code would."""
+    arguments = {"task": task.group(1), "body": body, "reply_to": comment}
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "create_comment", "arguments": arguments}}
+    request = urllib.request.Request(unio["url"], data=json.dumps(call).encode(), method="POST",
+                                     headers={**unio["headers"], "Content-Type": "application/json",
+                                              "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        answer = json.loads(response.read())
+    text = answer["result"]["content"][0]["text"]
+    use(2, "mcp__unio__create_comment", arguments, not answer["result"].get("isError"), text)
+    return json.loads(text).get("id")
+
+
+mode = os.environ.get("FAKE_CLAUDE_MODE") or ""
+builtin = [t for t in (value("--tools") or "").split(",") if t]
+# Claude Code leaves a tool its deny rules name out of the init.
+denied = set((value("--disallowedTools") or "").split(","))
 emit({"type": "system", "subtype": "init", "claude_code_version": "2.1.300",
-      "tools": ["Read", "Grep", "Glob", "mcp__unio__get_task", "mcp__unio__list_comments",
-                "mcp__unio__create_comment", "mcp__unio__add_reaction"],
+      "tools": builtin + [t for t in ("mcp__unio__get_task", "mcp__unio__list_comments", "mcp__unio__create_comment",
+                                      "mcp__unio__update_comment", "mcp__unio__add_reaction",
+                                      "mcp__unio__update_task") if t not in denied],
       "mcp_servers": [{"name": "unio", "status": "connected"}]})
 task = re.search(r"^Task: (\S+) \(id ([^)]+)\)", prompt, re.M)
 use(1, "mcp__unio__get_task", {"task": task.group(1)}, True, json.dumps({"id": task.group(2)}))
-if os.environ.get("FAKE_CLAUDE_MODE") == "too_large":
-    emit({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 30,
-          "total_cost_usd": 0.02, "errors": ["Reached maximum number of turns (30)"]})
-    sys.exit(1)
-comment = re.search(r"^Comment id: (\S+)", prompt, re.M).group(1)
+comment = (re.search(r"^Comment id: (\S+)", prompt, re.M) or [None, None])[1]
 content = "Resposta de teste." if "Writing language: Brazilian Portuguese." in prompt else "Test answer."
-arguments = {"task": task.group(1), "content": content, "reply_to": comment}
-call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "create_comment", "arguments": arguments}}
-request = urllib.request.Request(unio["url"], data=json.dumps(call).encode(), method="POST",
-                                 headers={**unio["headers"], "Content-Type": "application/json",
-                                          "Accept": "application/json, text/event-stream"})
-with urllib.request.urlopen(request, timeout=20) as response:
-    answer = json.loads(response.read())
-text = answer["result"]["content"][0]["text"]
-use(2, "mcp__unio__create_comment", arguments, not answer["result"].get("isError"), text)
-emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "total_cost_usd": 0.0123,
-      "result": content + "\n{\"outcome\":\"replied\",\"note\":\"answered the question\"}"})
+if "# Unio Bot: researching" in protocol:
+    marker = re.search(r"^Checkpoint marker: .*?edit: (.+)$", prompt, re.M).group(1)
+    emit({"type": "rate_limit_event", "rate_limit_info": {"rateLimitType": "seven_day", "utilization": 0.5,
+                                                         "resetsAt": 1793188800}})
+    if "WebSearch" in builtin:
+        use(3, "WebSearch", {"query": "aliquota iss software", "mode": "standard"}, True, "Links: []")
+    if "WebFetch" in builtin:
+        use(4, "WebFetch", {"url": "https://www.example.org/lei", "prompt": "rates"}, True, "rates",
+            {"bytes": 5, "code": 200, "codeText": "OK", "result": "rates", "url": "https://www.example.org/lei"})
+    if mode == "research_silent":
+        result("", "error_max_turns", 60)
+        sys.exit(1)
+    answer_id = post_comment(content + "\n\n" + marker)
+    if mode == "research_cap":
+        result("", "error_max_turns", 60)
+        sys.exit(1)
+    use(6, "mcp__unio__update_comment", {"comment_id": answer_id,
+                                       "body": content + " Final ([lei](https://www.example.org/lei))."}, True,
+        json.dumps({"id": answer_id}))
+    result(content + "\n{\"outcome\":\"replied\",\"note\":\"researched\"}", turns=12)
+    sys.exit(0)
+if mode == "too_large":
+    result("", "error_max_turns", 30)
+    sys.exit(1)
+if mode == "escalate":
+    result("Needs the web.\n{\"outcome\":\"research\",\"question\":\"ISS rates for software\"}")
+    sys.exit(0)
+post_comment(content)
+result(content + "\n{\"outcome\":\"replied\",\"note\":\"answered the question\"}")
 '''
 
 

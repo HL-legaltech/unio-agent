@@ -1085,6 +1085,35 @@ def running_version(prof):
     return None
 
 
+def research_limits(prof):
+    """health.json's research block, as unio-inbox writes it at start, or None."""
+    try:
+        block = json.loads((prof.state / "health.json").read_text(encoding="utf-8")).get("research")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return block if isinstance(block, dict) else None
+
+
+def research_words(block):
+    """The research lines of status: what the service runs, and a setting it ignored."""
+    caps = block.get("caps") if isinstance(block.get("caps"), dict) else {}
+
+    def number(key):
+        value = caps.get(key)
+        return ("%g" % value).replace(".", ",") if isinstance(value, (int, float)) else "?"
+
+    web = {"off": "desligada (UNIO_INBOX_WEB=off)", "search": "ligada, só busca", "on": "ligada, busca e páginas"}
+    lines = ["  pesquisa: %s" % web.get(block.get("web"), "?")]
+    if block.get("web") in ("search", "on"):
+        lines.append("  limites da pesquisa: %s por dia, %s turnos e US$ %s cada; para com US$ %s gastos em 24 h, "
+                     "e sem web com %s%% da semana usados" % (
+                         number("runsPerDay"), number("turns"), number("usd"), number("reserveUsd"),
+                         clean(round(caps["quotaGate"] * 100), 4) if isinstance(caps.get("quotaGate"), float) else "?"))
+    if block.get("configError"):
+        lines.append("  configuração da pesquisa ignorada, valem os padrões: %s" % clean(block["configError"], 160))
+    return lines
+
+
 def autoupdate_off(prof):
     """Why the profile's runner does not update itself, or None when it does."""
     value = os.environ.get("UNIO_RUNNER_AUTOUPDATE") or read_env_file(prof.env_file).get("UNIO_RUNNER_AUTOUPDATE")
@@ -1302,7 +1331,7 @@ def status(opts):
         rows.append((prof, {"workspace": org, "state": svc.state(org) if svc else "unknown",
                             "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
                             "token": prof.token.exists(), "lastLog": entries[-1] if entries else None,
-                            "projectStatus": project_status(prof)}))
+                            "projectStatus": project_status(prof), "research": research_limits(prof)}))
     if opts.get("--json"):
         say(json.dumps({"workspaces": [row for _, row in rows]}))
         return 0
@@ -1314,6 +1343,8 @@ def status(opts):
         say("  versão: %s" % (row["version"] or "ainda não começou"))
         say("  atualização automática: %s" % autoupdate(prof))
         say("  status dos projetos: %s" % project_status_words(row["projectStatus"]))
+        for line in research_words(row["research"]) if row["research"] else ():
+            say(line)
         say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
     return 0
 

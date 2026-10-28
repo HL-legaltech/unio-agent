@@ -33,6 +33,18 @@ their repositories written in for each run.
 The runner tells Unio what it is doing (idle, the item and step it works on,
 or the problem that holds it), so the workspace sees it on the agent's page.
 
+Research: a task comment whose first words ask to find something out
+(pesquise, levante, compare, research, look up...), a reply in a thread the
+agent answered with research, or an item a reply run hands over with
+{"outcome":"research"} gets a research run under the same claim: the web tools
+UNIO_INBOX_WEB allows, five unio tools by name, no repository, and the
+researcher protocol. It posts one answer early and refines it; the runner
+closes an answer the run left unfinished, or replies with the pages it read.
+A run ends 90 s before the claim's 15 minutes do. It waits while the Claude
+session window is 90 % used, after 8 research runs in 24 h, or once all runs
+spent 60 % of UNIO_INBOX_DAILY_BUDGET_USD; with the weekly window 90 % used it
+answers without the web. Reply runs never hold the web themselves.
+
 Project reviews, with UNIO_REVIEW=on: inside a daily look window,
 when a poll found no item, the runner asks Unio which projects changed since
 their latest update and runs one session per chosen project, between inbox
@@ -99,8 +111,11 @@ UNIO_INBOX_INTERVAL (30 s), UNIO_INBOX_TIMEOUT (600 s), UNIO_INBOX_MAX_TURNS (30
 UNIO_INBOX_MAX_BUDGET_USD (1, per session), UNIO_INBOX_DAILY_BUDGET_USD (15, over
 any 24 h), UNIO_INBOX_HOURLY_SESSIONS (20), UNIO_INBOX_MODEL, UNIO_INBOX_CLAUDE
 and UNIO_INBOX_GH (the executables; default: claude and gh on PATH).
-UNIO_INBOX_WEB (off, search or on; default off): search lets an inbox run use web
-search, on also lets it read the pages it finds.
+UNIO_INBOX_WEB (off, search or on; default off): search lets a research run use web
+search, on also lets it read the pages it finds; off means no research run at all.
+UNIO_INBOX_RESEARCH_MAX_TURNS (60), UNIO_INBOX_RESEARCH_MAX_BUDGET_USD (3, per run),
+UNIO_INBOX_RESEARCH_DAILY_RUNS (8 over any 24 h) and UNIO_INBOX_RESEARCH_MODEL
+(default: the inbox's): see Research.
 UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
 UNIO_INBOX_MEMORY_FLOOR_GIB (a profile on Linux; default none): GiB of memory
 available below which answers wait.
@@ -118,6 +133,7 @@ closing and the runner finishing it).
 """
 import argparse
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -151,7 +167,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -188,6 +204,8 @@ MAX_RETRY_AHEAD = timedelta(hours=24) - timedelta(minutes=5)
 REPO_REFRESH = timedelta(minutes=10)
 LOG_MAX_BYTES = 5 * 1024 * 1024
 RUN_RETENTION = timedelta(days=14)
+# A research run's transcript is the only record of what it searched and read.
+RESEARCH_RETENTION = timedelta(days=30)
 FINAL_ATTEMPT = 3
 FETCH_LIMIT = 10
 # The server stores a change of state, task or item at once, but a write that
@@ -197,6 +215,10 @@ PRESENCE_SPACING = 11
 PROGRESS_SPACING = 3
 STATUS_TIMEOUT = 3
 TOO_LARGE_NOTE = "too large to answer automatically"
+# The subscription windows a rate_limit_event reports. A reading older than
+# QUOTA_FRESH says nothing about now: the windows roll.
+QUOTA_WINDOWS = ("five_hour", "seven_day")
+QUOTA_FRESH = timedelta(minutes=30)
 # The writing languages GET /agents/me can name. What the runner posts itself
 # comes in each of them; anything else it gets is read as English.
 LANGUAGE_NAMES = {"en": "English", "pt-BR": "Brazilian Portuguese"}
@@ -225,6 +247,43 @@ FAILURE_REASONS = {
     "pt-BR": {"error": "As três tentativas falharam com um erro.",
               "no_answer": "As três tentativas terminaram sem resposta."},
 }
+# The line a research answer ends with while the run still refines it; the
+# runner swaps it when the run ends before the model removes it.
+RESEARCH_MARKER = {
+    "en": "_Research in progress: I will complete this answer here in a few minutes._",
+    "pt-BR": "_Pesquisa em andamento: completo esta resposta aqui em alguns minutos._",
+}
+# What replaces the marker when a run ends before it removed it: the time or
+# turn cap, the web check, or an error after the answer was out.
+RESEARCH_LIMIT = {
+    "en": ("_I stopped at this research's limit. What is above was checked against the cited sources; to go "
+           "further, reply “continue” or ask for a narrower cut (one topic, one period or one source)._"),
+    "pt-BR": ("_Parei no limite desta pesquisa. O que está acima foi conferido nas fontes citadas; para ir além, "
+              "responda “continue” ou peça um recorte menor (um tema, um período ou uma fonte)._"),
+}
+# The runner's own reply when a run ended at its limit before posting anything.
+RESEARCH_UNFINISHED = {
+    "en": {"lead": "**I could not finish this research in the time available.**",
+           "opened": "I got to open these sources, which may help:",
+           "end": "Ask for a narrower cut (one topic, one period or one source) and mention me again."},
+    "pt-BR": {"lead": "**Não consegui concluir esta pesquisa no tempo disponível.**",
+              "opened": "Cheguei a abrir estas fontes, que podem ajudar:",
+              "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
+}
+RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
+COMMENT_CHARS = 20000
+UNFINISHED_SOURCES = 8
+RESEARCH_NO_WEB = {
+    "en": ("I did not search the web this time: this week's usage limit is nearly spent. What follows was not "
+           "checked against sources; confirm it before you use it."),
+    "pt-BR": ("Não pesquisei na web agora: o limite de uso desta semana está quase no fim. O que segue não foi "
+              "verificado nas fontes; confira antes de usar."),
+}
+RESEARCH_PROJECT = {
+    "en": "Web research works in task comments: mention me in a task of this project.",
+    "pt-BR": "Pesquisa na web funciona nos comentários de tarefa: me mencione numa tarefa deste projeto.",
+}
 # The responder's line the runner replaces with the agent's teams (workspace_section).
 WORKSPACE_MARKER = "<!-- unio-inbox: the workspace -->"
 FAIL_NOTES = {"error": "the run failed with an error", "no_answer": "the run ended without an answer"}
@@ -235,6 +294,8 @@ FAIL_CAUSES = {
     "no_outcome": ("no_answer", "the session ended without an outcome line"),
     "no_write": ("no_answer", "the session reported an answer it never posted"),
     "runner_error": ("error", "the runner hit an error"),
+    "research_after_write": ("error", "the session asked for research after writing"),
+    "research_unavailable": ("no_answer", "the session asked for research this item cannot get"),
 }
 # The reasons the server validates and the web app words in Portuguese.
 # The runner's finer ones travel as `other`, their detail in the note or message.
@@ -253,7 +314,14 @@ PROBLEMS = {
     "interrupted": "the runner stopped during the run",
     "inbox_unreadable": "the inbox could not be read",
     "memory_pressure": "the workstation is low on memory",
+    "research_lease": "too little of the claim was left for research",
+    "research_runs": "the day's research runs are spent",
+    "research_reserve": "research may not spend the reserve of the daily budget",
+    "research_session_window": "the Claude session window is nearly spent",
 }
+# The wire reason of a research gate's release.
+RESEARCH_GATE_REASONS = {"research_lease": "other", "research_runs": "budget", "research_reserve": "budget",
+                         "research_session_window": "usage_limit"}
 # The server refuses any step outside its codes (422), and the web app words
 # each one; a tool missing here keeps the previous step.
 STEPS = {
@@ -279,6 +347,8 @@ STEPS = {
     "mcp__unio__create_milestone": "updating_project",
     "mcp__unio__update_milestone": "updating_project",
     "mcp__unio__post_project_update": "updating_project",
+    "WebSearch": "researching",
+    "WebFetch": "researching",
 }
 # A project review is offered these two tools and nothing else: the server
 # registers only them under X-Unio-Review-Project, so any other tool at init
@@ -323,6 +393,79 @@ UNIO_WRITE_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
     "update_task", "create_task", "create_comment", "update_comment", "create_label", "add_reaction",
     "remove_reaction", "create_project", "update_project", "create_milestone", "update_milestone",
     "post_project_update", "create_project_comment"))
+# Every unio tool that only reads (the same source, 2026-10-27).
+UNIO_READ_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
+    "get_me", "get_task", "list_comments", "search_tasks", "list_inbox", "get_project", "list_project_comments",
+    "search_projects", "list_members", "get_team", "list_teams"))
+# Research on mention (protocol/researcher.md). The session gets these unio
+# tools by name, and every other tool the server registers is denied by
+# name, since deny wins over allow: a run that reads untrusted pages must not
+# reach another task, even to read it. A tool the server adds later is
+# caught in the stream (Runner._read), which stops the session.
+RESEARCH_MCP_TOOLS = tuple(UNIO_TOOL_PREFIX + name for name in (
+    "get_task", "list_comments", "create_comment", "update_comment", "add_reaction"))
+RESEARCH_REQUIRED = ("mcp__unio__get_task", "mcp__unio__create_comment")
+# A research init that lists one of these releases the item: the deny did
+# not hold. A read-only tool the server adds later is tolerated there, so it
+# cannot release every item; a call to it still stops the session.
+RESEARCH_INIT_REFUSED = tuple(name for name in UNIO_WRITE_TOOLS if name not in RESEARCH_MCP_TOOLS)
+RESEARCH_DENIED = tuple(name for name in dict.fromkeys([*UNIO_WRITE_TOOLS, *UNIO_READ_TOOLS])
+                        if name not in RESEARCH_MCP_TOOLS)
+# A comment whose first words, its mentions and punctuation aside, ask to find
+# something out goes straight to research; any other wording reaches it
+# through the reply run's {"outcome":"research"}. Matched on case- and
+# accent-folded text.
+RESEARCH_INTENT = re.compile(r"^(pesquis[ea]r?|pesquisa|investigu?e|levante|apure|descubra|compare|research|"
+                             r"look up|find out|investigate)\b")
+# How Unio writes a mention in a comment (agent_inbox_service.ts ANY_MENTION).
+MENTION_TOKEN = re.compile(r"@\[[^\]]+\]\([^)]+\)")
+RESEARCH_QUESTION_CHARS = 300
+# What a research query or address must never carry, checked on every WebSearch
+# and WebFetch the stream shows: a hit stops the session. It detects a leak,
+# since the call may already be out; it cannot prevent one. Digit runs are
+# fenced so a longer number (a 13-digit timestamp) is not read as a CPF. A run
+# written the way the document is (123.456.789-09) always counts; a bare or
+# spaced run counts only when its check digits hold, since news and Diário
+# Oficial addresses carry 11- and 14-digit ids (~1% of them pass a CPF check).
+DOC_SEP = r"[\s./-]?"
+PRIVATE_DOCUMENTS = (
+    ("cpf", re.compile(r"(?<!\d)\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{2}}(?!\d)")),
+    ("cnpj", re.compile(r"(?<!\d)\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{2}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{3}}{DOC_SEP}\d{{4}}{DOC_SEP}\d{{2}}(?!\d)")),
+    ("case_number", re.compile(r"(?<!\d)\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}(?!\d)"),
+     re.compile(rf"(?<!\d)\d{{7}}{DOC_SEP}\d{{2}}{DOC_SEP}\d{{4}}{DOC_SEP}\d{DOC_SEP}\d{{2}}{DOC_SEP}\d{{4}}(?!\d)")),
+)
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# WebFetch runs on the operator's machine, beside its dev servers. Measured on
+# 2.1.311 under -p --restricted (probe G1, 2026-10-27): WebFetch(domain:localhost)
+# and WebFetch(domain:127.0.0.1) deny rules refuse those hosts, but 127.0.0.2 went
+# out, so the deny rules name the usual hosts and fetch_problem() is the control.
+FETCH_DENIED = ("localhost", "127.0.0.1", "0.0.0.0")
+LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".lan")
+CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# inet_aton's forms (127.1, 0x7f000001, 2130706433) reach the loopback as surely as 127.0.0.1.
+NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$")
+# A public name can point at a private address (wildcard DNS services do), so
+# a name is also resolved here and each address checked. The lookup is not the
+# one WebFetch makes, so a name that rebinds between the two still passes: only
+# a PreToolUse hook (probe G2, unproven) would refuse the call before it goes.
+# A name that does not resolve here passes: WebFetch cannot reach it either.
+RESOLVE_TIMEOUT = 2
+# The server's claim lasts 15 minutes from claimed_at, and nothing extends it
+# (agent_inbox_receipt_service.ts). A research run ends RESEARCH_MARGIN before
+# that, for its closing writes and settlement, and does not start with less
+# than RESEARCH_MIN_LEFT: a run that cannot finish only spends the quota.
+CLAIM_LEASE = timedelta(minutes=15)
+RESEARCH_MARGIN = timedelta(seconds=90)
+RESEARCH_MIN_LEFT = timedelta(minutes=4)
+# At this share of a subscription window used, research stops: the seven-day
+# one answers without the web, the five-hour one waits for its reset.
+QUOTA_GATE = 0.9
+QUOTA_RESET_PAD = timedelta(minutes=5)
+# A thread whose root got a research answer goes on as research for its replies.
+RESEARCH_THREADS_KEPT = timedelta(days=30)
+RESEARCH_THREADS_MAX = 200
 NEEDS_HEADING = re.compile(r"^##[ \t]+Needs[ \t]+(\S+)[ \t]*$")
 NEEDS_ITEM = re.compile(r"^\s*- \[( |x|X)\] ")
 # A section is its heading and the task list under it. Only blank lines and
@@ -612,7 +755,7 @@ def yes_no(value):
 
 
 def wire_reason(reason):
-    return reason if reason in REASON_CODES else "other"
+    return reason if reason in REASON_CODES else RESEARCH_GATE_REASONS.get(reason, "other")
 
 
 def problem_message(reason, until=None, detail=None):
@@ -959,6 +1102,22 @@ class Config:
         self.review_backlog_per_day = 2
         # A project the candidates have not listed for this long is forgotten.
         self.review_forget_after = timedelta(days=30)
+        self.researcher = self.protocol("researcher.md")
+        turns, bad_turns = env_number(env, "UNIO_INBOX_RESEARCH_MAX_TURNS", 60, 1, 500, integer=True)
+        budget, bad_budget = env_number(env, "UNIO_INBOX_RESEARCH_MAX_BUDGET_USD", 3, 0.05, 100)
+        runs, bad_runs = env_number(env, "UNIO_INBOX_RESEARCH_DAILY_RUNS", 8, 0, 1000, integer=True)
+        # Deep research needs 5-12 searches, up to 15 reads, about 5 unio calls and 3 edits: about 40 turns.
+        self.research_max_turns = turns
+        # About $0.05 a turn (the one live research run: $0.65 in 13 turns).
+        self.research_max_budget = f"{budget:g}"
+        self.research_max_budget_usd = float(budget)
+        self.research_daily_runs = runs
+        self.research_model = env.get("UNIO_INBOX_RESEARCH_MODEL") or self.model
+        self.research_error = bad_turns or bad_budget or bad_runs
+        # Inside the claim's 15 minutes, with RESEARCH_MARGIN to spare.
+        self.research_timeout = 780.0
+        # No research starts once all runs spent this share of the daily budget, so replies keep the rest.
+        self.research_reserve = 0.6
         self.needs_protocol = self.protocol("needs.md")
         needs = (env.get("UNIO_NEEDS") or "off").strip().lower()
         self.needs_mode = needs if needs in NEEDS_MODES else "off"
@@ -1156,17 +1315,32 @@ def rpc_answer(raw, content_type, rid):
                  and ("result" in m or "error" in m)), None)
 
 
+class ToolError(str):
+    """Why a tool call failed, in words. `transport` when no verdict came back
+    (unreachable, a 5xx, no JSON-RPC answer): only then may another route try
+    the same write, since a refusal would be posted past the rule that made it."""
+    transport = False
+
+
+def tool_error(text, transport=False):
+    error = ToolError(text)
+    error.transport = transport
+    return error
+
+
 class Mcp:
     """Unio's MCP endpoint as a plain JSON-RPC client, for the runner's own
     writes: one tools/call per request, no handshake and no session."""
 
-    def __init__(self, url, token):
+    def __init__(self, url, token, headers=None):
         self.url = url
         self.token = token
+        # A claim's scope headers, for a write made on the item's behalf.
+        self.headers = dict(headers or {})
         self.next_id = 0
 
     def call_tool(self, name, arguments, timeout=30):
-        """(answer, None) with the tool's JSON answer, or (None, error). A tool's
+        """(answer, None) with the tool's JSON answer, or (None, ToolError). A tool's
         refusal (isError) is an error carrying the server's words."""
         if stopping.is_set():
             timeout = min(timeout, 5)
@@ -1179,31 +1353,33 @@ class Mcp:
         req.add_header("Accept", "application/json, text/event-stream")
         req.add_header("MCP-Protocol-Version", MCP_PROTOCOL)
         req.add_header("User-Agent", f"unio-inbox/{VERSION}")
+        for header, value in self.headers.items():
+            req.add_header(header, value)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status, ctype, raw = resp.status, resp.headers.get("Content-Type"), resp.read()
         except urllib.error.HTTPError as e:
-            return None, f"{name}: {describe(e.code, Api._json(e.read()))}"
+            return None, tool_error(f"{name}: {describe(e.code, Api._json(e.read()))}", e.code >= 500)
         except (urllib.error.URLError, OSError) as e:
-            return None, f"{name}: {self.url} unreachable: {getattr(e, 'reason', e)}"
+            return None, tool_error(f"{name}: {self.url} unreachable: {getattr(e, 'reason', e)}", True)
         message = rpc_answer(raw, ctype, self.next_id)
         if message is None:
-            return None, f"{name}: HTTP {status} without a JSON-RPC answer"
+            return None, tool_error(f"{name}: HTTP {status} without a JSON-RPC answer", True)
         if "error" in message:
             error = message["error"]
-            return None, f"{name}: {short(error.get('message') if isinstance(error, dict) else error, 300)}"
+            return None, tool_error(f"{name}: {short(error.get('message') if isinstance(error, dict) else error, 300)}")
         result = message.get("result")
         if not isinstance(result, dict):
-            return None, f"{name}: the answer has no result"
+            return None, tool_error(f"{name}: the answer has no result", True)
         text = result_text(result.get("content"))
         if result.get("isError"):
-            return None, f"{name} refused: {short(text, 400)}"
+            return None, tool_error(f"{name} refused: {short(text, 400)}")
         try:
             answer = json.loads(text) if text else result.get("structuredContent")
         except ValueError:
             answer = None
         if not isinstance(answer, dict):
-            return None, f"{name}: the answer is not a JSON object"
+            return None, tool_error(f"{name}: the answer is not a JSON object", True)
         return answer, None
 
 
@@ -1445,10 +1621,13 @@ class State:
         the caller holds the poll lock)."""
         for f in self.mcp_dir.iterdir():
             f.unlink(missing_ok=True)
-        cutoff = time.time() - RUN_RETENTION.total_seconds()
+        now = time.time()
         for d in self.runs_dir.iterdir():
             try:
-                if d.is_dir() and d.stat().st_mtime < cutoff:
+                if not d.is_dir():
+                    continue
+                kept = RESEARCH_RETENTION if any(a.name.endswith("-research") for a in d.iterdir()) else RUN_RETENTION
+                if d.stat().st_mtime < now - kept.total_seconds():
                     shutil.rmtree(d, ignore_errors=True)
             except OSError:
                 pass
@@ -1613,6 +1792,213 @@ def parse_outcome(text):
     return {"outcome": data["outcome"], "note": short(note, 300) if isinstance(note, str) else None}
 
 
+def parse_escalation(text):
+    """The question of a reply run's {"outcome":"research","question":…} line,
+    "" when it gives none, or None when the line is not that."""
+    data = final_json(text)
+    if not data or data.get("outcome") != "research":
+        return None
+    question = data.get("question")
+    return printable(short(question, RESEARCH_QUESTION_CHARS)) if isinstance(question, str) else ""
+
+
+def fold(text):
+    """Lower case, accents off: "Pesquise" and "pesquíse" read alike."""
+    text = unicodedata.normalize("NFD", str(text or ""))
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+
+
+def check_digits_hold(kind, digits):
+    """Whether a CPF's or CNPJ's two check digits (mod 11), or a CNJ case
+    number's (ISO 7064 mod 97-10, Resolução CNJ 65/2008), hold."""
+    d = [int(c) for c in digits]
+    if kind == "case_number":
+        return int(digits[:7] + digits[9:] + digits[7:9]) % 97 == 1
+    if len(set(d)) == 1:
+        return False
+    if kind == "cpf":
+        weights = [range(10, 1, -1), range(11, 1, -1)]
+    else:
+        weights = [[5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2], [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]]
+    for n, w in enumerate(weights):
+        size = len(d) - 2 + n
+        rest = sum(a * b for a, b in zip(d[:size], w)) % 11
+        if d[size] != (0 if rest < 2 else 11 - rest):
+            return False
+    return True
+
+
+def private_text(text, task_key=None):
+    """What private kind of text a query or an address carries, or None."""
+    text = str(text or "")
+    # An address can carry text encoded twice (a%2540b.com).
+    for _ in range(3):
+        decoded = urllib.parse.unquote_plus(text)
+        if decoded == text:
+            break
+        text = decoded
+    for kind, written, loose in PRIVATE_DOCUMENTS:
+        if written.search(text) or any(check_digits_hold(kind, re.sub(r"\D", "", m.group()))
+                                       for m in loose.finditer(text)):
+            return kind
+    if EMAIL.search(text):
+        return "email"
+    prefix, _, number = str(task_key or "").partition("-")
+    if prefix and number and re.search(rf"(?<![A-Za-z0-9]){re.escape(prefix)}[\s_-]?{re.escape(number)}(?!\d)",
+                                       text, re.I):
+        return "task_key"
+    return None
+
+
+def host_address(host):
+    """The IP address a host names literally, in any form a resolver reads, or None."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if not NUMERIC_HOST.match(host):
+            return None
+        try:
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return None
+    return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
+
+
+def private_ip(ip):
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified \
+        or ip.is_multicast or (ip.version == 4 and ip in CGNAT)
+
+
+def resolve_host(host):
+    """Every address a name resolves to on this computer, or () when it does not
+    resolve within RESOLVE_TIMEOUT: getaddrinfo takes no timeout of its own."""
+    found = []
+
+    def look():
+        try:
+            found.append({info[4][0] for info in socket.getaddrinfo(host, None)})
+        except (OSError, UnicodeError):
+            pass
+
+    lookup = threading.Thread(target=look, daemon=True)
+    lookup.start()
+    lookup.join(RESOLVE_TIMEOUT)
+    return tuple(sorted(found[0])) if found else ()
+
+
+def private_host(host, unio_hosts=()):
+    """Why a host is off limits to WebFetch, or None for a public one."""
+    host = str(host or "").lower().strip("[]")
+    if not host.isascii():
+        # WebFetch reads the host as WHATWG URL does, after UTS-46 mapping: "１２７.0.0.1"
+        # and "127。0。0。1" reach 127.0.0.1. IDNA 2003 maps them the same way.
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return "host_form"
+    host = host.rstrip(".")
+    if not host:
+        return "no_host"
+    ip = host_address(host)
+    if ip is not None:
+        return "private_address" if private_ip(ip) else None
+    if host == "localhost" or host.endswith(LOCAL_SUFFIXES) or "." not in host:
+        return "local_name"
+    if any(host == h or host.endswith("." + h) for h in unio_hosts):
+        return "unio_host"
+    for address in resolve_host(host):
+        try:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            continue
+        if private_ip(ip.ipv4_mapped or ip if ip.version == 6 else ip):
+            return "private_resolution"
+    return None
+
+
+def fetch_problem(url, unio_hosts=()):
+    """Why WebFetch must not read this address, or None: http(s) only, no
+    user or password in it, and a public host."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or "").strip())
+        host = parts.hostname
+    except ValueError:
+        return "unreadable"
+    if parts.scheme.lower() not in ("http", "https"):
+        return "scheme"
+    if "@" in parts.netloc:
+        return "userinfo"
+    return private_host(host, unio_hosts)
+
+
+def is_marker(line):
+    """Whether a line is a checkpoint marker, in any writing language, however the model dressed it."""
+    text = line.strip().strip("*_ ").casefold()
+    return any(text.startswith(m.strip("_").split(":")[0].casefold()) for m in RESEARCH_MARKER.values())
+
+
+def has_marker(body):
+    return any(is_marker(line) for line in str(body or "").split("\n"))
+
+
+def swap_marker(body, line=None, append=False):
+    """The answer with its marker line replaced by `line`, or removed when `line`
+    is None; without a marker, `line` goes at the end when `append`. The body is
+    cut, never the line, to keep the comment within the server's cap."""
+    lines = str(body or "").split("\n")
+    marks = [n for n, text in enumerate(lines) if is_marker(text)]
+    kept = []
+    for n, text in enumerate(lines):
+        if n not in marks:
+            kept.append(text)
+        elif n == marks[-1] and line is not None:
+            kept.append(line)
+    text = "\n".join(kept).rstrip()
+    if line is not None and not marks and append:
+        text = f"{text}\n\n{line}" if text else line
+    if line is not None and len(text) > COMMENT_CHARS:
+        head = text[:len(text) - len(line)].rstrip()[:COMMENT_CHARS - len(line) - 2].rstrip()
+        text = f"{head}\n\n{line}"
+    return text
+
+
+def research_sources(urls, unio_hosts=()):
+    """The pages a run read that a reply may list: https on a public host, no
+    user or password, query and fragment dropped, at most UNFINISHED_SOURCES."""
+    found = []
+    for url in urls:
+        # Each check can wait on a name lookup inside the run's closing margin.
+        if len(found) >= UNFINISHED_SOURCES:
+            break
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            continue
+        if parts.scheme != "https" or fetch_problem(url, unio_hosts):
+            continue
+        clean = urllib.parse.urlunsplit(("https", parts.netloc.lower(), parts.path or "/", "", ""))
+        if clean not in found and not re.search(r"[\s()\[\]<>]", clean):
+            found.append(clean)
+    return found
+
+
+def unfinished_reply(language, sources, lead=None):
+    """The runner's reply to a research run that ended before posting: its
+    lead, the pages it opened, and what to ask next."""
+    words = RESEARCH_UNFINISHED[language]
+    lead = lead or words["lead"]
+    if not sources:
+        return f"{lead}\n\n{words['end']}"
+    listed = "\n".join(f"{n}. [{urllib.parse.urlsplit(url).hostname}]({url})" for n, url in enumerate(sources, 1))
+    return f"{lead} {words['opened']}\n\n{listed}\n\n{words['end']}"
+
+
+def asks_research(text):
+    """Whether a comment's first words, past its mentions and punctuation, ask to find something out."""
+    text = fold(MENTION_TOKEN.sub(" ", str(text or "")))
+    return bool(RESEARCH_INTENT.match(text.lstrip(" \t\r\n,.;:!?-*_>")))
+
+
 def parse_review_outcome(text):
     """A review's last line as {"outcome": "posted" | "silent", "reason"}."""
     data = final_json(text)
@@ -1710,6 +2096,47 @@ def usage_reset(text, now=None):
     return at if at > now else None
 
 
+def rate_limits(event):
+    """{window: {utilization, resetsAt}} for five_hour and seven_day from a
+    rate_limit_event. Measured on 2.1.311: rate_limit_info names one window
+    (rateLimitType) and, under unifiedWindows, every window it knows;
+    resetsAt is epoch seconds."""
+    info = event.get("rate_limit_info") if isinstance(event.get("rate_limit_info"), dict) else {}
+    windows = dict(info.get("unifiedWindows")) if isinstance(info.get("unifiedWindows"), dict) else {}
+    if info.get("rateLimitType") in QUOTA_WINDOWS and info.get("rateLimitType") not in windows:
+        windows[info["rateLimitType"]] = info
+    found = {}
+    for name in QUOTA_WINDOWS:
+        w = windows.get(name)
+        used = w.get("utilization") if isinstance(w, dict) else None
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not 0 <= used <= 10:
+            continue
+        reset = w.get("resetsAt")
+        at = datetime.fromtimestamp(reset, timezone.utc) if isinstance(reset, (int, float)) and \
+            not isinstance(reset, bool) and 0 < reset < 10**11 else None
+        found[name] = {"utilization": float(used), "resetsAt": iso(at)}
+    return found
+
+
+def note_quota(h, s, now=None):
+    """health.json's quota: each window a session reported, with when the
+    session read it (`now` for a reading that carries no time)."""
+    if not s.rate_limits:
+        return
+    quota = h["quota"] = h["quota"] if isinstance(h.get("quota"), dict) else {}
+    for name, window in s.rate_limits.items():
+        quota[name] = {**window, "at": window.get("at") or iso(now or utcnow())}
+
+
+def quota_used(h, name, now):
+    """(utilization, resetsAt) of a window read in the last QUOTA_FRESH, else None."""
+    w = (h.get("quota") or {}).get(name) if isinstance(h.get("quota"), dict) else None
+    at = parse_iso(w.get("at")) if isinstance(w, dict) else None
+    if not at or now - at > QUOTA_FRESH or not isinstance(w.get("utilization"), (int, float)):
+        return None
+    return float(w["utilization"]), parse_iso(w.get("resetsAt"))
+
+
 def written_outcome(succeeded):
     """What the session's successful tool calls amount to, by the protocol's definitions."""
     if succeeded & ACTING_WRITES:
@@ -1724,8 +2151,11 @@ def written_outcome(succeeded):
 def check_outcome(claimed, succeeded):
     """(outcome to record, None) or (None, error). The writes decide, so a claim
     they contradict is replaced by what happened (the caller logs both); a claimed
-    answer with no write at all fails, since nobody got one."""
+    answer with no write at all fails, since nobody got one. "research" hands the
+    item to a research run, which only a run that wrote nothing may do."""
     actual = written_outcome(succeeded)
+    if claimed == "research":
+        return (None, "the session asked for research after writing") if actual != "skipped" else ("research", None)
     if actual == "skipped" and claimed != "skipped":
         return None, f"the session reported '{claimed}' but made no successful Unio write"
     return actual, None
@@ -1735,6 +2165,30 @@ def session_text(s):
     """The session's final message, or its errors when it printed none."""
     ev = s.result or {}
     return ev.get("result") if isinstance(ev.get("result"), str) else "; ".join(map(str, ev.get("errors") or []))
+
+
+def run_usage(ev, assumed_usd=None):
+    """What a session spent, from its result event: the model that cost the
+    most and its own tokens, the list-price cost of every model and the
+    turns. The Haiku calls behind WebSearch and WebFetch read whole pages:
+    summed in, they made nearly all of a research run's input tokens. A
+    session stopped before its result counts `assumed_usd`, marked estimated."""
+    if not isinstance(ev, dict) or not ev:
+        return {"costUsd": assumed_usd, "estimated": True} if assumed_usd is not None else None
+    models = {name: m for name, m in (ev.get("modelUsage") or {}).items() if isinstance(m, dict)} \
+        if isinstance(ev.get("modelUsage"), dict) else {}
+    model = max(models, key=lambda name: models[name].get("costUSD") or 0) if models else None
+
+    def tokens(field):
+        value = models[model].get(field) if model else None
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    return {
+        "model": model,
+        "inputTokens": tokens("inputTokens"), "outputTokens": tokens("outputTokens"),
+        "cacheReadTokens": tokens("cacheReadInputTokens"), "cacheWriteTokens": tokens("cacheCreationInputTokens"),
+        "costUsd": ev.get("total_cost_usd"), "turns": ev.get("num_turns"), "estimated": False,
+    }
 
 
 def made_project(content):
@@ -1764,12 +2218,14 @@ def writing_language(me):
     return language if language in LANGUAGE_NAMES else "en"
 
 
-def language_line(language):
+def language_line(language, research=False):
     """Every prompt names the writing language, and this line outranks the
-    protocol: a configuration folder's older copy may still say English."""
-    return (f"Writing language: {LANGUAGE_NAMES.get(language, 'English')}. Write everything you post in it, "
-            "whatever language people wrote in; this line wins over any other language rule. Needs <first name>, "
-            "Waiting on, Sessions and Needs action stay in English.")
+    protocol: a configuration folder's older copy may still say English. A
+    research answer writes none of the English markers."""
+    line = (f"Writing language: {LANGUAGE_NAMES.get(language, 'English')}. Write everything you post in it, "
+            "whatever language people wrote in; this line wins over any other language rule.")
+    return line if research else line + (" Needs <first name>, Waiting on, Sessions and Needs action stay in "
+                                         "English.")
 
 
 def one_line(text, limit):
@@ -1828,13 +2284,59 @@ def item_subject(item):
     return None
 
 
+def scope_headers(item, claim):
+    """What scopes a connection to an item's claim on the server."""
+    return {"X-Unio-Inbox-Item": str(item.get("key")),
+            **({"X-Unio-Inbox-Claim": claim["claimId"]} if claim.get("claimId") else {})}
+
+
 def reaction_target(item):
     comment = item.get("comment")
     return ({"reactableType": "comment", "reactableId": comment.get("id")} if comment else
             {"reactableType": "task", "reactableId": (item.get("task") or {}).get("id")})
 
 
-def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", language="en"):
+def web_line(web, language="en"):
+    """A reply run's line about the web, which it never has itself: `handover`
+    when a research run can take the item, `project` for a project item while
+    research is on, else `off`."""
+    if web == "handover":
+        return ("Web research: not in this run. When the answer needs sources from the public web, write nothing "
+                "and end with the research outcome line (see \"Research\"); a research run takes the item.")
+    if web == "project":
+        return (f"Web research: only in task comments. When the comment asks for research, open your answer with "
+                f"\"{RESEARCH_PROJECT[language]}\" and answer from what you know, each point marked unverified.")
+    return ("Web research: not available. When the answer needs sources from the web, say in your first sentence "
+            "what you could not check, and mark each point unverified.")
+
+
+def research_lines(research, language="en"):
+    """The research run's own facts: its web tools, limits and checkpoint marker."""
+    web = research.get("web") or ()
+    if research.get("no_web"):
+        line = ("Web research: off this run, the weekly usage limit is nearly spent. Open your answer with "
+                f"\"{RESEARCH_NO_WEB[language]}\" and mark every point as an assumption.")
+    elif "WebFetch" in web:
+        line = "Web research: WebSearch and WebFetch."
+    else:
+        line = ("Web research: WebSearch only (search results, not whole pages), so no finding can be marked "
+                "verified.")
+    lines = [
+        line,
+        f"Research limits: about {research['minutes']} minutes and {research['turns']} turns. Post your answer "
+        "comment once you have the core finding, and no later than your 20th web call; then refine it with "
+        "update_comment, at most 3 times.",
+        f"Checkpoint marker: end your first post with this line, and remove it in your last edit: "
+        f"{RESEARCH_MARKER[language]}",
+    ]
+    if research.get("answer"):
+        lines.append(f"This thread already has your research answer (comment {research['answer']}); start from "
+                     "its sources.")
+    return lines
+
+
+def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", language="en", research=None,
+                 thread=None):
     on_project = item_subject(item) == "project"
     project = item.get("project") if on_project else None
     task = {} if on_project else item.get("task") or {}
@@ -1861,6 +2363,7 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         lines += [
             f"Task: {task.get('key')} (id {task.get('id')})",
             f"URL: {task.get('url')}",
+            f"Team: {team.get('name')}, identifier {team.get('identifier')}." if research else
             f"Team: {team.get('name')}, identifier {team.get('identifier')}. Work only in this team: "
             f"pass team={team.get('identifier')} to search_tasks.",
         ]
@@ -1869,10 +2372,12 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         # The run's tools reach the item's team alone, so they cannot answer "where do you work?".
         lines.append(f"Your teams in this workspace: {', '.join(teams)}. This run's tools reach "
                      f"{team.get('identifier')} only.")
-    lines.append({"off": "Web research: not available in this run.",
-                  "search": "Web research: WebSearch only (search results, not whole pages).",
-                  "on": "Web research: WebSearch and WebFetch."}[web if web in WEB_TOOLS else "off"])
-    lines.append(language_line(language))
+    lines += research_lines(research, language) if research else [web_line(web, language)]
+    if thread and not research and web == "handover":
+        lines.append(f"This thread already has your research answer (comment {thread}). A reply that asks for more "
+                     "of it (another place, period or source, or \"continue\") goes to research the same way; a "
+                     "thanks or an acknowledgement does not.")
+    lines.append(language_line(language, bool(research)))
     if comment:
         lines += [
             f"Comment id: {comment.get('id')} (answer it with "
@@ -1880,16 +2385,20 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
             f"Thread root id: {comment.get('rootId') or comment.get('id')}",
             f"Author kind: {author.get('kind')}, written {comment.get('createdAt')}",
         ]
-    lines.append(f"Author can update tasks: {yes_no(author.get('canUpdateTasks'))}; "
-                 f"can create tasks: {yes_no(author.get('canCreateTasks'))}; "
-                 f"can create labels: {yes_no(author.get('canCreateLabels'))}; "
-                 f"can create projects: {yes_no(author.get('canCreateProjects'))}; "
-                 f"can update every project: {yes_no(author.get('canUpdateProjects'))} "
-                 "(they may also edit a project they lead or are a member of)")
-    if author.get("clerkId"):
-        lines.append(f"Author clerk id: {author.get('clerkId')} (pass \"author\" to name them: "
-                     "a project's lead or member, a task's assignee)")
-    if snapshots:
+    if not research:
+        # A research run changes nothing but its answer comment.
+        lines.append(f"Author can update tasks: {yes_no(author.get('canUpdateTasks'))}; "
+                     f"can create tasks: {yes_no(author.get('canCreateTasks'))}; "
+                     f"can create labels: {yes_no(author.get('canCreateLabels'))}; "
+                     f"can create projects: {yes_no(author.get('canCreateProjects'))}; "
+                     f"can update every project: {yes_no(author.get('canUpdateProjects'))} "
+                     "(they may also edit a project they lead or are a member of)")
+        if author.get("clerkId"):
+            lines.append(f"Author clerk id: {author.get('clerkId')} (pass \"author\" to name them: "
+                         "a project's lead or member, a task's assignee)")
+    if research:
+        lines.append("Repositories: none in a research run")
+    elif snapshots:
         lines.append("Repositories (read-only snapshots of each default branch):")
         for s in snapshots:
             stale = ""
@@ -1917,6 +2426,8 @@ def build_prompt(item, snapshots, attempt, rerun=False, teams=None, web="off", l
         lines += [f"Comment author: {author.get('name')}", "Comment:", str(comment.get("content") or "")]
     elif author.get("name"):
         lines.append(f"Assigned by: {author.get('name')}")
+    if research and research.get("question"):
+        lines.append(f"Research question, as an earlier run restated it: {research['question']}")
     lines += [
         f"----- END UNTRUSTED TEXT {nonce} -----",
         "",
@@ -2032,6 +2543,29 @@ def plan_reviews(rows, entries, now, cfg):
             drained += 1
         queue.append(item)
     return queue, decisions
+
+
+def recent_sessions(h, now):
+    """(at, usd, kind) of each session in the last 24 h, oldest first."""
+    found = []
+    for r in h.get("sessions") or []:
+        at = parse_iso(r.get("at")) if isinstance(r, dict) else None
+        if at and now - timedelta(hours=24) < at <= now + timedelta(minutes=5):
+            found.append((at, float(r.get("usd") or 0), r.get("kind")))
+    return sorted(found, key=lambda run: run[0])
+
+
+def spend_clears(runs, cap):
+    """When the 24 h spend of `runs` ((at, usd), oldest first) falls back under
+    `cap`, or None when it is under already."""
+    spent = sum(usd for _, usd in runs)
+    for at, usd in runs:
+        if spent < cap:
+            break
+        spent -= usd
+        if spent < cap:
+            return at + timedelta(hours=24)
+    return None
 
 
 def review_spend(h, now):
@@ -2422,12 +2956,13 @@ def build_needs_prompt(view, items, facts, today, zone, url=None, language="en")
 
 class Session:
     """One headless Claude Code run and what it printed. `required` must be
-    offered at init; `allowed` is every tool it may be offered (None: Read,
-    Grep, Glob and any unio tool)."""
+    offered at init; `allowed` is every tool it may be offered (None: the
+    `builtin` tools and any unio tool but those in `refused`)."""
 
-    def __init__(self, required=REQUIRED_TOOLS, allowed=None, steps=STEPS, builtin=BUILTIN_TOOLS):
+    def __init__(self, required=REQUIRED_TOOLS, allowed=None, steps=STEPS, builtin=BUILTIN_TOOLS, refused=()):
         self.required = required
         self.allowed = allowed
+        self.refused_at_init = set(refused)
         self.builtin = set(builtin)
         self.steps = steps
         self.tools = None
@@ -2450,10 +2985,79 @@ class Session:
         self.timed_out = False
         self.interrupted = False
         self.stderr_tail = ""
+        # The subscription's windows as the last rate_limit_event gave them (rate_limits()),
+        # each with "at", when it arrived.
+        self.rate_limits = {}
+        self.web = WebTrack()
+        # The run's answer comment, from its first create_comment the server took, and
+        # the latest body sent to it: no agent route reads a comment back.
+        self.answer_id = None
+        self.answer_body = None
+        # A research run's checks ({"key", "hosts"}), and the first one its calls broke.
+        self.guard = None
+        self.violation = None
 
     @property
     def bad_init(self):
         return bool(self.unexpected_tools or self.unio_unavailable)
+
+
+class WebTrack:
+    """What a session did on the web: its searches, its page reads, and each
+    page's address and HTTP status as WebFetch answered (the address after
+    any redirect, when the answer names one)."""
+
+    def __init__(self):
+        self.searches = 0
+        self.fetches = 0
+        self.asked = {}
+        self.fetched = {}
+        # Each landing address's asked addresses: an answer may link either.
+        self.via = {}
+
+    def use(self, block):
+        name, args = block.get("name"), block.get("input") if isinstance(block.get("input"), dict) else {}
+        if name == "WebSearch":
+            self.searches += 1
+        elif name == "WebFetch":
+            self.fetches += 1
+            if isinstance(args.get("url"), str):
+                self.asked[block.get("id")] = args["url"]
+
+    def answer(self, use_id, result):
+        """A WebFetch answer: {bytes, code, codeText, result, durationMs, url} on 2.1.311,
+        a plain error string when the fetch failed or was refused."""
+        url = self.asked.get(use_id)
+        if url is None or not isinstance(result, dict):
+            return
+        code = result.get("code")
+        final = result.get("url") if isinstance(result.get("url"), str) else url
+        if isinstance(code, int) and not isinstance(code, bool):
+            self.fetched[final] = code
+            self.via.setdefault(final, set()).add(url)
+
+    @property
+    def sources(self):
+        """The addresses read with a 2xx answer, first read first."""
+        return [url for url, code in self.fetched.items() if 200 <= code < 300]
+
+    def cited(self, body):
+        """The sources `body` links to, by the address asked or where it landed."""
+        linked = {link_key(m.group(0)) for m in LINK.finditer(body or "")}
+        return [url for url in self.sources if {link_key(u) for u in (url, *self.via.get(url, ()))} & linked]
+
+    def counts(self, answer=None):
+        """`sources` counts the pages read that the answer links to: a page read
+        and left out of it was not a source of anything."""
+        return {"searches": self.searches, "fetches": self.fetches, "sources": len(self.cited(answer))}
+
+
+# An address in an answer's Markdown, up to the parenthesis that closes its link.
+LINK = re.compile(r"https?://[^\s<>()\[\]\"']+")
+
+
+def link_key(url):
+    return url.rstrip(".,;:!?/")
 
 
 class Verdict:
@@ -2470,6 +3074,7 @@ class Verdict:
         self.retry = fields.get("retry")
         self.pause = fields.get("pause")
         self.claimed = fields.get("claimed")
+        self.question = fields.get("question")
 
 
 class Runner:
@@ -2534,8 +3139,10 @@ class Runner:
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
             "--settings", self.settings_arg(),
-            "--tools", ",".join(["Read", "Grep", "Glob", *self.cfg.web_tools]),
-            "--allowedTools", ",".join(["mcp__unio__*", *self.cfg.web_tools]),
+            # No web: a run that holds untrusted pages never holds every unio write
+            # too. A research run (research_args) takes what needs the web.
+            "--tools", "Read,Grep,Glob",
+            "--allowedTools", "mcp__unio__*",
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
             "--append-system-prompt-file", str(protocol or self.cfg.responder),
             "--max-turns", str(self.cfg.max_turns), "--max-budget-usd", self.cfg.max_budget,
@@ -2548,6 +3155,38 @@ class Runner:
         if paths:
             args += ["--disallowedTools"] + [f"Read({rule_path(path)}/**/{g})" for path in paths for g in SECRET_GLOBS]
         return args
+
+    def research_args(self, mcp_path, web):
+        """A research run: the web tools `web` names (none when the weekly gate holds
+        them back), five unio tools by name, no repository: no code can reach a query."""
+        args = [
+            self.cfg.claude, "-p", "--restricted",
+            "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+            "--settings", self.settings_arg(),
+            "--tools", ",".join(web),
+            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web]),
+            "--disallowedTools", ",".join([*RESEARCH_DENIED, *(
+                f"WebFetch(domain:{host})" for host in self.fetch_denied() if "WebFetch" in web)]),
+            "--mcp-config", str(mcp_path), "--strict-mcp-config",
+            "--append-system-prompt-file", str(self.cfg.researcher),
+            "--max-turns", str(self.cfg.research_max_turns), "--max-budget-usd", self.cfg.research_max_budget,
+        ]
+        if self.cfg.research_model:
+            args += ["--model", self.cfg.research_model]
+        return args
+
+    def unio_hosts(self):
+        """Unio's own hosts, which research never reads: the API's and the web app's."""
+        hosts = [urllib.parse.urlsplit(self.cfg.api).hostname]
+        app = (self._workspace or {}).get("appUrl")
+        if isinstance(app, str):
+            hosts.append(urllib.parse.urlsplit(app).hostname)
+        elif hosts[0] and hosts[0].startswith("api."):
+            hosts.append(hosts[0][4:])
+        return tuple(dict.fromkeys(h.lower() for h in hosts if h))
+
+    def fetch_denied(self):
+        return tuple(dict.fromkeys([*FETCH_DENIED, *self.unio_hosts()]))
 
     def review_args(self, mcp_path):
         # `--tools ""` takes the built-in tools away; no --add-dir: a review reads no code.
@@ -2654,10 +3293,12 @@ class Runner:
             stop_group(proc, force=True)
             proc.wait()
 
-    def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False):
+    def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False, research=None,
+                    timeout=None):
         """`review` is a project id: the session then reviews that project, with
         its own scope, tools and limits, and no item. `needs` makes it a needs
-        check: no scope header, two tools, its own limits."""
+        check: no scope header, two tools, its own limits. `research`, the web
+        tools of a research run, makes it one, for `timeout` seconds."""
         work = out.parent / "work"
         work.mkdir(parents=True, exist_ok=True)
         out.mkdir(parents=True, exist_ok=True)
@@ -2674,12 +3315,15 @@ class Runner:
             argv, timeout = self.needs_args(mcp_path), self.cfg.needs_timeout
             s = Session(NEEDS_TOOLS, None, NEEDS_STEPS, builtin=())
         else:
-            headers["X-Unio-Inbox-Item"] = str(item.get("key"))
-            if claim.get("claimId"):
-                headers["X-Unio-Inbox-Claim"] = claim["claimId"]
-            argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
-            required = PROJECT_REQUIRED_TOOLS if item_subject(item) == "project" else REQUIRED_TOOLS
-            s = Session(required=required, builtin=BUILTIN_TOOLS | set(self.cfg.web_tools))
+            headers.update(scope_headers(item, claim))
+            if research is not None:
+                argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
+                s = Session(required=RESEARCH_REQUIRED, builtin=set(research), refused=RESEARCH_INIT_REFUSED)
+                s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
+            else:
+                argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
+                required = PROJECT_REQUIRED_TOOLS if item_subject(item) == "project" else REQUIRED_TOOLS
+                s = Session(required=required)
         config = {"mcpServers": {"unio": {"type": "http", "url": self.cfg.mcp_url, "headers": headers}}}
         fd = os.open(mcp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -2708,7 +3352,7 @@ class Runner:
                         break
                     except subprocess.TimeoutExpired:
                         pass
-                    if s.bad_init:
+                    if s.bad_init or s.violation:
                         self.kill(proc)
                     elif stopping.is_set():
                         s.interrupted = True
@@ -2754,6 +3398,10 @@ class Runner:
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("parent_tool_use_id") is not None:
+                # A subagent's turn (measured on 2.1.311: it inherits the parent's
+                # MCP tools). Its writes and steps are never the run's own.
+                continue
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 Runner._check_init(proc, s, event)
@@ -2766,6 +3414,13 @@ class Runner:
                         name = str(block.get("name"))
                         s.tool_uses[block.get("id")] = name
                         s.tool_inputs[block.get("id")] = block.get("input") or {}
+                        s.web.use(block)
+                        if s.guard and not s.violation and name in ("WebSearch", "WebFetch"):
+                            Runner._check_web(proc, s, name, block.get("input"))
+                        elif s.guard and not s.violation and name.startswith(UNIO_TOOL_PREFIX) \
+                                and name not in RESEARCH_MCP_TOOLS:
+                            s.violation = f"tool {name}"
+                            stop_group(proc)
                         filing = name == "mcp__unio__create_task" and (block.get("input") or {}).get("project")
                         s.step = "updating_project" if filing else s.steps.get(name, s.step)
                     elif block.get("type") == "tool_result" and block.get("is_error"):
@@ -2776,6 +3431,16 @@ class Runner:
                         name = s.tool_uses.get(block.get("tool_use_id"))
                         if name:
                             s.succeeded.add(name)
+                        if name in ("mcp__unio__create_comment", "mcp__unio__update_comment"):
+                            Runner._note_answer(s, name, s.tool_inputs.get(block.get("tool_use_id")),
+                                                block.get("content"))
+                        if name == "WebFetch" and len(content) == 1:
+                            # Its structured answer sits beside the message, one per event.
+                            answer = event.get("tool_use_result")
+                            s.web.answer(block.get("tool_use_id"), answer)
+                            if s.guard and not s.violation and isinstance(answer, dict):
+                                # Where a redirect landed.
+                                Runner._check_web(proc, s, name, {"url": answer.get("url")})
                         if name == POST_UPDATE:
                             health = (s.tool_inputs.get(block.get("tool_use_id")) or {}).get("health")
                             s.posted_health = health if isinstance(health, str) else s.posted_health
@@ -2783,15 +3448,57 @@ class Runner:
                             made = made_project(block.get("content"))
                             if made and made not in s.projects:
                                 s.projects.append(made)
+            elif kind == "rate_limit_event":
+                # Stamped on arrival: the run is charged only when it ends, minutes later.
+                read_at = iso(utcnow())
+                s.rate_limits.update({name: {**w, "at": read_at} for name, w in rate_limits(event).items()})
             elif kind == "result":
                 s.result = event
+
+    @staticmethod
+    def _check_web(proc, s, name, args):
+        """Stops the session when a search or an address carries private text, or
+        an address leads off the public web; the kind of problem is kept, never the text."""
+        args = args if isinstance(args, dict) else {}
+        if name == "WebSearch":
+            problem = private_text(args.get("query"), s.guard.get("key"))
+        else:
+            url = args.get("url")
+            if url is None:
+                return
+            problem = fetch_problem(url, s.guard.get("hosts") or ()) or private_text(url, s.guard.get("key"))
+        if problem:
+            s.violation = f"{name} {problem}"
+            stop_group(proc)
+
+    @staticmethod
+    def _note_answer(s, name, args, content):
+        """create_comment answers {id, createdAt, task} (write_tools.ts); its body
+        and update_comment's are `body`."""
+        args = args if isinstance(args, dict) else {}
+        body = args.get("body") if isinstance(args.get("body"), str) else None
+        if name == "mcp__unio__create_comment":
+            if s.answer_id:
+                return
+            try:
+                answer = json.loads(result_text(content))
+            except ValueError:
+                answer = None
+            answer = answer if isinstance(answer, dict) else {}
+            nested = answer.get("comment") if isinstance(answer.get("comment"), dict) else {}
+            cid = answer.get("id") or nested.get("id")
+            if isinstance(cid, str) and cid:
+                s.answer_id, s.answer_body = cid, body
+        elif s.answer_id and args.get("comment_id") == s.answer_id and body is not None:
+            s.answer_body = body
 
     @staticmethod
     def _check_init(proc, s, event):
         s.tools = [str(t) for t in event.get("tools") or []]
         s.version = event.get("claude_code_version")
         if s.allowed is None:
-            s.unexpected_tools = [t for t in s.tools if t not in s.builtin and not t.startswith(UNIO_TOOL_PREFIX)]
+            s.unexpected_tools = [t for t in s.tools if t in s.refused_at_init
+                                  or (t not in s.builtin and not t.startswith(UNIO_TOOL_PREFIX))]
         else:
             s.unexpected_tools = [t for t in s.tools if t not in s.allowed]
         servers = {m.get("name"): m.get("status") for m in event.get("mcp_servers") or [] if isinstance(m, dict)}
@@ -2803,8 +3510,8 @@ class Runner:
             # Stop it before the first model turn; the wait loop reaps it.
             stop_group(proc)
 
-    def classify(self, s, now=None):
-        v = self._classify(s, now or utcnow())
+    def classify(self, s, now=None, timeout=None):
+        v = self._classify(s, now or utcnow(), timeout or self.cfg.timeout)
         written = written_outcome(s.succeeded)
         if v.kind in ("release", "fail") and written != "skipped":
             # The answer is out: a release or a retry could only post it twice.
@@ -2814,11 +3521,17 @@ class Runner:
                            note=f"the run stopped after writing ({PROBLEMS.get(v.reason, 'an error')})")
         return v
 
-    def _classify(self, s, now):
-        ended = self._ended(s, now, self.cfg.timeout)
+    def _classify(self, s, now, timeout):
+        ended = self._ended(s, now, timeout)
         if ended:
             return ended
         text = session_text(s)
+        question = parse_escalation(text)
+        if question is not None:
+            outcome, error = check_outcome("research", s.succeeded)
+            if error:
+                return Verdict("fail", cause="research_after_write", error=error)
+            return Verdict("research", question=question or None)
         parsed = parse_outcome(text)
         if not parsed:
             if written_outcome(s.succeeded) != "skipped":
@@ -2838,7 +3551,9 @@ class Runner:
             return Verdict("release", reason="claude_unavailable", error=s.start_error,
                            retry=now + MACHINE_PAUSE, pause=now + MACHINE_PAUSE)
         if s.unexpected_tools:
-            offered = "Read, Grep, Glob and the unio server" if s.allowed is None else ", ".join(sorted(s.allowed))
+            offered = ", ".join(sorted(s.allowed)) if s.allowed is not None else \
+                ", ".join([*sorted(s.builtin), "the unio server"]) + (" (none of its other writes)"
+                                                                       if s.refused_at_init else "")
             return Verdict("release", reason="unexpected_tools",
                            error=f"the session offered tools beyond {offered}: " + ", ".join(s.unexpected_tools),
                            detail=short(", ".join(s.unexpected_tools), 120),
@@ -2850,6 +3565,8 @@ class Runner:
             return Verdict("release", reason="interrupted", error="the runner stopped during the session",
                            retry=now + INTERRUPTED_RETRY)
         ev = s.result or {}
+        if s.violation:
+            return Verdict("too_large", error=f"stopped by the web check: {s.violation}")
         if s.timed_out:
             return Verdict("too_large", error=f"timed out after {int(timeout)} s")
         if ev.get("subtype") in CAP_SUBTYPES:
@@ -2956,6 +3673,8 @@ class Runner:
         """The claim names this runner's presence, so the item shows who works on
         it from the start rather than from the runner's next presence write."""
         body = {"key": item.get("key")}
+        # Taken before the request, so the lease it starts never looks longer than the server's.
+        at = utcnow()
         if self.claim_presence and self.presence.id:
             body["presenceId"] = self.presence.id
         status, data = api.call("POST", "/agents/inbox/claim", body)
@@ -2971,7 +3690,7 @@ class Runner:
             raise ApiUnreachable(f"claim {item.get('key')}: {describe(status, data)}")
         claimed = (data or {}).get("data") or {}
         prior = claimed["attempts"] if isinstance(claimed.get("attempts"), int) else int(item.get("attempts") or 0)
-        return {"claimId": claimed.get("claimId"), "attempt": prior + 1}
+        return {"claimId": claimed.get("claimId"), "attempt": prior + 1, "at": at}
 
     @staticmethod
     def receipt(item, claim, **body):
@@ -3069,6 +3788,8 @@ class Runner:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
 
+        # What a research run was: why it ran, when, where, and a gate that held it.
+        research, triage = None, None
         try:
             # Asked again after the claim: the snapshot refresh before it can take minutes.
             low = desk_memory(self.cfg.memory_floor)
@@ -3078,19 +3799,40 @@ class Runner:
                                           retry=now + MEMORY_PAUSE, pause=now + MEMORY_PAUSE)
             else:
                 teams = self.agent_teams(api)
-                s = self.run_session(item, build_prompt(item, snapshots, attempt, rerun, teams, self.cfg.web,
-                                                        self.language),
-                                     snapshots, out, claim, on_wait)
-                v = self.classify(s)
+                ask = self.research_ask(item, h)
+                if ask is None:
+                    thread = self.research_thread(item, h) if self.research_ready(item) else None
+                    s = self.run_session(item, build_prompt(item, snapshots, attempt, rerun, teams,
+                                                            self.reply_web(item), self.language, thread=thread),
+                                         snapshots, out, claim, on_wait)
+                    v = self.classify(s)
+                    if v.kind == "research" and self.research_ready(item):
+                        # Charged now: the research run below is charged on its own.
+                        triage = {"costUsd": self.charge(h, s, started_at), "turns": (s.result or {}).get("num_turns"),
+                                  "run": out.name}
+                        ask = {"why": "thread" if thread else "escalated", "question": v.question,
+                               **({"answer": thread} if thread else {})}
+                    elif v.kind == "research":
+                        v = Verdict("fail", cause="research_unavailable",
+                                    error="the session asked for research, which this item cannot get")
+                if ask is not None:
+                    s, v, research = self.research(item, h, claim, ask, run_dir, on_wait, teams, rerun)
         except Exception as e:  # a runner bug must still spend the attempt, or the item loops forever
             s, v = Session(), Verdict("fail", cause="runner_error",
                                       error=f"runner error: {type(e).__name__}: {short(e, 200)}")
         finally:
             h.pop("current", None)
         ev = s.result or {}
-        usd = self.session_cost(s)
-        if s.started:
-            h.setdefault("sessions", []).append({"at": iso(started_at), "usd": usd})
+        if research:
+            usd = self.charge(h, s, research["at"], "research", self.cfg.research_max_budget_usd)
+            out = research.get("out") or out
+            if s.answer_id:
+                self.remember_thread(h, item, s.answer_id)
+            if s.violation:
+                research["log"]["violation"] = s.violation
+                self.state.log("guard_violation", **base, kind=s.violation)
+        else:
+            usd = self.charge(h, s, started_at)
         stats = {"attempt": attempt, "claimId": claim.get("claimId"), "run": f"{run_dir.name}/{out.name}",
                  "durationMs": int((time.monotonic() - started) * 1000),
                  "costUsd": ev.get("total_cost_usd"), "costAssumedUsd": usd if s.started and not s.result else None,
@@ -3098,7 +3840,11 @@ class Runner:
                  "claudeCodeVersion": s.version, "reactionError": reaction_error,
                  "steps": progress.count or None, "progressError": progress.error,
                  "repos": [f"{x['repo']}@{x['commit']}" for x in snapshots] or None,
-                 "projects": len(s.projects) or None}
+                 "projects": len(s.projects) or None,
+                 "usage": run_usage(ev, usd if s.started else None),
+                 "web": s.web.counts(s.answer_body) if s.started else None,
+                 "mode": "research" if research else None, "research": research and research["log"],
+                 "triage": triage}
         if len(s.projects) > 1:
             self.state.log("warn", **base, run=stats["run"], detail="create_project called more than once",
                            projects=s.projects)
@@ -3108,11 +3854,33 @@ class Runner:
                                 note=problem_message(v.reason, detail=v.detail))
             self.state.log("item", **base, **stats, result="released", reason=v.reason, error=v.error,
                            retryAfter=iso(v.retry), releaseError=None if st == 200 else describe(st, d))
+            if v.reason in RESEARCH_GATE_REASONS:
+                # This item's wait, not the machine's: the next item may still run.
+                return "continue"
             if v.reason != "interrupted":
                 self.state.record_error(h, f"{key}: {v.error}")
             if v.pause:
                 self.pause(h, v.reason, v.error, v.pause, api, v.detail)
             return "stop"
+
+        if research and v.kind in ("too_large", "ok"):
+            limit = v.kind == "too_large"
+            clean = v.kind == "ok" and not v.error and v.claimed is None
+            end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
+            research["log"]["end"] = end
+            if not limit:
+                outcome = v.outcome
+            elif s.answer_id or note_error:
+                outcome = written_outcome(s.succeeded)
+            else:
+                outcome = "replied"
+            self.complete(api, item, claim, h, base, stats, outcome,
+                          RESEARCH_PARTIAL_NOTE if limit else v.note, claimedOutcome=None if limit else v.claimed,
+                          error=v.error, reason=None if limit else v.reason, noteError=note_error)
+            if v.pause:
+                self.pause(h, v.reason, v.error, v.pause, api, v.detail)
+                return "stop"
+            return "continue"
 
         if v.kind == "too_large":
             outcome = written_outcome(s.succeeded)
@@ -3151,6 +3919,180 @@ class Runner:
         self.state.log("item", **base, **stats, result="failed", cause=v.cause, error=v.error, final=final or None,
                        failError=None if st == 200 else describe(st, d), replyError=reply_error)
         return "continue"
+
+    def charge(self, h, s, at, kind=None, cap=None):
+        """A session's cost toward the rolling budget, and its quota reading. Returns the USD charged."""
+        usd = self.session_cost(s, cap)
+        if s.started:
+            h.setdefault("sessions", []).append({"at": iso(at), "usd": usd, **({"kind": kind} if kind else {})})
+        note_quota(h, s)
+        return usd
+
+    def research_status(self, h):
+        """The research block of health.json, which `unio runner status` prints: its limits as this process runs them."""
+        cfg = self.cfg
+        h["research"] = {"web": cfg.web, "protocol": cfg.researcher.is_file(), "configError": cfg.research_error,
+                         "caps": {"turns": cfg.research_max_turns, "usd": cfg.research_max_budget_usd,
+                                  "runsPerDay": cfg.research_daily_runs,
+                                  "reserveUsd": round(cfg.daily_budget * cfg.research_reserve, 2),
+                                  "timeoutS": int(cfg.research_timeout), "quotaGate": QUOTA_GATE}}
+
+    def research_ready(self, item):
+        """Whether a research run can take this item: a comment on a task, with
+        web research on and the researcher protocol in place."""
+        return (self.cfg.web != "off" and item_subject(item) == "task" and bool(item.get("comment"))
+                and self.cfg.research_daily_runs > 0 and self.cfg.researcher.is_file())
+
+    def reply_web(self, item):
+        """The reply run's web line (web_line): it never holds the web itself."""
+        if item_subject(item) == "project":
+            return "project" if self.cfg.web != "off" else "off"
+        return "handover" if self.research_ready(item) else "off"
+
+    def research_ask(self, item, h, now=None):
+        """Why this item goes straight to a research run, or None for a reply run:
+        an escalation a gate released, or a comment that opens by asking for it.
+        Any other reply in a thread the bot answered with research goes to a reply
+        run told so (research_thread): a thanks must not spend a research run."""
+        if not self.research_ready(item):
+            return None
+        now = now or utcnow()
+        answer = self.research_thread(item, h)
+        thread = {"answer": answer} if answer else {}
+        pending = (h.get("researchPending") or {}).get(item.get("key"))
+        if isinstance(pending, dict) and (parse_iso(pending.get("at")) or now) > now - timedelta(days=1):
+            return {"why": "escalated", "question": pending.get("question"), **thread}
+        if asks_research(item["comment"].get("content")):
+            return {"why": "thread" if answer else "intent", **thread}
+        return None
+
+    def research_thread(self, item, h):
+        """The bot's research answer in this item's thread, or None."""
+        comment = item.get("comment") or {}
+        thread = (h.get("researchThreads") or {}).get(comment.get("rootId") or comment.get("id"))
+        return thread["comment"] if isinstance(thread, dict) and isinstance(thread.get("comment"), str) else None
+
+    def remember_thread(self, h, item, answer_id, now=None):
+        now = now or utcnow()
+        comment = item.get("comment") or {}
+        threads = h.get("researchThreads") if isinstance(h.get("researchThreads"), dict) else {}
+        threads[comment.get("rootId") or comment.get("id")] = {"comment": answer_id, "at": iso(now)}
+        kept = sorted(((parse_iso(e.get("at")) if isinstance(e, dict) else None, root) for root, e in threads.items()),
+                      key=lambda pair: pair[0] or now, reverse=True)
+        h["researchThreads"] = {root: threads[root] for at, root in kept[:RESEARCH_THREADS_MAX]
+                                if at and now - at < RESEARCH_THREADS_KEPT}
+
+    def research_gate(self, h, claim, now):
+        """(reason, detail, retry) when a research run must wait, else (None, no_web, time left
+        on the claim). The seven-day window answers without the web; the rest release."""
+        left = (claim.get("at") or now) + CLAIM_LEASE - now
+        if left < RESEARCH_MIN_LEFT:
+            return "research_lease", f"{max(0, int(left.total_seconds()))} s of the claim left", now
+        five = quota_used(h, "five_hour", now)
+        if five and five[0] >= QUOTA_GATE:
+            reset = five[1] + QUOTA_RESET_PAD if five[1] and five[1] > now else now + USAGE_LIMIT_FALLBACK
+            return "research_session_window", f"{five[0]:.0%} used", min(reset, now + MAX_RETRY_AHEAD)
+        runs = recent_sessions(h, now)
+        research = [at for at, _, kind in runs if kind == "research"]
+        if len(research) >= self.cfg.research_daily_runs:
+            first = research[len(research) - self.cfg.research_daily_runs]
+            return "research_runs", f"{len(research)} research runs in 24 h, cap {self.cfg.research_daily_runs}", \
+                first + timedelta(hours=24)
+        reserve = self.cfg.daily_budget * self.cfg.research_reserve
+        clears = spend_clears([(at, usd) for at, usd, _ in runs], reserve)
+        if clears:
+            return "research_reserve", f"research stops at {reserve:g} USD in 24 h", clears
+        week = quota_used(h, "seven_day", now)
+        return None, bool(week and week[0] >= QUOTA_GATE), left
+
+    def research(self, item, h, claim, ask, run_dir, on_wait, teams, rerun):
+        """(session, verdict, research) for a research run under this claim, or
+        for the gate that holds it back (a release, with no session)."""
+        now = utcnow()
+        info = {"at": now, "out": None, "log": {"why": ask["why"]}}
+        pending = h.get("researchPending") if isinstance(h.get("researchPending"), dict) else {}
+        pending.pop(item.get("key"), None)
+        gate, *rest = self.research_gate(h, claim, now)
+        if gate:
+            detail, retry = rest
+            if "question" in ask:
+                # A reply run asked for it: the next claim goes straight to research, without asking again.
+                pending[item.get("key")] = {"question": ask.get("question"), "at": iso(now)}
+            h["researchPending"] = {k: e for k, e in pending.items() if isinstance(e, dict)
+                                    and (parse_iso(e.get("at")) or now) > now - timedelta(days=1)}
+            info["log"]["gate"] = gate
+            return Session(), Verdict("release", reason=gate, error=detail, detail=detail, retry=retry), info
+        h["researchPending"] = pending
+        no_web, left = rest
+        web = () if no_web else tuple(self.cfg.web_tools)
+        timeout = min(self.cfg.research_timeout, (left - RESEARCH_MARGIN).total_seconds())
+        info["out"] = run_dir / f"attempt-{claim['attempt']}-{str(claim.get('claimId') or 'unnamed')[:8]}-research"
+        info["log"].update(noWeb=no_web or None, timeoutS=int(timeout))
+        facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
+                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
+        prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
+        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
+        v = self.classify(s, timeout=timeout)
+        if v.kind == "research":
+            v = Verdict("fail", cause="no_outcome", error="a research run asked for research")
+        return s, v, info
+
+    def end_research(self, api, item, claim, s, limit, clean, no_web=False):
+        """(how the research ended, error): its answer comment closed, or the
+        runner's own reply when a run at its limit posted none. `limit`: the run
+        stopped at a cap, a timeout or the web check; `clean`: it ended as its
+        protocol says. A marker left in the answer gives way to the limit line,
+        except after a clean end, where it just goes."""
+        language = self.language
+        if s.answer_id:
+            body = s.answer_body
+            if limit:
+                text = swap_marker(body, RESEARCH_LIMIT[language], append=True)
+            elif has_marker(body):
+                text = swap_marker(body, None if clean else RESEARCH_LIMIT[language])
+            else:
+                return ("no_web" if no_web else "complete"), None
+            partial = limit or not clean
+            if body is None:
+                return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
+            return ("partial" if partial else "no_web" if no_web else "complete"), \
+                self.edit_comment(api, s.answer_id, text)
+        if not limit:
+            return ("no_web" if no_web else "complete"), None
+        reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
+        return "partial", self.post_research_reply(api, item, claim, reply)
+
+    def edit_comment(self, api, comment_id, content):
+        """The runner's edit of the run's answer, under the token alone: the server
+        admits an agent's edit of its own comment (agentGuard.commentOwner), and
+        no scope header ties it to a claim that may be ending."""
+        try:
+            st, d = api.settle("PUT", f"/comments/{comment_id}", {"content": content}, None)
+        except ApiUnreachable as e:
+            return str(e)
+        return None if 200 <= st < 300 else describe(st, d)
+
+    def post_research_reply(self, api, item, claim, content):
+        """The runner's reply under the item's claim, through MCP so the server's
+        content guard and the claim's one-comment cap apply; REST only when MCP
+        could not be reached twice. create_comment answers a retry within 10
+        minutes with the comment it already posted."""
+        comment = item.get("comment") or {}
+        mcp = Mcp(self.cfg.mcp_url, api.token, scope_headers(item, claim))
+        arguments = {"task": (item.get("task") or {}).get("key") or (item.get("task") or {}).get("id"),
+                     "body": content, **({"reply_to": comment["id"]} if comment.get("id") else {})}
+        error = None
+        for _ in range(2):
+            answer, error = mcp.call_tool("create_comment", arguments)
+            if answer is not None:
+                return None
+            if not error.transport:
+                # A 409 agent_research_comment_cap means the run's own answer is out
+                # though the stream never showed it: REST, under no scope, would post a second.
+                self.state.log("research_reply_refused", key=item.get("key"), error=error)
+                return error
+        fallback = self.reply(api, item, content, f"unio-inbox:note:{item.get('key')}:{claim['claimId']}")
+        return f"{error}; {fallback}" if fallback else None
 
     def complete(self, api, item, claim, h, base, stats, outcome, note, **extra):
         st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note)
@@ -3224,6 +4166,7 @@ class Runner:
             self.review_status(h)
             self.needs_status(h)
             self.status_status(h)
+            self.research_status(h)
             left = h.pop("current", None)
             if isinstance(left, dict) and left.get("target"):
                 h.setdefault("orphans", []).append(left)
@@ -3335,6 +4278,7 @@ class Runner:
         asked, watched = self.watch_stop_file() if self.cfg.workspace else (None, None)
         self.state.log("start", pid=os.getpid(), api=self.cfg.api, interval=self.cfg.interval, version=VERSION,
                        reviews=self.cfg.review_mode, web=self.cfg.web, needs=self.cfg.needs_mode,
+                       researchError=self.cfg.research_error,
                        status=self.cfg.status_mode,
                        workspace=self.cfg.workspace, envFile=self.cfg.env_keys or None,
                        autoUpdate=("on" if updater else "off") if self.cfg.workspace else None)
@@ -3678,6 +4622,7 @@ class Runner:
         usd = self.session_cost(s, cfg.review_max_budget_usd)
         if s.started:
             h.setdefault("sessions", []).append({"at": iso(started_at), "usd": usd, "kind": "review"})
+        note_quota(h, s)
         now = utcnow()
         outcome, reason, error = review_outcome(s, v)
         tried = POST_UPDATE in s.tool_uses.values()
@@ -4301,6 +5246,7 @@ class Runner:
             h.setdefault("sessions", []).append({"at": iso(now), "usd": usd, "kind": "needs"})
         elif iso(now) in data["judgeRuns"]:
             data["judgeRuns"].remove(iso(now))
+        note_quota(h, s)
         others = sorted({name for name in s.tool_uses.values() if name not in NEEDS_TOOLS}) + foreign_reads(s, view)
         ticked, reason, error = None, None, None
         if v and v.kind == "release":
