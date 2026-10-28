@@ -132,7 +132,9 @@ between passes) and UNIO_STATUS_DONE_AFTER (24 h between a project's last task
 closing and the runner finishing it).
 """
 import argparse
+import csv
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -167,7 +169,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -272,6 +274,35 @@ RESEARCH_UNFINISHED = {
               "end": "Peça um recorte menor (um tema, um período ou uma fonte) e me chame de novo."},
 }
 RESEARCH_PARTIAL_NOTE = "research stopped at its limit"
+# The runner's checks of a research run's files (PLAN 3, owner decisions O1-O2),
+# which the server's POST /agents/inbox/files repeats. 512 KiB keeps the JSON
+# body under the API's default 1 MB limit; 1,500 bytes is less than a file
+# worth attaching.
+FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,74}\.(md|csv)$")
+FILE_MIN_BYTES = 1500
+FILE_MAX_BYTES = 512 * 1024
+FILES_PER_RUN = 2
+CSV_MAX_COLUMNS = 50
+CSV_MAX_ROWS = 20000
+# A file most of whose lines the comment already holds repeats it.
+FILE_REPEATS = 0.7
+FILE_NOTE_CHARS = 200
+# An upload under a claim with less left than this would fail with 403 agent_scope_unclaimed.
+FILES_LEASE_LEFT = timedelta(seconds=45)
+MD_HTML = re.compile(r"<[A-Za-z!/][^>]*>")
+MD_IMAGE = re.compile(r"!\[[^\]]*\]\(")
+# A comment asking for the file on the task itself, in so many words (decision O1), on folded text.
+# Whole verb forms only: a stem would read "subsídios" or "substituição" as "suba".
+TASK_TARGET = re.compile(
+    r"\b(?:anex(?:e|a|ar|em)|coloqu(?:e|em)|coloca(?:r)?|ponha(?:m)?|poe|salv(?:e|a|ar|em)|sub(?:a|ir|am)|"
+    r"carreg(?:ue|uem|ar))\s+(?:\w+\s+){0,2}(?:n[ao]s?|[ao]s?)\s+(?:propria\s+)?(?:tarefa|card)\b|"
+    r"\b(?:attach(?:es|ed|ing)?|put|add|upload)\s+(?:\w+\s+){0,2}(?:to|on)\s+the\s+(?:task|card)\b")
+# "não anexe na tarefa", "não precisa anexar na tarefa", "don't put it on the task".
+TASK_TARGET_DENIED = re.compile(r"\b(?:nao|nem|nunca|sem|don['’]?t|do\s+not|never|not)\s+(?:\w+\s+)?$")
+FILE_FAILED = {
+    "en": "_The file {name} could not be attached._",
+    "pt-BR": "_O arquivo {name} não pôde ser anexado._",
+}
 # What a settlement carries beyond the receipt, on a server since DEV-672.
 SETTLE_EXTRAS = {"usage", "research"}
 # The server's cap on a comment (write_tools.ts), and how many sources the runner's reply lists.
@@ -2060,6 +2091,119 @@ def research_sources(urls, unio_hosts=()):
     return found
 
 
+def comment_lines(body):
+    return {" ".join(line.split()) for line in str(body or "").split("\n") if line.strip()}
+
+
+# Excel and LibreOffice run a cell that opens with one of these as a formula
+# (OWASP CSV injection), and a CSV's cells come from pages the run read.
+CSV_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+CSV_NUMBER = re.compile(r"^[-+]?\d+(?:[.,]\d+)*%?$")
+
+
+def inert_cell(cell):
+    """The cell as text a spreadsheet shows and never runs: a leading quote
+    before a formula's first character, numbers (-5, +2,5%) as they are."""
+    return f"'{cell}" if cell.startswith(CSV_FORMULA_START) and not CSV_NUMBER.match(cell) else cell
+
+
+def rewrite_csv(text):
+    """The CSV as Excel in Brazil opens it: ';' between fields, UTF-8 with a BOM,
+    whatever separator the model used, and no cell a spreadsheet would run.
+    Raises ValueError past the limits."""
+    try:
+        dialect = csv.Sniffer().sniff(text[:20000], delimiters=",;\t|")
+        rows = list(csv.reader(io.StringIO(text), dialect))
+    except csv.Error:
+        rows = list(csv.reader(io.StringIO(text), delimiter=";" if text.count(";") > text.count(",") else ","))
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(rows) < 2:
+        raise ValueError("no data rows")
+    if len(rows) > CSV_MAX_ROWS or max(len(row) for row in rows) > CSV_MAX_COLUMNS:
+        raise ValueError("too many rows or columns")
+    out = io.StringIO()
+    csv.writer(out, delimiter=";", lineterminator="\r\n").writerows([inert_cell(c) for c in row] for row in rows)
+    return "\ufeff" + out.getvalue()
+
+
+def check_files(folder, body, limit=FILES_PER_RUN):
+    """(kept, dropped) of a research run's folder: each kept file {name, content,
+    shown, render}, where `shown` is the name the comment gives it (<stem>.pdf for a
+    report Unio renders); each dropped one (name, reason). The comment must name a
+    file; a file mostly in the comment already repeats it."""
+    kept, dropped = [], []
+    try:
+        root = Path(os.path.realpath(folder))
+        entries = sorted(Path(folder).iterdir())
+    except OSError:
+        return kept, dropped
+    said = comment_lines(body)
+    for path in entries:
+        name = path.name
+        try:
+            if path.is_symlink() or not path.is_file() or Path(os.path.realpath(path)).parent != root:
+                dropped.append((name, "not_a_file"))
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            dropped.append((name, "unreadable"))
+            continue
+        if not FILE_NAME.match(name):
+            dropped.append((name, "name"))
+            continue
+        if not FILE_MIN_BYTES <= len(raw) <= FILE_MAX_BYTES or b"\0" in raw:
+            dropped.append((name, "size"))
+            continue
+        try:
+            text = raw.decode("utf-8").lstrip("\ufeff")
+        except UnicodeDecodeError:
+            dropped.append((name, "encoding"))
+            continue
+        stem = name.rsplit(".", 1)[0]
+        render = name.endswith(".md") and f"{stem}.pdf" in str(body or "")
+        shown = f"{stem}.pdf" if render else name
+        if shown not in str(body or ""):
+            dropped.append((name, "unnamed"))
+            continue
+        lines = comment_lines(text)
+        if lines and len(lines & said) > FILE_REPEATS * len(lines):
+            dropped.append((name, "repeats_comment"))
+            continue
+        if name.endswith(".csv"):
+            try:
+                text = rewrite_csv(text)
+            except ValueError as e:
+                dropped.append((name, f"csv: {e}"))
+                continue
+            if len(text.encode("utf-8")) > FILE_MAX_BYTES:
+                dropped.append((name, "size"))
+                continue
+        elif MD_HTML.search(text) or MD_IMAGE.search(text):
+            dropped.append((name, "markdown"))
+            continue
+        if render and any(f["render"] for f in kept):
+            dropped.append((name, "second_pdf"))
+            continue
+        if len(kept) >= limit:
+            dropped.append((name, "over_limit"))
+            continue
+        kept.append({"name": name, "content": text, "shown": shown, "render": render})
+    return kept, dropped
+
+
+def file_note(body, shown):
+    """Why a file is attached: the comment's line that names it, in plain words.
+    The server requires one line of 1 to 200 characters."""
+    line = next((ln for ln in str(body or "").split("\n") if shown in ln), "")
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    return short(re.sub(r"[*_`#>]+", "", line).strip(" -"), FILE_NOTE_CHARS) or None
+
+
+def wants_task_file(text):
+    text = fold(MENTION_TOKEN.sub(" ", str(text or "")))
+    return any(not TASK_TARGET_DENIED.search(text[:m.start()]) for m in TASK_TARGET.finditer(text))
+
+
 def unfinished_reply(language, sources, lead=None):
     """The runner's reply to a research run that ended before posting: its
     lead, the pages it opened, and what to ask next."""
@@ -2404,6 +2548,14 @@ def item_subject(item):
     return None
 
 
+def files_rule(folder, windows=None):
+    """The rule that lets Write into `folder` and nowhere else. Measured on 2.1.311:
+    an Edit(//abs/dir/**) allow rule admits Write inside dir, while every
+    Write(...) form tried never matched; --restricted refuses any path outside
+    the working folder either way."""
+    return f"Edit({rule_path(folder, windows)}/**)"
+
+
 def scope_headers(item, claim):
     """What scopes a connection to an item's claim on the server."""
     return {"X-Unio-Inbox-Item": str(item.get("key")),
@@ -2449,6 +2601,8 @@ def research_lines(research, language="en"):
         f"Checkpoint marker: end your first post with this line, and remove it in your last edit: "
         f"{RESEARCH_MARKER[language]}",
     ]
+    if research.get("files"):
+        lines.append(f"Files: write only into {research['files']}, and only when the \"Files\" rules allow it.")
     if research.get("answer"):
         lines.append(f"This thread already has your research answer (comment {research['answer']}); start from "
                      "its sources.")
@@ -3307,15 +3461,17 @@ class Runner:
             args += ["--disallowedTools"] + [f"Read({rule_path(path)}/**/{g})" for path in paths for g in SECRET_GLOBS]
         return args
 
-    def research_args(self, mcp_path, web):
+    def research_args(self, mcp_path, web, files=None):
         """A research run: the web tools `web` names (none when the weekly gate holds
-        them back), five unio tools by name, no repository: no code can reach a query."""
+        them back), five unio tools by name, no repository: no code can reach a query.
+        With `files`, a folder of its own, Write confined to it."""
+        tools = [*web, *(["Write"] if files else [])]
         args = [
             self.cfg.claude, "-p", "--restricted",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
             "--settings", self.settings_arg(),
-            "--tools", ",".join(web),
-            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web]),
+            "--tools", ",".join(tools),
+            "--allowedTools", ",".join([*RESEARCH_MCP_TOOLS, *web, *([files_rule(files)] if files else [])]),
             "--disallowedTools", ",".join([*RESEARCH_DENIED, *(
                 f"WebFetch(domain:{host})" for host in self.fetch_denied() if "WebFetch" in web)]),
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
@@ -3445,7 +3601,7 @@ class Runner:
             proc.wait()
 
     def run_session(self, item, prompt, snapshots, out, claim, on_wait=None, review=None, needs=False, research=None,
-                    timeout=None):
+                    timeout=None, files=None):
         """`review` is a project id: the session then reviews that project, with
         its own scope, tools and limits, and no item. `needs` makes it a needs
         check: no scope header, two tools, its own limits. `research`, the web
@@ -3468,9 +3624,9 @@ class Runner:
         else:
             headers.update(scope_headers(item, claim))
             if research is not None:
-                argv, timeout = self.research_args(mcp_path, research), timeout or self.cfg.research_timeout
-                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS, builtin=set(research),
-                            refused=RESEARCH_INIT_REFUSED)
+                argv, timeout = self.research_args(mcp_path, research, files), timeout or self.cfg.research_timeout
+                s = Session(required=RESEARCH_REQUIRED, steps=RESEARCH_STEPS,
+                            builtin={*research, *(["Write"] if files else [])}, refused=RESEARCH_INIT_REFUSED)
                 s.guard = {"key": (item.get("task") or {}).get("key"), "hosts": self.unio_hosts()}
             else:
                 argv, timeout = self.claude_args(mcp_path, snapshots, self.responder_file(out)), self.cfg.timeout
@@ -4042,6 +4198,9 @@ class Runner:
             end, note_error = self.end_research(api, item, claim, s, limit, clean, research["log"].get("noWeb"))
             research["log"]["end"] = end
             wire["research"] = {"end": end}
+            attached, problems = self.attach_files(api, item, claim, s, research.get("files"))
+            research["log"].update(files=attached or None, fileErrors=len(problems) or None)
+            wire["usage"] = {**(wire["usage"] or {}), "files": attached}
             if not limit:
                 outcome = v.outcome
             elif s.answer_id or note_error:
@@ -4209,12 +4368,21 @@ class Runner:
         no_web, left = rest
         web = () if no_web else tuple(self.cfg.web_tools)
         timeout = min(self.cfg.research_timeout, (left - RESEARCH_MARGIN).total_seconds())
-        info["out"] = run_dir / f"attempt-{claim['attempt']}-{str(claim.get('claimId') or 'unnamed')[:8]}-research"
+        claim8 = str(claim.get("claimId") or "unnamed")[:8]
+        info["out"] = run_dir / f"attempt-{claim['attempt']}-{claim8}-research"
+        # Fresh for each attempt, so a retry can never attach what an earlier one wrote.
+        files = info["files"] = run_dir / "work" / f"files-{claim8}"
+        remove_tree(files)
+        files.mkdir(parents=True, exist_ok=True)
         info["log"].update(noWeb=no_web or None, timeoutS=int(timeout))
         facts = {"web": web, "no_web": no_web, "minutes": max(1, int(timeout // 60)),
-                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question")}
+                 "turns": self.cfg.research_max_turns, "answer": ask.get("answer"), "question": ask.get("question"),
+                 "files": files}
         prompt = build_prompt(item, [], claim["attempt"], rerun, teams, language=self.language, research=facts)
-        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout)
+        s = self.run_session(item, prompt, [], info["out"], claim, on_wait, research=web, timeout=timeout, files=files)
+        if s.refused.get("Write"):
+            # The run goes on without files; the answer offers one instead.
+            self.state.log("files_unavailable", key=item.get("key"), error=s.refused["Write"])
         v = self.classify(s, timeout=timeout)
         if v.kind == "research":
             v = Verdict("fail", cause="no_outcome", error="a research run asked for research")
@@ -4238,12 +4406,67 @@ class Runner:
             partial = limit or not clean
             if body is None:
                 return ("partial" if partial else "complete"), "the answer's text is unknown: its marker stays"
-            return ("partial" if partial else "no_web" if no_web else "complete"), \
-                self.edit_comment(api, s.answer_id, text)
+            error = self.edit_comment(api, s.answer_id, text)
+            if error is None:
+                s.answer_body = text
+            return ("partial" if partial else "no_web" if no_web else "complete"), error
         if not limit:
             return ("no_web" if no_web else "complete"), None
         reply = unfinished_reply(language, research_sources(s.web.sources, self.unio_hosts()))
         return "partial", self.post_research_reply(api, item, claim, reply)
+
+    def attach_files(self, api, item, claim, s, folder, now=None):
+        """Checks the run's files and uploads what passes to its answer, or to the
+        task when the comment asks for that in words and its author may change the
+        task (when the item does not say, the server decides). Returns
+        (attached, problems) and logs every file left out."""
+        now = now or utcnow()
+        if not folder or not s.answer_id or s.answer_body is None:
+            return 0, []
+        kept, dropped = check_files(folder, s.answer_body)
+        for name, reason in dropped:
+            self.state.log("file_dropped", key=item.get("key"), file=name, reason=reason)
+        comment = item.get("comment") or {}
+        author = comment.get("author") or {}
+        target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
+            else "comment"
+        attached, problems = 0, []
+        for f in kept:
+            if (claim.get("at") or now) + CLAIM_LEASE - utcnow() < FILES_LEASE_LEFT:
+                problems.append((f, "too little of the claim was left"))
+                continue
+            error = self.upload_file(api, item, claim, s, f, target)
+            if error and target == "task":
+                # The task refused it (rights, its last free slots): the answer keeps it.
+                self.state.log("file_target", key=item.get("key"), file=f["name"], error=error)
+                error = self.upload_file(api, item, claim, s, f, "comment")
+            if error:
+                problems.append((f, error))
+                self.state.log("file_failed", key=item.get("key"), file=f["name"], error=error)
+            else:
+                attached += 1
+        if problems:
+            lines = "\n".join(FILE_FAILED[self.language].format(name=f["shown"]) for f, _ in problems)
+            text = f"{s.answer_body.rstrip()}\n\n{lines}"
+            if self.edit_comment(api, s.answer_id, text) is None:
+                s.answer_body = text
+        return attached, problems
+
+    def upload_file(self, api, item, claim, s, f, target):
+        """POST /agents/inbox/files: JSON text, never multipart, under the token
+        alone, as progress is; the key and claim in the body name the run."""
+        body = self.receipt(item, claim, commentId=s.answer_id, name=f["name"], content=f["content"],
+                            note=file_note(s.answer_body, f["shown"]) or f["shown"])
+        if target != "comment":
+            body["target"] = target
+        if f["render"]:
+            body["render"] = "pdf"
+        idem = f"unio-inbox:file:{item.get('key')}:{claim.get('claimId')}:{f['name']}:{target}"
+        try:
+            st, d = api.settle("POST", "/agents/inbox/files", body, idem, timeout=60)
+        except ApiUnreachable as e:
+            return str(e)
+        return None if 200 <= st < 300 else describe(st, d)
 
     def edit_comment(self, api, comment_id, content):
         """The runner's edit of the run's answer, under the token alone: the server

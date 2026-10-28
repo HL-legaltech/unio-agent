@@ -111,6 +111,7 @@ class FakeUnio:
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
         # What GET /agents/inbox lists; a completed item leaves it.
         self.items = []
+        self.task_files_refused = False
         # An HTTP status every progress post that marks a research run gets, or None.
         self.research_mark_status = None
         # An HTTP status every runner create_comment over MCP gets, or None.
@@ -185,6 +186,10 @@ class FakeUnio:
             return 200, {"data": {}}
         if method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/comments"):
             return 201, {"data": {"id": "c-runner-reply"}}
+        if method == "POST" and path == "/v1/agents/inbox/files":
+            if body.get("target") == "task" and self.task_files_refused:
+                return 403, {"error": "Sem permissão.", "code": "agent_scope_author"}
+            return 201, {"data": {"id": "a-0001", "name": body.get("name")}}
         if method == "PUT" and path.startswith("/v1/comments/"):
             return 200, {"data": {"id": path.rsplit("/", 1)[1]}}
         if method == "POST" and path == "/v1/mcp":
@@ -243,7 +248,8 @@ instead, having written nothing; escalate makes a reply run hand the item to
 research. A research run (the researcher protocol) searches, reads a page,
 posts its checkpoint with the prompt's marker and edits it without the marker;
 research_cap stops at the turn cap after the checkpoint, research_silent
-before it."""
+before it; research_file also writes a CSV into the prompt's files folder and
+names it."""
 import json
 import os
 import re
@@ -339,12 +345,19 @@ if "# Unio Bot: researching" in protocol:
     if mode == "research_silent":
         result("", "error_max_turns", 60)
         sys.exit(1)
+    if mode == "research_file":
+        folder = re.search(r"^Files: write only into (.+), and only when", prompt, re.M).group(1)
+        rows = ["municipio,aliquota,fonte"] + [f"Cidade {n},{n % 5}%,https://www.example.org/{n}" for n in range(80)]
+        with open(os.path.join(folder, "dados-teste-2026.csv"), "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        use(5, "Write", {"file_path": os.path.join(folder, "dados-teste-2026.csv")}, True, "written")
+        content += "\n\nAnexei **dados-teste-2026.csv**: as 80 linhas com município e alíquota, para filtrar."
     answer_id = post_comment(content + "\n\n" + marker)
     if mode == "research_cap":
         result("", "error_max_turns", 60)
         sys.exit(1)
     use(6, "mcp__unio__update_comment", {"comment_id": answer_id,
-                                       "body": content + " Final ([lei](https://www.example.org/lei))."}, True,
+                                       "body": content + "\n\nFinal ([lei](https://www.example.org/lei))."}, True,
         json.dumps({"id": answer_id}))
     result(content + "\n{\"outcome\":\"replied\",\"note\":\"researched\"}", turns=12)
     sys.exit(0)

