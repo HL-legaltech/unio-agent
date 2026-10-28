@@ -5,6 +5,7 @@ scratch HOME, state and config, and a stand-in Claude Code process."""
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -558,17 +559,21 @@ class Rules(unittest.TestCase):
 
 def busy_session(main, agent_of, journal, start):
     """A synthetic session of a few hundred calls across an hour boundary: the
-    main chain, a foreground agent, a background agent and a workflow's two
-    agents, with streamed calls that repeat a message id as their output
-    grows, and usage-limit entries that must never count."""
+    main chain, a foreground agent, a background agent on another model, partly
+    in fast mode, and a workflow's two agents writing to the 1 h cache, with
+    streamed calls that repeat a message id as their output and thinking grow,
+    a call on a model no Claude id names, a long prompt that searched the web,
+    and usage-limit entries that must never count."""
     main.prompt(start, "build it")
     sub = agent_of("fg1", tool_use="toolu_fg")
     bg = agent_of("bg1", tool_use="toolu_bg")
     main.call(start + 1, tools=[("toolu_fg", "Agent", {"prompt": "x"})], use=usage(5, 50, 1000, 100))
     for n in range(60):
         t = start + 2 + n * 30
-        sub.call(t, mid=f"msg_fg_{n}", use=usage(1, n, 2000 + n, 10), stop=None, text="partial")
-        sub.call(t + 1, mid=f"msg_fg_{n}", use=usage(1, 3 * n + 7, 2000 + n, 10),
+        sub.call(t, mid=f"msg_fg_{n}", use=usage(1, n, 2000 + n, 10, output_tokens_details={"thinking_tokens": n // 2}),
+                 stop=None, text="partial")
+        sub.call(t + 1, mid=f"msg_fg_{n}", use=usage(1, 3 * n + 7, 2000 + n, 10,
+                                                     output_tokens_details={"thinking_tokens": n}),
                  tools=[(f"fg_t{n}", "Read", {"file_path": "/x"})])
         sub.result(t + 2, f"fg_t{n}")
     main.result(start + 1900, "toolu_fg")
@@ -580,19 +585,24 @@ def busy_session(main, agent_of, journal, start):
     journal("wf_1", ("started", "w_a"), ("started", "w_b"))
     for n in range(80):
         t = start + 1905 + n * 40
-        bg.call(t, mid=f"msg_bg_{n}", use=usage(2, n + 1, 5000, 0), tools=[(f"bg_t{n}", "Bash", {"command": "ls"})])
+        bg.call(t, mid=f"msg_bg_{n}", use=usage(2, n + 1, 5000, 0, speed="fast" if n % 3 else "standard"),
+                tools=[(f"bg_t{n}", "Bash", {"command": "ls"})], model="claude-haiku-5-5")
         bg.result(t + 1, f"bg_t{n}")
     for name in ("w_a", "w_b"):
         w = agent_of(name, run="wf_1")
         w.prompt(start + 1906, "task", kind=None)
         for n in range(40):
             t = start + 1907 + n * 50
-            w.call(t, mid=f"msg_{name}_{n}", use=usage(1, 2, 300, 4), tools=[(f"{name}_t{n}", "Grep", {})])
+            w.call(t, mid=f"msg_{name}_{n}", tools=[(f"{name}_t{n}", "Grep", {})], use=usage(
+                1, 2, 300, 4, cache_creation={"ephemeral_5m_input_tokens": 1, "ephemeral_1h_input_tokens": 3}))
             w.result(t + 1, f"{name}_t{n}")
         w.synthetic(start + 3990, "rate_limit", "You've hit your session limit")
     journal("wf_1", ("result", "w_a"), ("result", "w_b"))
     main.synthetic(start + 4000, "rate_limit", "You've hit your session limit")
-    main.call(start + 4100, use=usage(4, 40, 6000, 60), stop="end_turn", text="done")
+    main.call(start + 4050, use=usage(9, 90, 900, 9), stop=None, text="x", model="claude-Opus-5-5")
+    main.call(start + 4100, use=usage(4, 40, 120_000, 60, server_tool_use={"web_search_requests": 2,
+                                                                            "web_fetch_requests": 1}),
+              stop="end_turn", text="done")
     main.system(start + 4100.1, "turn_duration")
 
 
@@ -620,6 +630,45 @@ def independent_count(files):
     return dict(hours)
 
 
+def independent_parts(main_path, files):
+    """Per hour, the parts the sessions route takes: per model, agent, speed and
+    long prompt, decided by each message.id's first entry, its last entry's
+    numbers."""
+    hours = defaultdict(lambda: defaultdict(lambda: [0] * 9))
+    for path in files:
+        first, last = {}, {}
+        with open(path, "rb") as fh:
+            lines = fh.readlines()
+        for line in lines:
+            e = json.loads(line)
+            m = e.get("message") or {}
+            if e.get("type") != "assistant" or m.get("model") == "<synthetic>" or not isinstance(m.get("usage"), dict):
+                continue
+            key = m.get("id") or e.get("uuid")
+            u = m["usage"]
+            prompt = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
+                                                 "cache_creation_input_tokens"))
+            first.setdefault(key, (watch.stamp(e["timestamp"]), m.get("model"),
+                                   "fast" if u.get("speed") == "fast" else "standard", prompt > 100_000))
+            last[key] = u
+        for key, u in last.items():
+            t, model, speed, long_prompt = first[key]
+            if not isinstance(model, str) or not re.fullmatch(r"claude-[a-z0-9.-]{1,48}(\[1m\])?", model):
+                continue
+            written = u.get("cache_creation_input_tokens") or 0
+            hour_cache = min((u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0, written)
+            tools = u.get("server_tool_use") or {}
+            agent = "main" if path == main_path else "subagent"
+            v = hours[int(t // HOUR) * HOUR][watch.part_key(model, agent, speed, long_prompt)]
+            thinking = (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0
+            numbers = (1, u.get("input_tokens") or 0, u.get("output_tokens") or 0,
+                       u.get("cache_read_input_tokens") or 0, written - hour_cache, hour_cache, thinking,
+                       tools.get("web_search_requests") or 0, tools.get("web_fetch_requests") or 0)
+            for i, x in enumerate(numbers):
+                v[i] += x
+    return {h: dict(p) for h, p in hours.items()}
+
+
 class IndependentCount(unittest.TestCase):
     """A busy synthetic session against a count that shares no code with the watcher."""
 
@@ -635,6 +684,18 @@ class IndependentCount(unittest.TestCase):
         self.assertGreater(len(hours), 1, "the session should cross an hour")
         self.assertEqual({int(h): v for h, v in m.s["hours"].items()}, hours)
 
+    def test_the_watchers_parts_equal_an_independent_count(self):
+        busy_session(self.main, self.agent, self.journal, T0)
+        m = self.model(now=T0 + 5000)
+        parts = independent_parts(self.main_path, self.files())
+        self.assertEqual(len({k for p in parts.values() for k in p}), 5, "the session should mix its parts")
+        self.assertEqual(m.parts(), parts)
+        for h, p in parts.items():
+            summed = [sum(v[i] for v in p.values()) for i in range(1, 6)]
+            totals = m.s["hours"][str(h)]
+            self.assertTrue(all(a <= b for a, b in zip(summed[:3] + [summed[3] + summed[4]], totals)),
+                            f"{summed} past {totals}")
+
     def test_stamps_parse_as_python_39_reads_none_of_them(self):
         self.assertEqual(watch.stamp("2026-10-06T15:20:00.000Z"), T0)
         self.assertEqual(watch.stamp("2026-10-06T15:20:00Z"), T0)
@@ -642,6 +703,124 @@ class IndependentCount(unittest.TestCase):
         self.assertAlmostEqual(watch.stamp("2026-10-06T15:20:00.123456789+00:00"), T0 + 0.123456789, places=6)
         for bad in ("", "yesterday", "2026-13-06T15:20:00Z", None, 5):
             self.assertIsNone(watch.stamp(bad), bad)
+
+
+class Parts(unittest.TestCase):
+    """Each hour's calls split by model, agent, speed and long prompt, in process.
+    A part reads [calls, input, output, cache read, cache write 5 min, cache
+    write 1 h, thinking, web searches, web fetches]."""
+
+    setUp, agent, model, totals = Rules.setUp, Rules.agent, Rules.model, staticmethod(Rules.totals)
+    H = int(T0 // HOUR) * HOUR
+
+    @staticmethod
+    def key(model="claude-opus-5-5", agent="main", speed="standard", long_prompt=False):
+        return watch.part_key(model, agent, speed, long_prompt)
+
+    def test_a_part_per_model_agent_speed_and_long_prompt(self):
+        self.main.prompt(T0)
+        sub = self.agent("a1", tool_use="toolu_fg")
+        self.main.call(T0 + 1, mid="m1", use=usage(1, 10, 100, 0), tools=[("toolu_fg", "Agent", {"prompt": "x"})])
+        sub.call(T0 + 2, mid="s1", use=usage(2, 20, 200, 0), model="claude-sonnet-5-5", stop="end_turn", text="x")
+        self.main.result(T0 + 3, "toolu_fg")
+        self.main.call(T0 + 4, mid="m2", use=usage(3, 30, 300, 0, speed="fast"), stop=None, text="x")
+        self.main.call(T0 + 5, mid="m3", use=usage(4, 40, 99_000, 996, speed="standard"), stop=None, text="x")
+        self.main.call(T0 + 6, mid="m4", use=usage(5, 50, 99_000, 996), stop="end_turn", text="x")
+        m = self.model()
+        self.assertEqual(m.parts(), {self.H: {
+            self.key(): [2, 5, 50, 99_100, 996, 0, 0, 0, 0],  # m3's prompt is 100,000 tokens: not over
+            self.key("claude-sonnet-5-5", "subagent"): [1, 2, 20, 200, 0, 0, 0, 0, 0],
+            self.key(speed="fast"): [1, 3, 30, 300, 0, 0, 0, 0, 0],
+            self.key(long_prompt=True): [1, 5, 50, 99_000, 996, 0, 0, 0, 0],
+        }})
+
+    def test_cache_writes_split_by_lifetime_and_what_the_split_leaves_out_is_5_min(self):
+        self.main.prompt(T0)
+        splits = [None,  # no split: the API's default lifetime
+                  {"ephemeral_5m_input_tokens": 400, "ephemeral_1h_input_tokens": 600},
+                  {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 300},
+                  {"ephemeral_1h_input_tokens": 1500},
+                  {"ephemeral_5m_input_tokens": "x", "ephemeral_1h_input_tokens": None}]
+        for n, split in enumerate(splits):
+            more = {} if split is None else {"cache_creation": split}
+            self.main.call(T0 + n * HOUR, mid=f"m{n}", use=usage(0, 1, 0, 1000, **more), stop="end_turn", text="x")
+            self.main.prompt(T0 + n * HOUR + 1)
+        m = self.model(now=T0 + 5 * HOUR)
+        self.assertEqual([m.parts()[self.H + n * HOUR][self.key()][4:6] for n in range(len(splits))],
+                         [[1000, 0], [400, 600], [700, 300], [0, 1000], [1000, 0]])
+
+    def test_thinking_web_searches_and_fetches(self):
+        self.main.prompt(T0)
+        self.main.call(T0 + 1, mid="m1", stop=None, text="x", use=usage(
+            2, 711, 29_356, 37_860, output_tokens_details={"thinking_tokens": 281},
+            server_tool_use={"web_search_requests": 2, "web_fetch_requests": 3}, service_tier="standard",
+            cache_creation={"ephemeral_1h_input_tokens": 37_860, "ephemeral_5m_input_tokens": 0},
+            inference_geo="global", speed="standard"))
+        self.main.call(T0 + 2, mid="m2", use=usage(1, 1, 1, 0, server_tool_use=None), stop="end_turn", text="x")
+        m = self.model()
+        self.assertEqual(m.parts()[self.H], {self.key(): [2, 3, 712, 29_357, 0, 37_860, 281, 2, 3]})
+
+    def test_a_repeated_subagent_message_counts_once_with_its_growth(self):
+        self.main.prompt(T0)
+        sub = self.agent("a1", tool_use="toolu_fg")
+        self.main.call(T0 + 1, mid="m1", tools=[("toolu_fg", "Agent", {"prompt": "x"})])
+        first = self.H + HOUR - 1  # one second before the hour turns
+        sub.call(first, mid="msg_s", use=usage(2, 7, 100, 50, output_tokens_details={"thinking_tokens": 5}),
+                 stop=None, text="thinking")
+        # Past 100,000 prompt tokens and in fast mode only from its second entry: the first decides.
+        sub.call(first + 2, mid="msg_s", tools=[("toolu_b", "Bash", {"command": "ls"})], use=usage(
+            2, 155, 100_000, 50, speed="fast", output_tokens_details={"thinking_tokens": 90},
+            server_tool_use={"web_search_requests": 1, "web_fetch_requests": 0}))
+        sub.call(first + 3, mid="msg_s", tools=[("toolu_b", "Bash", {"command": "ls"})], use=usage(
+            2, 160, 100_000, 50, speed="fast", output_tokens_details={"thinking_tokens": 90},
+            server_tool_use={"web_search_requests": 1, "web_fetch_requests": 0}))
+        m = self.model()
+        self.assertEqual(m.parts(), {self.H: {self.key(agent="subagent"): [1, 2, 160, 100_000, 50, 0, 90, 1, 0],
+                                              self.key(): [1, 0, 0, 0, 0, 0, 0, 0, 0]}})
+
+    def test_a_call_is_one_call_however_many_entries_carry_it(self):
+        self.main.prompt(T0)
+        for n, out in enumerate((3, 9, 20)):  # a thinking block, a text block, a tool call
+            self.main.call(T0 + 1 + n, mid="msg_a", use=usage(1, out, 100, 10), stop=None, text="x")
+        self.main.call(T0 + 5, mid="msg_b", use=usage(1, 4, 100, 0), stop="end_turn", text="y")
+        m = self.model()
+        self.assertEqual(m.parts()[self.H], {self.key(): [2, 2, 24, 200, 10, 0, 0, 0, 0]})
+
+    def test_a_model_no_claude_id_names_counts_in_the_totals_only(self):
+        self.main.prompt(T0)
+        self.main.call(T0 + 1, mid="a", use=usage(1, 10, 100, 1000), stop=None, text="x")
+        self.main.call(T0 + 2, mid="b", use=usage(2, 20, 200, 2000), stop=None, text="x", model="gpt-5")
+        self.main.call(T0 + 3, mid="c", use=usage(4, 40, 400, 4000), stop=None, text="x", model="Claude-Opus-5-5")
+        self.main.call(T0 + 4, mid="d", use=usage(8, 80, 800, 8000), stop="end_turn", text="x", model=None)
+        m = self.model()
+        self.assertEqual(self.totals(m), [15, 150, 1500, 15000])
+        self.assertEqual(m.parts(), {self.H: {self.key(): [1, 1, 10, 100, 1000, 0, 0, 0, 0]}})
+
+    def test_parts_count_only_what_the_totals_count(self):
+        # A running session joined at its end counts only what grows from then on.
+        self.main.prompt(T0)
+        self.main.call(T0 + 1, mid="msg_a", use=usage(1, 5, 100, 10), stop=None, text="x")
+        m = self.model(fresh=False, now=T0 + 2)
+        self.main.call(T0 + 3, mid="msg_a", use=usage(1, 9, 100, 10), stop=None, text="x")
+        self.main.call(T0 + 4, mid="msg_b", use=usage(2, 20, 200, 20), stop="end_turn", text="y")
+        m.poll(T0 + 5)
+        self.assertEqual(self.totals(m), [2, 24, 200, 20])
+        self.assertEqual(m.parts(), {self.H: {self.key(): [1, 2, 24, 200, 20, 0, 0, 0, 0]}})
+
+    def test_state_saved_before_parts_loads_and_counts_parts_from_then_on(self):
+        self.main.prompt(T0)
+        self.main.call(T0 + 1, mid="msg_a", use=usage(1, 10, 100, 0), stop=None, text="x")
+        state = json.loads(json.dumps(self.model().dump()))
+        del state["parts"]
+        for f in state["files"].values():
+            del f["lastMessagePart"], f["lastMessageDetail"]
+        m = watch.Model(self.main_path, state, T0 + 2)
+        self.main.call(T0 + 3, mid="msg_a", use=usage(1, 30, 100, 0), stop=None, text="x")
+        self.main.call(T0 + 4, mid="msg_b", use=usage(2, 20, 200, 0), stop="end_turn", text="y")
+        m.poll(T0 + 5)
+        self.assertEqual(self.totals(m), [3, 50, 300, 0])
+        self.assertEqual(m.parts(), {self.H: {self.key(): [1, 2, 20, 200, 0, 0, 0, 0, 0]}},
+                         "a call begun before the parts existed went into one")
 
 
 class ReporterCase(unittest.TestCase):
@@ -772,9 +951,14 @@ class Cadence(ReporterCase):
 
     def test_the_row_goes_every_15_s_with_changed_hours_and_a_keepalive_every_10_min(self):
         self.tick(T0 + 2)
-        self.assertEqual(self.puts[0]["hours"], [{"hour": iso(int(T0 // HOUR) * HOUR), "inputTokens": 1,
-                                                  "outputTokens": 2, "cacheReadTokens": 3, "cacheWriteTokens": 4,
-                                                  "activeMs": 2000}])  # t1 has run 1 s so far
+        self.assertEqual(self.puts[0]["hours"], [{
+            "hour": iso(int(T0 // HOUR) * HOUR), "inputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3,
+            "cacheWriteTokens": 4, "activeMs": 2000,  # t1 has run 1 s so far
+            "parts": [{"model": "claude-opus-5-5", "agent": "main", "speed": "standard", "longPrompt": False,
+                       "calls": 1, "inputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3,
+                       "cacheWrite5mTokens": 4, "cacheWrite1hTokens": 0, "thinkingTokens": 0, "webSearches": 0,
+                       "webFetches": 0}]}])
+        self.assertEqual(fake_api.vine_messages(self.puts[0]), [])
         self.main.result(T0 + 5, "t1")
         self.m.poll(T0 + 5)
         self.tick(T0 + 6)
@@ -853,6 +1037,89 @@ class Cadence(ReporterCase):
         self.assertEqual([len(b["hours"]) for b in self.puts], [500, 500])
         self.assertGreaterEqual(min(sent), T0 + 2 - 90 * 86400)
         self.assertEqual(len(set(sent)), 1000)
+
+
+class PartsReport(ReporterCase):
+    """When an hour goes again for its parts, and what its parts may hold."""
+
+    def setUp(self):
+        super().setUp()
+        self.main.result(T0 + 3, "t1")
+        self.main.call(T0 + 4, mid="msg_end", use=usage(0, 5, 0, 0), stop="end_turn", text="done")
+        self.m.poll(T0 + 4)
+        self.hour = str(int(T0 // HOUR) * HOUR)
+
+    def hours_sent(self):
+        return [h for b in self.puts for h in b.get("hours", [])]
+
+    def test_an_hour_goes_again_when_only_a_part_grew(self):
+        self.tick(T0 + 5)
+        [before] = self.hours_sent()
+        # A call with no tokens, past the gap that counts as active time: the hour's
+        # totals stay, its calls grow.
+        self.main.call(T0 + 400, mid="msg_empty", stop="end_turn", text="ok")
+        self.m.poll(T0 + 400)
+        self.tick(T0 + 401)
+        [hour] = self.puts[-1]["hours"]
+        self.assertEqual({k: v for k, v in hour.items() if k != "parts"},
+                         {k: v for k, v in before.items() if k != "parts"})
+        self.assertEqual([p["calls"] for p in hour["parts"]], [3])
+
+    def test_an_unchanged_hour_is_not_sent_again_even_after_a_restart(self):
+        self.tick(T0 + 5)
+        for t in range(6, 1300, 5):
+            self.tick(T0 + t)
+        self.assertGreater(len(self.puts), 2, "no keepalive went")
+        self.assertEqual(len(self.hours_sent()), 1, "an unchanged hour went again")
+        saved = json.loads(json.dumps(self.r.r))
+        self.r = watch.Reporter(self.m, self.session, self.presence, lambda: None, self.put, "laptop", saved)
+        self.tick(T0 + 1300)
+        self.assertEqual(len(self.hours_sent()), 1, "a restarted reporter sent the hour again")
+
+    def test_a_report_state_saved_before_parts_sends_each_hour_once_more_with_them(self):
+        sent = {"hours": {self.hour: self.m.buckets(T0 + 5)[int(self.hour)]}, "fields": None, "title": None}
+        self.r = watch.Reporter(self.m, self.session, self.presence, lambda: None, self.put, "laptop", {"sent": sent})
+        self.tick(T0 + 5)
+        self.tick(T0 + 30)
+        [hour] = self.hours_sent()
+        self.assertEqual((hour["outputTokens"], hour["parts"][0]["calls"]), (7, 2))
+
+    def test_at_most_32_parts_the_largest_each_number_capped(self):
+        self.m.s["hours"][self.hour] = [10 ** 11, 10 ** 11, 0, 0]
+        self.m.s["parts"][self.hour] = {watch.part_key(f"claude-test-{n}", "subagent", "standard", False):
+                                        [1, n, 0, 0, 0, 0, 0, 0, 0] for n in range(1, 41)}
+        self.m.s["parts"][self.hour][watch.part_key("claude-big", "main", "fast", True)] = \
+            [2_000_000, 5, 3 * 10 ** 10, 0, 0, 0, 4 * 10 ** 10, 3_000_000, 4_000_000]
+        self.tick(T0 + 5)
+        self.assertEqual(fake_api.vine_messages(self.puts[0]), [])
+        [hour] = self.puts[0]["hours"]
+        self.assertEqual({p["model"] for p in hour["parts"]},
+                         {"claude-big", *(f"claude-test-{n}" for n in range(10, 41))})
+        big = next(p for p in hour["parts"] if p["model"] == "claude-big")
+        self.assertEqual(big, {"model": "claude-big", "agent": "main", "speed": "fast", "longPrompt": True,
+                               "calls": 1_000_000, "inputTokens": 5, "outputTokens": 10 ** 10, "cacheReadTokens": 0,
+                               "cacheWrite5mTokens": 0, "cacheWrite1hTokens": 0, "thinkingTokens": 10 ** 10,
+                               "webSearches": 1_000_000, "webFetches": 1_000_000})
+
+    def test_parts_never_sum_past_the_hours_totals(self):
+        self.m.s["hours"][self.hour] = [10, 10, 10, 10]
+        self.m.s["parts"][self.hour] = {watch.part_key(model, "main", "standard", False): [1, 8, 8, 8, 4, 4, 0, 0, 0]
+                                        for model in ("claude-a", "claude-b")}
+        self.tick(T0 + 5)
+        [hour] = self.puts[0]["hours"]
+        for total, fields in (("inputTokens", ["inputTokens"]), ("outputTokens", ["outputTokens"]),
+                              ("cacheReadTokens", ["cacheReadTokens"]),
+                              ("cacheWriteTokens", ["cacheWrite5mTokens", "cacheWrite1hTokens"])):
+            self.assertEqual(sum(p[f] for p in hour["parts"] for f in fields), hour[total], total)
+
+    def test_parts_the_server_refuses_are_left_out_and_the_hours_sent_again(self):
+        self.answers = [(422, {"error": "Validation failed", "messages": [
+            {"message": "The model field format is invalid", "rule": "regex", "field": "hours.0.parts.0.model"}]})]
+        self.tick(T0 + 5)
+        self.tick(T0 + 6)
+        self.assertEqual([("parts" in h, h["outputTokens"]) for h in self.hours_sent()], [(True, 7), (False, 7)])
+        self.tick(T0 + 30)
+        self.assertEqual(len(self.hours_sent()), 2)
 
 
 class Ghost(unittest.TestCase):
@@ -1018,6 +1285,17 @@ class ProcessCase(unittest.TestCase):
     def counted(self):
         return {k: v for k, v in self.totals().items() if k != "activeMs"}
 
+    def expected_parts(self, files):
+        """independent_parts over `files`, summed over hours as the fake API keys them."""
+        out = {}
+        for parts in independent_parts(self.main.path, files).values():
+            for key, v in parts.items():
+                model, agent, speed, long_prompt = key.split(" ")
+                sums = out.setdefault((model, agent, speed, long_prompt == "1"), [0] * len(v))
+                for i, x in enumerate(v):
+                    sums[i] += x
+        return {k: dict(zip(fake_api.PART_LIMITS, v)) for k, v in out.items()}
+
     def agent(self, agent_id, run=None, tool_use=None):
         return Rules.agent(self, agent_id, run, tool_use)
 
@@ -1040,6 +1318,9 @@ class Process(ProcessCase):
         self.wait_for(lambda: self.counted() == expected, 60,
                       lambda: f"server {self.counted()} != independent {expected}; "
                               f"last write {self.api.session_writes[-1:]}")
+        parts = self.expected_parts(files)
+        self.wait_for(lambda: self.api.session_parts(self.presence_id) == parts, 20,
+                      lambda: f"server {self.api.session_parts(self.presence_id)} != independent {parts}")
         self.assertEqual([w for w in self.api.session_writes if w["status"] != 200], [])
         row = self.api.sessions[self.presence_id]
         self.assertEqual((row["model"], row["contextLimit"], row["countedSince"]), ("claude-opus-5-5", 200_000, None))
@@ -1066,6 +1347,33 @@ class Process(ProcessCase):
         self.assertEqual(self.counted(), {"inputTokens": 3, "outputTokens": 30, "cacheReadTokens": 300,
                                           "cacheWriteTokens": 3000})
         self.assertIsNone(self.api.sessions[self.presence_id]["countedSince"])
+
+    def test_state_saved_before_parts_resumes_and_reports_them_from_then_on(self):
+        self.main.prompt(time.time() - 60)
+        self.main.call(time.time() - 50, mid="msg_a", use=usage(1, 10, 100, 1000), tools=[("t1", "Read", {})])
+        claude = self.claude()
+        first = self.watcher(claude)
+        self.wait_for(lambda: self.state().get("report", {}).get("sent", {}).get("parts"), 20,
+                      "the first report's parts were never saved")
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=10)
+        saved = self.state()
+        del saved["model"]["parts"], saved["report"]["sent"]["parts"]
+        for f in saved["model"]["files"].values():
+            del f["lastMessagePart"], f["lastMessageDetail"]
+        (self.sessions / f"{self.session}.watch.json").write_text(json.dumps(saved))
+        self.main.result(time.time() - 5, "t1")
+        self.main.call(time.time() - 4, mid="msg_b", use=usage(2, 20, 200, 2000), model="claude-sonnet-5-5",
+                       stop="end_turn", text="done")
+        self.watcher(claude, source="")
+        sonnet = ("claude-sonnet-5-5", "main", "standard", False)
+        self.wait_for(lambda: sonnet in self.api.session_parts(self.presence_id), 20,
+                      lambda: f"no part for the new call: {self.state().get('lastError')}")
+        self.assertEqual(self.counted(), {"inputTokens": 3, "outputTokens": 30, "cacheReadTokens": 300,
+                                          "cacheWriteTokens": 3000})
+        self.assertEqual(self.api.session_parts(self.presence_id)[sonnet], dict(
+            zip(fake_api.PART_LIMITS, [1, 2, 20, 200, 2000, 0, 0, 0, 0])))
+        self.assertNotIn("lastError", self.state())
 
     def test_a_session_already_running_is_counted_from_now(self):
         self.main.prompt(time.time() - 3 * 3600)
