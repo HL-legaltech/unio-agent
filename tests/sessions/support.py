@@ -111,8 +111,11 @@ def iso(t):
     return watch.iso(t)
 
 
-def usage(i=0, o=0, cr=0, cw=0):
-    return {"input_tokens": i, "output_tokens": o, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw}
+def usage(i=0, o=0, cr=0, cw=0, **more):
+    """A call's usage; `more` adds fields such as speed, cache_creation,
+    output_tokens_details or server_tool_use."""
+    return {"input_tokens": i, "output_tokens": o, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw,
+            **more}
 
 
 class Transcript:

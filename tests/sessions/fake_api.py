@@ -29,6 +29,12 @@ BODY_FIELDS = {
 }
 LIMITS = {"host": 64, "client": 64, "step": 80, "message": 300}
 HOUR_FIELDS = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
+# An hour's optional `parts`: each number's upper bound, keyed by the part's model, agent, speed and longPrompt.
+PART_LIMITS = {"calls": 10 ** 6, "inputTokens": 10 ** 10, "outputTokens": 10 ** 10, "cacheReadTokens": 10 ** 10,
+               "cacheWrite5mTokens": 10 ** 10, "cacheWrite1hTokens": 10 ** 10, "thinkingTokens": 10 ** 10,
+               "webSearches": 10 ** 6, "webFetches": 10 ** 6}
+PART_KEY = ("model", "agent", "speed", "longPrompt")
+MAX_PARTS = 32
 MODEL = re.compile(r"^claude-[a-z0-9.-]{1,48}(\[1m\])?$")
 INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -231,13 +237,29 @@ class FakeApi:
         row["reportedAt"] = now
         for h in body.get("hours") or []:
             old = row["hours"].get(h["hour"], {})
-            row["hours"][h["hour"]] = {k: max(old.get(k, 0), h[k]) for k in (*HOUR_FIELDS, "activeMs")}
+            merged = {k: max(old.get(k, 0), h[k]) for k in (*HOUR_FIELDS, "activeMs")}
+            merged["parts"] = dict(old.get("parts") or {})
+            for p in h.get("parts") or []:
+                key = tuple(p[k] for k in PART_KEY)
+                was = merged["parts"].get(key, {})
+                merged["parts"][key] = {k: max(was.get(k, 0), p[k]) for k in PART_LIMITS}
+            row["hours"][h["hour"]] = merged
         return 200, {"data": {"id": session_id, "stored": True}}
 
     def session_totals(self, session_id):
         """SUM of a session's buckets, as the reads compute it."""
         row = self.sessions.get(session_id) or {"hours": {}}
         return {k: sum(h[k] for h in row["hours"].values()) for k in (*HOUR_FIELDS, "activeMs")}
+
+    def session_parts(self, session_id):
+        """(model, agent, speed, longPrompt) -> each number summed over the session's hours."""
+        out = {}
+        for h in (self.sessions.get(session_id) or {"hours": {}})["hours"].values():
+            for key, p in h["parts"].items():
+                sums = out.setdefault(key, dict.fromkeys(PART_LIMITS, 0))
+                for k in PART_LIMITS:
+                    sums[k] += p[k]
+        return out
 
 
 def session_refusal(field, code):
@@ -278,7 +300,7 @@ def vine_messages(body):
             fail("hours", "maxLength")
         else:
             for n, h in enumerate(hours):
-                if not isinstance(h, dict) or set(h) != {"hour", "activeMs", *HOUR_FIELDS}:
+                if not isinstance(h, dict) or set(h) - {"parts"} != {"hour", "activeMs", *HOUR_FIELDS}:
                     fail(f"hours.{n}", "object")
                     continue
                 if not isinstance(h["hour"], str) or not INSTANT.match(h["hour"]):
@@ -288,7 +310,30 @@ def vine_messages(body):
                         fail(f"hours.{n}.{k}", "range")
                 if not integer(h["activeMs"], 0, 3_600_000):
                     fail(f"hours.{n}.activeMs", "range")
+                if "parts" in h:
+                    part_messages(h["parts"], f"hours.{n}.parts", fail)
     return found
+
+
+def part_messages(parts, at, fail):
+    if not isinstance(parts, list) or len(parts) > MAX_PARTS:
+        fail(at, "maxLength")
+        return
+    for n, p in enumerate(parts):
+        if not isinstance(p, dict) or set(p) != {*PART_KEY, *PART_LIMITS}:
+            fail(f"{at}.{n}", "object")
+            continue
+        if not isinstance(p["model"], str) or not MODEL.match(p["model"]):
+            fail(f"{at}.{n}.model", "regex")
+        if p["agent"] not in ("main", "subagent"):
+            fail(f"{at}.{n}.agent", "enum")
+        if p["speed"] not in ("standard", "fast"):
+            fail(f"{at}.{n}.speed", "enum")
+        if not isinstance(p["longPrompt"], bool):
+            fail(f"{at}.{n}.longPrompt", "boolean")
+        for k, high in PART_LIMITS.items():
+            if not integer(p[k], 0, high):
+                fail(f"{at}.{n}.{k}", "range")
 
 
 def check_session(session_id, body, now):
@@ -318,8 +363,9 @@ def check_session(session_id, body, now):
     seen = set()
     for h in body.get("hours") or []:
         t = parse_iso(h["hour"])
+        keys = [tuple(p[k] for k in PART_KEY) for p in h.get("parts") or []]
         if (t is None or t.minute or t.second or t.microsecond or t < low or t > times["lastActivityAt"]
-                or t < now - timedelta(days=90) or t in seen):
+                or t < now - timedelta(days=90) or t in seen or len(set(keys)) < len(keys)):
             return session_refusal("hours", "agent_session_hours_invalid")
         seen.add(t)
     return None

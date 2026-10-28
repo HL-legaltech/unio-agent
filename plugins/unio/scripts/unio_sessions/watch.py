@@ -18,17 +18,23 @@ and workflow agent file under <session>/subagents) and sends two things:
                waiting for a person...); a problem carries its reason
   the session  PUT /agents/sessions/<id>: when it started and was last
                active, its task, model, context, running subagents, and per
-               UTC hour its tokens and active time; only what changed
+               UTC hour its tokens, active time and calls by model; only
+               what changed
 
 Both ids are uuid5(NAMESPACE_URL, "unio-session:<session id>"). Tokens count
 one API call per message.id, the last entry winning (subagent entries repeat
 a call's usage as its output grows), in the hour of the call's first entry,
-never <synthetic> ones. A continued session's file holds copies of the
-conversation it continues under their old times, after its own first entry
-or ahead of everything when the file appears after the watcher started:
-both are skipped. A session found already running (no state, and not a
-fresh start or /clear) is adopted at the end of its files and says
-`countedSince`: reading gigabytes of history cold would take hours here.
+never <synthetic> ones. Each hour also splits its calls into parts by model,
+agent (the main transcript or a subagent's), speed and a prompt over 100,000
+tokens, as the call's first entry says, with cache writes by lifetime,
+thinking and web use: what a price per call needs. A call on a model no
+Claude id names counts in the totals and in no part. A continued session's
+file holds copies of the conversation it continues under their old times,
+after its own first entry or ahead of everything when the file appears after
+the watcher started: both are skipped. A session found already running (no
+state, and not a fresh start or /clear) is adopted at the end of its files
+and says `countedSince`: reading gigabytes of history cold would take hours
+here.
 
 State, with each file's cursor, lives in <session>.watch.json beside the
 hook's files. On Linux and macOS it re-execs itself when one of its package's
@@ -109,6 +115,11 @@ SKIP_SLACK = 30
 GHOST_STALE = 300    # a live watcher saves at least once a minute
 HOUR_MS = 3_600_000
 MAX_HOURS = 500
+MAX_PARTS = 32
+LONG_PROMPT = 100_000  # a longer prompt takes a model's long-context rate card where it has one
+PART_FIELDS = ("calls", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWrite5mTokens", "cacheWrite1hTokens",
+               "thinkingTokens", "webSearches", "webFetches")
+PART_CAPS = (1_000_000,) + (10_000_000_000,) * 6 + (1_000_000,) * 2
 KEEP_DAYS = 90
 STATE_VERSION = 1
 
@@ -219,6 +230,59 @@ def text_of(content):
     return ""
 
 
+def number(d, key):
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def detail(u, vec):
+    """A call's part numbers from its usage and its four totals. Cache writes
+    without a split are 5 min, the API's default lifetime, and so is whatever
+    the split leaves out of the total."""
+    written = max(vec[3], 0)
+    hour = min(number(u.get("cache_creation"), "ephemeral_1h_input_tokens"), written)
+    tools = u.get("server_tool_use")
+    return [1, vec[0], vec[1], vec[2], vec[3] - hour, hour, number(u.get("output_tokens_details"), "thinking_tokens"),
+            number(tools, "web_search_requests"), number(tools, "web_fetch_requests")]
+
+
+def part_key(model, agent, speed, long_prompt):
+    return f"{model} {agent} {speed} {int(bool(long_prompt))}"
+
+
+def hour_body(h, v, parts):
+    out = {"hour": iso(h), "inputTokens": v[0], "outputTokens": v[1], "cacheReadTokens": v[2], "cacheWriteTokens": v[3],
+           "activeMs": v[4]}
+    if parts:
+        out["parts"] = [part_body(k, p) for k, p in parts.items()]
+    return out
+
+
+def part_body(key, v):
+    model, agent, speed, long_prompt = key.split(" ")
+    return {"model": model, "agent": agent, "speed": speed, "longPrompt": long_prompt == "1",
+            **dict(zip(PART_FIELDS, v))}
+
+
+def fit_parts(parts, totals):
+    """An hour's parts as sent: each number capped, the MAX_PARTS largest by
+    tokens, and no token type summing past the hour's totals."""
+    capped = {k: [min(x, cap) for x, cap in zip(v, PART_CAPS)] for k, v in parts.items()}
+    kept = sorted(sorted(capped, key=lambda k: (-sum(capped[k][1:6]), k))[:MAX_PARTS])
+    out = {k: capped[k] for k in kept}
+    for total, fields in ((totals[0], (1,)), (totals[1], (2,)), (totals[2], (3,)), (totals[3], (4, 5))):
+        over = sum(v[i] for v in out.values() for i in fields) - total
+        for v in out.values():
+            for i in fields:
+                cut = max(0, min(over, v[i]))
+                v[i], over = v[i] - cut, over - cut
+    return out
+
+
+def grew(now, before):
+    return any(a > b for a, b in zip(now, before or [0] * len(now)))
+
+
 def presence_id(session):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"unio-session:{session}"))
 
@@ -269,6 +333,7 @@ class Model:
         s.setdefault("v", STATE_VERSION)
         s.setdefault("files", {})
         s.setdefault("hours", {})
+        s.setdefault("parts", {})
         s.setdefault("turn", {"open": False, "at": None})
         s.setdefault("bg", {})
         s.setdefault("stops", {})
@@ -290,7 +355,8 @@ class Model:
 
     def new_file(self, key, kind, **extra):
         f = {"kind": kind, "inode": None, "offset": 0, "size": 0, "firstTs": None, "lastMessageId": None,
-             "lastMessageUsage": [0, 0, 0, 0], "lastMessageHour": None, "point": None, "limitBlock": False,
+             "lastMessageUsage": [0, 0, 0, 0], "lastMessageHour": None, "lastMessagePart": None,
+             "lastMessageDetail": [0] * len(PART_FIELDS), "point": None, "limitBlock": False,
              "pending": {}, "lastStep": None, "lastStepAt": None, "limitAt": None, "authAt": None,
              "grewAt": 0, **extra}
         self.s["files"][key] = f
@@ -618,14 +684,22 @@ class Model:
             mid = m.get("id") or f"noid:{e.get('uuid')}"
             vec = [int(u.get(k) or 0) for k in
                    ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+            numbers = detail(u, vec)
             if mid != f["lastMessageId"]:
                 f["lastMessageId"], f["lastMessageUsage"] = mid, [0, 0, 0, 0]
                 f["lastMessageHour"] = hour_of(t) if t is not None else None
+                f["lastMessagePart"], f["lastMessageDetail"] = self.part_of(f, m, u, vec), [0] * len(PART_FIELDS)
             if counting and f["lastMessageHour"] is not None:
                 bucket = self.s["hours"].setdefault(str(f["lastMessageHour"]), [0, 0, 0, 0])
                 for i in range(4):
                     bucket[i] += vec[i] - f["lastMessageUsage"][i]
-            f["lastMessageUsage"] = vec
+                # Missing for the call in progress when state saved before parts existed was loaded.
+                if f.get("lastMessagePart"):
+                    part = self.s["parts"].setdefault(str(f["lastMessageHour"]), {}).setdefault(
+                        f["lastMessagePart"], [0] * len(PART_FIELDS))
+                    for i, x in enumerate(numbers):
+                        part[i] += x - f["lastMessageDetail"][i]
+            f["lastMessageUsage"], f["lastMessageDetail"] = vec, numbers
             if main:
                 context = vec[0] + vec[2] + vec[3]
                 if context:
@@ -646,6 +720,14 @@ class Model:
                     task = (b.get("input") or {}).get("task_id") or (b.get("input") or {}).get("shell_id")
                     if task:
                         self.s["stops"][b["id"]] = task
+
+    @staticmethod
+    def part_of(f, m, u, vec):
+        model = m.get("model")
+        if not isinstance(model, str) or not MODEL.match(model):
+            return None
+        return part_key(model, "main" if f["kind"] == "main" else "subagent",
+                        "fast" if u.get("speed") == "fast" else "standard", vec[0] + vec[2] + vec[3] > LONG_PROMPT)
 
     def user(self, f, e, t, counting):
         m = e.get("message") or {}
@@ -903,6 +985,10 @@ class Model:
             found.setdefault(h, [0, 0, 0, 0, 0])[4] = ms
         return found
 
+    def parts(self):
+        """hour -> part key -> the numbers PART_FIELDS names."""
+        return {int(h): {k: [max(0, x) for x in v] for k, v in p.items()} for h, p in self.s["parts"].items()}
+
     def dump(self):
         self.s["active"] = self.active.dump()
         return self.s
@@ -919,6 +1005,7 @@ class Reporter:
         r = state if state is not None else {}
         self.r = r
         r.setdefault("sent", {"hours": {}, "fields": None, "title": None})
+        r["sent"].setdefault("parts", {})
         r.setdefault("put", {"lastOkAt": 0, "lastTryAt": 0, "status": None, "code": None, "backoffUntil": 0,
                              "failures": 0, "dropped": [], "refusedTask": None, "refusedTitle": None})
         self.gate = False  # new step codes wait for a 200 from the sessions route in this process
@@ -993,18 +1080,18 @@ class Reporter:
         started = m.started_at()
         last = max(m.activity_end(now) or started, started)
         low, oldest = hour_of(started), now - KEEP_DAYS * 86400 + 3600
-        sent = self.r["sent"]["hours"]
+        sent = self.r["sent"]
+        parts = m.parts() if "parts" not in self.r["put"]["dropped"] else {}
         out = []
         for h, v in sorted(m.buckets(now).items()):
             if h < low or h > last or h < oldest:
                 continue
             v = [min(x, 10_000_000_000) for x in v[:4]] + [min(v[4], HOUR_MS)]
-            old = sent.get(str(h))
-            if old is None and not any(v) or old == v:
-                continue
-            if old and all(a <= b for a, b in zip(v, old)):
-                continue  # the server keeps the greater value anyway
-            out.append((h, v))
+            fitted = fit_parts(parts.get(h, {}), v)
+            old = sent["parts"].get(str(h)) or {}
+            # Only what grew: the server keeps the greater value anyway.
+            if grew(v, sent["hours"].get(str(h))) or any(grew(p, old.get(k)) for k, p in fitted.items()):
+                out.append((h, v, fitted))
         return out[:MAX_HOURS]
 
     def session(self, now, view, task, ended_at=None, force=False):
@@ -1034,8 +1121,7 @@ class Reporter:
         if send_title:
             body["title"] = title
         if hours:
-            body["hours"] = [{"hour": iso(h), "inputTokens": v[0], "outputTokens": v[1], "cacheReadTokens": v[2],
-                              "cacheWriteTokens": v[3], "activeMs": v[4]} for h, v in hours]
+            body["hours"] = [hour_body(h, v, parts) for h, v, parts in hours]
         for field in put["dropped"]:
             body.pop(field, None)
         status, payload = self.put_session(presence_id(self.sid), body)
@@ -1047,12 +1133,18 @@ class Reporter:
             self.r["sent"]["fields"] = fields
             if "title" in body:
                 self.r["sent"]["title"] = title
-            for h, v in hours:
+            for h, v, parts in hours:
                 self.r["sent"]["hours"][str(h)] = v
+                if parts:
+                    self.r["sent"]["parts"][str(h)] = parts
             return status
         named = refused_fields(payload)
         if status == 422 and put["code"] == "agent_field_forbidden" and named and named[0] not in put["dropped"]:
             put["dropped"].append(named[0])
+            put["lastTryAt"] = 0
+        elif status == 422 and "parts" not in put["dropped"] and refused_parts(payload):
+            # A server that cannot read the parts still takes the totals.
+            put["dropped"].append("parts")
             put["lastTryAt"] = 0
         elif status == 422 and ("taskId" in named and body.get("taskId") or "title" in named and "title" in body):
             if "taskId" in named and body.get("taskId"):
@@ -1081,6 +1173,12 @@ def refused_fields(payload):
         return [payload["field"]]
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
     return [m["field"].split(".")[0] for m in messages if isinstance(m, dict) and isinstance(m.get("field"), str)]
+
+
+def refused_parts(payload):
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    return isinstance(messages, list) and any(
+        isinstance(m, dict) and re.match(r"hours\.\d+\.parts\b", str(m.get("field"))) for m in messages)
 
 
 def load_hook():
