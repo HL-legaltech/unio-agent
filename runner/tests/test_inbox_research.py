@@ -1243,6 +1243,17 @@ class FileChecks(HomeCase):
                                          "relatorio-iss-2026.md": "markdown", "dados.txt": "name",
                                          "binario-2026.md": "encoding", "pasta": "not_a_file"})
 
+    def test_code_may_quote_html(self):
+        report = ("# Relatório\n\nTodos os títulos de `<h1>` a `<h6>` viram marcadores.\n\n```html\n<div>x</div>\n"
+                  "```\n\n~~~\n![a](b)\n~~~\n" + "\n".join(f"- Linha {i}." for i in range(200)))
+        folder = self.folder({"relatorio-2026.md": report})
+        kept, dropped = inbox.check_files(folder, "**relatorio-2026.pdf**")
+        self.assertEqual((dropped, [f["render"] for f in kept]), ([], [True]))
+        # Outside code, a tag still refuses the file, even after a code span.
+        (folder / "relatorio-2026.md").write_text(report + "\n`a` <b>c</b>\n", encoding="utf-8")
+        kept, dropped = inbox.check_files(folder, "**relatorio-2026.pdf**")
+        self.assertEqual(dropped, [("relatorio-2026.md", "markdown")])
+
     def test_a_file_that_repeats_the_comment(self):
         lines = [f"- Achado {i} conferido." for i in range(100)]
         body = "\n".join(lines) + "\n\nAnexei **resumo-2026.md**: o mesmo."
