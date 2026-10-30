@@ -628,6 +628,14 @@ class Run(HomeCase):
         done = self.fake.seen("POST", "/v1/agents/inbox/complete")[0]["body"]
         self.assertEqual(done["usage"]["files"], 1)
 
+    def test_a_refused_file_the_answer_names_is_owned_up_to(self):
+        self.assertEqual(self.once("research_bad_file"), 0)
+        self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/files"), [])
+        edit, = self.fake.seen("PUT", "/v1/comments/c-session-reply")
+        self.assertTrue(edit["body"]["content"].endswith(
+            "\n\n_O arquivo relatorio-teste-2026.pdf não pôde ser anexado._"))
+        self.assertEqual(self.items()[0]["research"]["fileErrors"], 1)
+
     def test_a_body_with_a_lone_surrogate_still_goes(self):
         sent = []
 

@@ -264,7 +264,8 @@ research. A research run (the researcher protocol) searches, reads a page,
 posts its checkpoint with the prompt's marker and edits it without the marker;
 research_cap stops at the turn cap after the checkpoint, research_silent
 before it; research_file also writes a CSV into the prompt's files folder and
-names it, and research_files a Markdown file as well; research_slow waits a minute after the checkpoint, and
+names it, and research_files a Markdown file as well; research_bad_file names as a PDF a report the runner
+refuses (raw HTML); research_slow waits a minute after the checkpoint, and
 research_slow_silent before it, to be stopped."""
 import json
 import os
@@ -377,6 +378,13 @@ if "# Unio Bot: researching" in protocol:
             f.write("\n".join(notes) + "\n")
         use(7, "Write", {"file_path": os.path.join(folder, "notas-teste-2026.md")}, True, "written")
         content += "\n\nAnexei também **notas-teste-2026.md**, com a lei de cada município."
+    if mode == "research_bad_file":
+        folder = re.search(r"^Files: write only into (.+), and only when", prompt, re.M).group(1)
+        report = ["# Relatório", "", "<div>bloco</div>"] + [f"- Achado {n} conferido na fonte." for n in range(80)]
+        with open(os.path.join(folder, "relatorio-teste-2026.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(report) + "\n")
+        use(5, "Write", {"file_path": os.path.join(folder, "relatorio-teste-2026.md")}, True, "written")
+        content += "\n\nAnexei **relatorio-teste-2026.pdf**: o relatório completo."
     answer_id = post_comment(content + "\n\n" + marker)
     if mode == "research_slow":
         time.sleep(60)

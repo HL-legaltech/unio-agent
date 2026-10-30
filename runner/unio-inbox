@@ -2223,6 +2223,15 @@ def markdown_problem(text):
     return bool(MD_HTML.search(prose) or MD_IMAGE.search(prose))
 
 
+def named_as(name, body):
+    """The name the comment gives a file (<stem>.pdf for a report Unio renders), or None."""
+    body = str(body or "")
+    stem = name.rsplit(".", 1)[0]
+    if name.endswith(".md") and f"{stem}.pdf" in body:
+        return f"{stem}.pdf"
+    return name if name in body else None
+
+
 def check_files(folder, body, limit=FILES_PER_RUN):
     """(kept, dropped) of a research run's folder: each kept file {name, content,
     shown, render}, where `shown` is the name the comment gives it (<stem>.pdf for a
@@ -2256,12 +2265,11 @@ def check_files(folder, body, limit=FILES_PER_RUN):
         except UnicodeDecodeError:
             dropped.append((name, "encoding"))
             continue
-        stem = name.rsplit(".", 1)[0]
-        render = name.endswith(".md") and f"{stem}.pdf" in str(body or "")
-        shown = f"{stem}.pdf" if render else name
-        if shown not in str(body or ""):
+        shown = named_as(name, body)
+        if not shown:
             dropped.append((name, "unnamed"))
             continue
+        render = shown != name
         lines = comment_lines(text)
         if lines and len(lines & said) > FILE_REPEATS * len(lines):
             dropped.append((name, "repeats_comment"))
@@ -4578,13 +4586,17 @@ class Runner:
         if not folder or not s.answer_id or s.answer_body is None:
             return 0, []
         kept, dropped = check_files(folder, s.answer_body)
+        attached, problems = 0, []
         for name, reason in dropped:
             self.state.log("file_dropped", key=item.get("key"), file=name, reason=reason)
+            # The answer names it as attached, so it must say the file is not.
+            shown = named_as(name, s.answer_body)
+            if shown:
+                problems.append(({"name": name, "shown": shown}, reason))
         comment = item.get("comment") or {}
         author = comment.get("author") or {}
         target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
             else "comment"
-        attached, problems = 0, []
         for n, f in enumerate(kept):
             if s.stopped_by is not None or (n and stopped and stopped()):
                 self.state.log("file_dropped", key=item.get("key"), file=f["name"], reason="stopped on request")
