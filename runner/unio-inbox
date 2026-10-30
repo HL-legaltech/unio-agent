@@ -36,11 +36,12 @@ or the problem that holds it), so the workspace sees it on the agent's page.
 Research: a task comment whose first words ask to find something out
 (pesquise, levante, compare, research, look up...), a reply in a thread the
 agent answered with research, or an item a reply run hands over with
-{"outcome":"research"} gets a research run under the same claim: the web tools
-UNIO_INBOX_WEB allows, five unio tools by name, no repository, and the
-researcher protocol. It posts one answer early and refines it; the runner
-closes an answer the run left unfinished, or replies with the pages it read.
-A run ends 90 s before the claim's 15 minutes do. It waits while the Claude
+{"outcome":"research"} (a question for the web, or a request for a file, which
+only a research run can attach) gets a research run under the same claim: the
+web tools UNIO_INBOX_WEB allows, five unio tools by name, no repository, and
+the researcher protocol. It posts one answer early and refines it; the runner
+closes an answer the run left unfinished, or replies with the pages it read. A
+run ends 90 s before the claim's 15 minutes do. It waits while the Claude
 session window is 90 % used, after 8 research runs in 24 h, or once all runs
 spent 60 % of UNIO_INBOX_DAILY_BUDGET_USD; with the weekly window 90 % used it
 answers without the web. Reply runs never hold the web themselves.
@@ -169,7 +170,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.4.3"
+VERSION = "2.5.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -310,6 +311,8 @@ FILE_NOTE_CHARS = 200
 FILES_LEASE_LEFT = timedelta(seconds=45)
 MD_HTML = re.compile(r"<[A-Za-z!/][^>]*>")
 MD_IMAGE = re.compile(r"!\[[^\]]*\]\(")
+MD_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+MD_TICKS = re.compile(r"`+")
 # A comment asking for the file on the task itself, in so many words (decision O1), on folded text.
 # Whole verb forms only: a stem would read "subsídios" or "substituição" as "suba".
 TASK_TARGET = re.compile(
@@ -2182,6 +2185,53 @@ def rewrite_csv(text):
     return "\ufeff" + out.getvalue()
 
 
+def without_code(text):
+    """The text without its fenced blocks and code spans, which are shown as
+    written, so a report about HTML may quote `<h1>` there. A span closes at the
+    next backtick run of its own length on its line; one that would cross a line
+    stays in, which can only refuse a file. Linear: a file reaches 512 KiB."""
+    kept, fence = [], None
+    for line in text.split("\n"):
+        mark = MD_FENCE.match(line)
+        if fence:
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) \
+                    and not line[mark.end():].strip():
+                fence = None
+            continue
+        if mark:
+            fence = mark.group(1)
+            continue
+        runs = [m.span() for m in MD_TICKS.finditer(line)]
+        closer, later = [None] * len(runs), {}
+        for i in range(len(runs) - 1, -1, -1):
+            width = runs[i][1] - runs[i][0]
+            closer[i], later[width] = later.get(width), i
+        out, at, i = [], 0, 0
+        while i < len(runs):
+            if closer[i] is None:
+                i += 1
+                continue
+            out.append(line[at:runs[i][0]])
+            at, i = runs[closer[i]][1], closer[i] + 1
+        kept.append("".join(out) + line[at:])
+    return "\n".join(kept)
+
+
+def markdown_problem(text):
+    """Whether a Markdown file holds HTML or an image outside its code."""
+    prose = without_code(text)
+    return bool(MD_HTML.search(prose) or MD_IMAGE.search(prose))
+
+
+def named_as(name, body):
+    """The name the comment gives a file (<stem>.pdf for a report Unio renders), or None."""
+    body = str(body or "")
+    stem = name.rsplit(".", 1)[0]
+    if name.endswith(".md") and f"{stem}.pdf" in body:
+        return f"{stem}.pdf"
+    return name if name in body else None
+
+
 def check_files(folder, body, limit=FILES_PER_RUN):
     """(kept, dropped) of a research run's folder: each kept file {name, content,
     shown, render}, where `shown` is the name the comment gives it (<stem>.pdf for a
@@ -2215,12 +2265,11 @@ def check_files(folder, body, limit=FILES_PER_RUN):
         except UnicodeDecodeError:
             dropped.append((name, "encoding"))
             continue
-        stem = name.rsplit(".", 1)[0]
-        render = name.endswith(".md") and f"{stem}.pdf" in str(body or "")
-        shown = f"{stem}.pdf" if render else name
-        if shown not in str(body or ""):
+        shown = named_as(name, body)
+        if not shown:
             dropped.append((name, "unnamed"))
             continue
+        render = shown != name
         lines = comment_lines(text)
         if lines and len(lines & said) > FILE_REPEATS * len(lines):
             dropped.append((name, "repeats_comment"))
@@ -2234,7 +2283,7 @@ def check_files(folder, body, limit=FILES_PER_RUN):
             if len(text.encode("utf-8")) > FILE_MAX_BYTES:
                 dropped.append((name, "size"))
                 continue
-        elif MD_HTML.search(text) or MD_IMAGE.search(text):
+        elif markdown_problem(text):
             dropped.append((name, "markdown"))
             continue
         if render and any(f["render"] for f in kept):
@@ -2649,8 +2698,9 @@ def web_line(web, language="en"):
     when a research run can take the item, `project` for a project item while
     research is on, else `off`."""
     if web == "handover":
-        return ("Web research: not in this run. When the answer needs sources from the public web, write nothing "
-                "and end with the research outcome line (see \"Research\"); a research run takes the item.")
+        return ("Web research and files: not in this run. When the answer needs sources from the public web, or "
+                "the comment asks for a file (a PDF, a report, a spreadsheet), write nothing and end with the "
+                "research outcome line (see \"Research\"); a research run takes the item.")
     if web == "project":
         return (f"Web research: only in task comments. When the comment asks for research, open your answer with "
                 f"\"{RESEARCH_PROJECT[language]}\" and answer from what you know, each point marked unverified.")
@@ -4536,13 +4586,17 @@ class Runner:
         if not folder or not s.answer_id or s.answer_body is None:
             return 0, []
         kept, dropped = check_files(folder, s.answer_body)
+        attached, problems = 0, []
         for name, reason in dropped:
             self.state.log("file_dropped", key=item.get("key"), file=name, reason=reason)
+            # The answer names it as attached, so it must say the file is not.
+            shown = named_as(name, s.answer_body)
+            if shown:
+                problems.append(({"name": name, "shown": shown}, reason))
         comment = item.get("comment") or {}
         author = comment.get("author") or {}
         target = "task" if wants_task_file(comment.get("content")) and author.get("canUpdateTasks") is not False \
             else "comment"
-        attached, problems = 0, []
         for n, f in enumerate(kept):
             if s.stopped_by is not None or (n and stopped and stopped()):
                 self.state.log("file_dropped", key=item.get("key"), file=f["name"], reason="stopped on request")
