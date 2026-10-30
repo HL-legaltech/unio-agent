@@ -36,11 +36,12 @@ or the problem that holds it), so the workspace sees it on the agent's page.
 Research: a task comment whose first words ask to find something out
 (pesquise, levante, compare, research, look up...), a reply in a thread the
 agent answered with research, or an item a reply run hands over with
-{"outcome":"research"} gets a research run under the same claim: the web tools
-UNIO_INBOX_WEB allows, five unio tools by name, no repository, and the
-researcher protocol. It posts one answer early and refines it; the runner
-closes an answer the run left unfinished, or replies with the pages it read.
-A run ends 90 s before the claim's 15 minutes do. It waits while the Claude
+{"outcome":"research"} (a question for the web, or a request for a file, which
+only a research run can attach) gets a research run under the same claim: the
+web tools UNIO_INBOX_WEB allows, five unio tools by name, no repository, and
+the researcher protocol. It posts one answer early and refines it; the runner
+closes an answer the run left unfinished, or replies with the pages it read. A
+run ends 90 s before the claim's 15 minutes do. It waits while the Claude
 session window is 90 % used, after 8 research runs in 24 h, or once all runs
 spent 60 % of UNIO_INBOX_DAILY_BUDGET_USD; with the weekly window 90 % used it
 answers without the web. Reply runs never hold the web themselves.
@@ -2649,8 +2650,9 @@ def web_line(web, language="en"):
     when a research run can take the item, `project` for a project item while
     research is on, else `off`."""
     if web == "handover":
-        return ("Web research: not in this run. When the answer needs sources from the public web, write nothing "
-                "and end with the research outcome line (see \"Research\"); a research run takes the item.")
+        return ("Web research and files: not in this run. When the answer needs sources from the public web, or "
+                "the comment asks for a file (a PDF, a report, a spreadsheet), write nothing and end with the "
+                "research outcome line (see \"Research\"); a research run takes the item.")
     if web == "project":
         return (f"Web research: only in task comments. When the comment asks for research, open your answer with "
                 f"\"{RESEARCH_PROJECT[language]}\" and answer from what you know, each point marked unverified.")

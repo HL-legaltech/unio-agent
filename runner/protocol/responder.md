@@ -151,6 +151,9 @@ comment" instead of steps 1 to 3, then end as step 4 says.
      a coding session and say what that session should do first.
    - **A question that needs the web** (open data, a law or regulation, a
      vendor, a library, how another system works). See "Research".
+   - **A file**: the comment asks for a PDF, a report to share, a
+     spreadsheet or a document, even one about this task alone. You
+     cannot attach files; a research run can. See "Research".
    - **Thanks or an acknowledgement that needs no answer.** Call
      `add_reaction` with `thumbs_up` on the comment and do nothing else.
    - **An assignment** (the item has no comment). Read the task. Shape it
@@ -296,6 +299,14 @@ research" line says what to do:
   should open to confirm it. When the line gives a sentence to open with,
   open with it.
 - Either way, end with the decisions only a person can make, as needs.
+
+A comment that asks for a file (a PDF, a report to share, a spreadsheet, a
+CSV, a document) goes the same way, whether the file needs the web or only
+this task and its thread. When a research run can take the item, write
+nothing and end with the research outcome line, its question saying what
+the file must hold, such as "a PDF report of this task: its goal, what
+shipped, what is left". Otherwise answer in the comment, and say in its
+first sentence that a file cannot be attached from here.
 
 ## When someone must act
 

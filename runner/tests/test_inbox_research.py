@@ -408,8 +408,10 @@ class Prompt(unittest.TestCase):
                       '"Não pesquisei na web agora: o limite de uso desta semana está quase no fim.', text)
 
     def test_reply_lines(self):
-        self.assertIn("write nothing and end with the research outcome line",
-                      inbox.build_prompt(mention(), [], 1, web="handover"))
+        handover = inbox.build_prompt(mention(), [], 1, web="handover")
+        self.assertIn("write nothing and end with the research outcome line", handover)
+        # Only a research run attaches files, so a request for one is handed over too.
+        self.assertIn("or the comment asks for a file (a PDF, a report, a spreadsheet)", handover)
         project = inbox.build_prompt(dict(mention(), subject="project", task=None, project={
             "id": "p1", "slug": "p", "name": "P", "team": {"identifier": "ABC"}, "status": {}}), [], 1,
             web="project", language="pt-BR")
