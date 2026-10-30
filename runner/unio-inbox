@@ -169,7 +169,7 @@ else:
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.4.2"
+VERSION = "2.4.3"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -192,6 +192,14 @@ PROJECT_CREATE = "mcp__unio__create_project"
 CAP_SUBTYPES = {"error_max_turns", "error_max_budget_usd"}
 MACHINE_PAUSE = timedelta(minutes=15)
 USAGE_LIMIT_FALLBACK = timedelta(minutes=30)
+# While a usage limit pauses the runner, how often it asks Claude Code which
+# account is signed in: a sign-in to another account ends the pause early.
+ACCOUNT_CHECK = timedelta(minutes=2)
+# After a probe that neither answered nor hit a limit (a network fault, say).
+PROBE_RETRY = timedelta(minutes=15)
+PROBE_TIMEOUT = 120
+# One turn with no tools measured US$ 0.07 to 0.18 at list price on the default model.
+PROBE_BUDGET = "0.50"
 UNIO_RETRY = timedelta(minutes=2)
 MODEL_RETRY = timedelta(minutes=3)
 INTERRUPTED_RETRY = timedelta(minutes=1)
@@ -2338,6 +2346,19 @@ def local_day(at, zone):
     return at.astimezone(zone).date() if at else None
 
 
+def account_id(status):
+    """A short digest naming the account `claude auth status --json` reports, or
+    None when it reports no sign-in. The state file only needs to tell accounts
+    apart, so it never holds the e-mail itself. A sign-in that names no
+    organisation or e-mail (an API key) is told apart by its method."""
+    if not isinstance(status, dict) or status.get("loggedIn") is not True:
+        return None
+    org, email = str(status.get("orgId") or ""), str(status.get("email") or "")
+    raw = "\0".join((str(status.get("apiProvider") or ""), str(status.get("authMethod") or ""), org,
+                      email.lower()))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def usage_reset(text, now=None):
     """When a usage limit lifts, from the CLI's message; None when it names no future time."""
     now = now or utcnow()
@@ -3466,6 +3487,8 @@ class Runner:
         self.needs_quiet = {}
         # A check that failed for the machine's sake holds the next one this long, charging no task.
         self.needs_judge_hold = None
+        # What set that hold: a usage limit's ends with the limit (recheck_limit).
+        self.needs_judge_hold_reason = None
         self.status_pass_at = None
         self.status_off_logged = set()
         # Project id -> (the move, when it may be tried again) for a move the server refused.
@@ -3481,6 +3504,11 @@ class Runner:
         self._team_rows = None
         # The agent's writing language, read with the teams; English until then.
         self.language = "en"
+        # The account the last `claude auth status` named (account_id), and when a
+        # usage-limit pause last asked; a probe that failed holds the next one.
+        self.account = None
+        self.account_checked_at = None
+        self.probe_hold = None
 
     @staticmethod
     def session_env():
@@ -3610,6 +3638,7 @@ class Runner:
             status = json.loads(p.stdout)
         except ValueError:
             return None, None
+        self.account = account_id(status) or self.account
         if isinstance(status, dict) and status.get("loggedIn") is False:
             return "signed_out", "Claude Code is not signed in (claude auth status); run: claude auth login"
         return None, None
@@ -4607,6 +4636,8 @@ class Runner:
         if reason == "usage_limit":
             # Outlives backoffUntil: reviews stay off for review_quiet_after_limit after it.
             h["usageLimitAt"] = iso(utcnow())
+            # The limit is this account's: a sign-in to another one may answer now.
+            h["backoffAccount"] = self.account
         self.state.record_error(h, f"{reason}: {error}")
         self.state.log("paused", reason=reason, until=iso(until), error=short(error, 300))
         self.presence.set("problem", reason=wire_reason(reason), message=problem_message(reason, until, detail))
@@ -4680,11 +4711,92 @@ class Runner:
             return len(items)
         h["lastOkAt"] = iso(now)
         self.tidy_orphans(api, h, items, now)
+        if not stopping.is_set():
+            self.recheck_limit(api, h, now)
         if items and not stopping.is_set():
             self._handle_items(api, items, h, now)
         self.report_state(h, utcnow())
         self.save(h)
         return len(items)
+
+    def claude_account(self):
+        """The account Claude Code is signed in to now (account_id), or None."""
+        try:
+            p = text_run([self.cfg.claude, "auth", "status", "--json"], timeout=60, env=self.session_env())
+            return account_id(json.loads(p.stdout))
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+
+    def probe(self):
+        """("ok" | a blocking_reason | "error", detail) from one turn with no tools
+        and no Unio, on the model the runner answers with: a weekly limit can be
+        one model's alone. A run stopped at a cap still had its turn served, so
+        the account answers."""
+        work = self.state.dir / "probe"
+        work.mkdir(parents=True, exist_ok=True)
+        # --tools takes every word up to the next option, so the prompt follows one.
+        args = [self.cfg.claude, "-p", "--restricted", "--output-format", "json", "--no-session-persistence",
+                "--settings", self.settings_arg(), "--strict-mcp-config", "--tools", "",
+                "--max-turns", "1", "--max-budget-usd", PROBE_BUDGET]
+        if self.cfg.model:
+            args += ["--model", self.cfg.model]
+        args.append("Reply with the word OK.")
+        try:
+            p = text_run(args, timeout=PROBE_TIMEOUT, env=self.session_env(), cwd=str(work))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return "error", short(str(e), 300)
+        finally:
+            remove_project_dirs(work)
+        try:
+            ev = json.loads(p.stdout)
+        except ValueError:
+            ev = {}
+        ev = ev if isinstance(ev, dict) else {}
+        if ev.get("subtype") in CAP_SUBTYPES or (p.returncode == 0 and ev.get("result") is not None
+                                                  and not ev.get("is_error")):
+            return "ok", None
+        detail = f"{ev.get('result') or ''}\n{p.stderr or ''}".strip()
+        return blocking_reason(detail, ev.get("api_error_status")) or "error", short(detail, 300)
+
+    def recheck_limit(self, api, h, now):
+        """A usage-limit pause belongs to the account that hit it. While one holds,
+        every ACCOUNT_CHECK this asks Claude Code which account is signed in; when
+        it is another one, or the pause never recorded one (2.4.2 and older), one
+        probe asks whether this account can answer. If it can, the pause ends, and
+        so do the old account's quota readings and the reviews' quiet time after
+        a limit. If it is limited too, the pause takes its reset and its account."""
+        until = parse_iso(h.get("backoffUntil"))
+        if not until or until <= now or h.get("backoffReason") != "usage_limit":
+            return
+        if self.account_checked_at and now - self.account_checked_at < ACCOUNT_CHECK:
+            return
+        if self.probe_hold and now < self.probe_hold:
+            return
+        self.account_checked_at = now
+        # `claude auth status` and the probe are processes a short machine cannot spare.
+        if desk_memory(self.cfg.memory_floor):
+            return
+        account = self.claude_account()
+        if not account or account == h.get("backoffAccount"):
+            return
+        self.account = account
+        verdict, detail = self.probe()
+        if verdict == "ok":
+            self.probe_hold = None
+            if self.needs_judge_hold_reason == "usage_limit":
+                self.needs_judge_hold = self.needs_judge_hold_reason = None
+            h["backoffUntil"] = h["backoffReason"] = h["backoffDetail"] = None
+            h["backoffAccount"] = h["usageLimitAt"] = None
+            h["quota"] = {}
+            self.state.log("resumed", reason="account_switched")
+            self.presence.set("idle")
+        elif verdict == "usage_limit":
+            self.probe_hold = None
+            reset = usage_reset(detail, now) or now + USAGE_LIMIT_FALLBACK
+            self.pause(h, "usage_limit", detail or "usage limit", reset, api)
+        else:
+            self.probe_hold = now + PROBE_RETRY
+            self.state.log("probe_failed", reason=verdict, error=detail)
 
     def budget_pause(self, api, h, now):
         over = self.over_budget(h, now)
@@ -4702,7 +4814,7 @@ class Runner:
         until = parse_iso(h.get("backoffUntil"))
         if until and until > now:
             return
-        h["backoffUntil"] = h["backoffReason"] = h["backoffDetail"] = None
+        h["backoffUntil"] = h["backoffReason"] = h["backoffDetail"] = h["backoffAccount"] = None
         if self.budget_pause(api, h, now):
             return
         # Before ready(): its `claude auth status` is a process this machine cannot spare now.
@@ -5749,6 +5861,7 @@ class Runner:
             entry.update(before)
             if v.reason in REVIEW_MACHINE_REASONS:
                 self.needs_judge_hold = utcnow() + MACHINE_PAUSE
+                self.needs_judge_hold_reason = v.reason
                 if v.reason == "usage_limit" and v.pause:
                     # The limit is the inbox's too, so it pauses answers as handle() does.
                     self.pause(h, v.reason, v.error, v.pause, api, v.detail)
