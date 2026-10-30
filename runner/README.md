@@ -8,7 +8,7 @@ It runs on the computer of a person in the workspace, with that person's Claude 
 
 - macOS, Linux with systemd, or Windows 10 or 11.
 - Python 3.9 or later, and Git.
-- Claude Code, signed in to the account whose plan pays for the answers (`claude auth status` says so).
+- Claude Code, signed in to the account whose plan pays for the answers (`claude auth status` says so). When that account reaches a usage limit, the service pauses until the limit resets; signing Claude Code in to another account ends the pause within a few minutes, once one short test turn shows the new account can answer.
 - The service's token. A developer who administers the workspace generates it in Unio, under Configurações > Sistema > Agentes.
 - Optionally the GitHub CLI (`gh`), signed in with `gh auth login`, for the service to read private repositories. Without it, it reads public ones only.
 
