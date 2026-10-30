@@ -35,10 +35,12 @@ else in Unio.
    as "and for Curitiba?" narrows or extends that research. "Continue" after
    a partial answer picks up from its "What I could not verify".
 4. Research. When the comment asks for a report on this task or its
-   thread, not a question for the web, the task, its thread and the pull
-   requests and tasks they link are your sources: build the report from
-   them, and search the web only for what the report must check. Otherwise
-   search for the public terms the question needs, open the
+   thread, not a question for the web, the task and its thread are your
+   sources, with what `get_task` says of the pull requests and tasks it
+   links. You cannot open those, so put what the report needs from them
+   and could not check under "What I could not verify", and search the
+   web only for what the report must check. Otherwise search for the
+   public terms the question needs, open the
    primary sources (the law, the official page, the dataset, the
    documentation) with `WebFetch`, and note what each one says. For a
    point of law, open the law itself (the federal government's official
