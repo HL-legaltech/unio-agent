@@ -21,10 +21,15 @@ class AccountId(unittest.TestCase):
         self.assertEqual(first, inbox.account_id(dict(SIGNED, email="operator@example.org")))
         self.assertNotEqual(first, inbox.account_id(dict(SIGNED, orgId="org-2")))
 
-    def test_none_when_signed_out_or_unnamed(self):
+    def test_none_only_without_a_sign_in(self):
         self.assertIsNone(inbox.account_id(dict(SIGNED, loggedIn=False)))
-        self.assertIsNone(inbox.account_id({"loggedIn": True, "authMethod": "claude.ai"}))
+        self.assertIsNone(inbox.account_id({"authMethod": "claude.ai"}))
         self.assertIsNone(inbox.account_id(None))
+
+    def test_a_sign_in_that_names_no_account_is_told_apart_by_its_method(self):
+        key = inbox.account_id({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty"})
+        self.assertIsNotNone(key)
+        self.assertNotEqual(key, inbox.account_id(SIGNED))
 
 
 class LimitRecheck(HomeCase):
@@ -120,6 +125,20 @@ class LimitRecheck(HomeCase):
             probe = self.recheck(h, "new")
             probe.assert_not_called()
             self.assertEqual(h["backoffReason"], reason)
+
+    def test_an_answer_lifts_the_needs_hold_a_limit_set(self):
+        h = self.paused()
+        self.runner.needs_judge_hold = self.now + inbox.MACHINE_PAUSE
+        self.runner.needs_judge_hold_reason = "usage_limit"
+        self.recheck(h, "new")
+        self.assertIsNone(self.runner.needs_judge_hold)
+        # A hold another machine failure set stays.
+        h = self.paused()
+        self.runner.account_checked_at = None
+        self.runner.needs_judge_hold = self.now + inbox.MACHINE_PAUSE
+        self.runner.needs_judge_hold_reason = "signed_out"
+        self.recheck(h, "newer")
+        self.assertIsNotNone(self.runner.needs_judge_hold)
 
     def test_signed_out_spends_no_probe(self):
         h = self.paused()

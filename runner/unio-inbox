@@ -2348,14 +2348,14 @@ def local_day(at, zone):
 
 def account_id(status):
     """A short digest naming the account `claude auth status --json` reports, or
-    None when it names none. The state file only needs to tell accounts apart,
-    so it never holds the e-mail itself."""
-    if not isinstance(status, dict) or status.get("loggedIn") is False:
+    None when it reports no sign-in. The state file only needs to tell accounts
+    apart, so it never holds the e-mail itself. A sign-in that names no
+    organisation or e-mail (an API key) is told apart by its method."""
+    if not isinstance(status, dict) or status.get("loggedIn") is not True:
         return None
     org, email = str(status.get("orgId") or ""), str(status.get("email") or "")
-    if not org and not email:
-        return None
-    raw = "\0".join((str(status.get("apiProvider") or ""), org, email.lower()))
+    raw = "\0".join((str(status.get("apiProvider") or ""), str(status.get("authMethod") or ""), org,
+                      email.lower()))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -3487,6 +3487,8 @@ class Runner:
         self.needs_quiet = {}
         # A check that failed for the machine's sake holds the next one this long, charging no task.
         self.needs_judge_hold = None
+        # What set that hold: a usage limit's ends with the limit (recheck_limit).
+        self.needs_judge_hold_reason = None
         self.status_pass_at = None
         self.status_off_logged = set()
         # Project id -> (the move, when it may be tried again) for a move the server refused.
@@ -4781,6 +4783,8 @@ class Runner:
         verdict, detail = self.probe()
         if verdict == "ok":
             self.probe_hold = None
+            if self.needs_judge_hold_reason == "usage_limit":
+                self.needs_judge_hold = self.needs_judge_hold_reason = None
             h["backoffUntil"] = h["backoffReason"] = h["backoffDetail"] = None
             h["backoffAccount"] = h["usageLimitAt"] = None
             h["quota"] = {}
@@ -5857,6 +5861,7 @@ class Runner:
             entry.update(before)
             if v.reason in REVIEW_MACHINE_REASONS:
                 self.needs_judge_hold = utcnow() + MACHINE_PAUSE
+                self.needs_judge_hold_reason = v.reason
                 if v.reason == "usage_limit" and v.pause:
                     # The limit is the inbox's too, so it pauses answers as handle() does.
                     self.pause(h, v.reason, v.error, v.pause, api, v.detail)
