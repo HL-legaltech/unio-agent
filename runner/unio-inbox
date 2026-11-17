@@ -2585,9 +2585,12 @@ class ApiHealth:
     slow_unio: a p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
     their timeout), or 2 answers of 5xx or refusals beside 1 good answer
     within 120 s. Both clear after 5 calls in a row that answer well in under
-    1 s, and each after 10 calls in a row with neither its condition nor a bad
-    call of its own, so a runner whose calls take 1 to 3 s still clears. While the bot's own memory or io stalls, read and connect timeouts are
-    the machine's and count for neither."""
+    1 s, and each after 10 answered calls with neither its condition nor a bad
+    call of its own, so a runner whose calls take 1 to 3 s still clears. A
+    failure that counts for neither cause never counts toward clearing one:
+    it is no sign the network or Unio is well. While the bot's own memory or
+    io stalls, read and connect timeouts are the machine's and count for
+    neither."""
 
     def __init__(self, clock=time.monotonic):
         self.lock = threading.Lock()
@@ -2653,7 +2656,7 @@ class ApiHealth:
                     self.quiet.pop(code, None)
                 elif now_held or bad == code:
                     self.quiet[code] = 0
-                else:
+                elif kind == "ok":
                     self.quiet[code] = self.quiet.get(code, 0) + 1
                     if self.quiet[code] >= API_QUIET_STREAK:
                         del self.active[code]

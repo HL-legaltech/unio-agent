@@ -138,6 +138,21 @@ class UnioCauses(unittest.TestCase):
         h.record("ok", 1.2, 200)
         self.assertEqual(h.causes(), {})
 
+    def test_failures_of_no_known_kind_never_clear_a_cause(self):
+        h, clock = health()
+        h.record("network", 0.1)
+        h.record("network", 0.1)
+        h.record("ok", 1.2, 200)
+        clock.now += 121
+        for _ in range(9):
+            h.record("ok", 1.2, 200)
+        # Resets and TLS errors are of no known kind: no sign the network is well.
+        for _ in range(20):
+            h.record(None, 0.1)
+        self.assertIn("slow_network", h.causes())
+        h.record("ok", 1.2, 200)
+        self.assertEqual(h.causes(), {})
+
     def test_during_a_bot_stall_timeouts_are_the_machines(self):
         h, clock = health()
         h.stalled = True
