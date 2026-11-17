@@ -1545,6 +1545,174 @@ def working_cause(active, evidence, elapsed, stalled=()):
     return order[0] if order else None
 
 
+SCAN_DEADLINE = 2
+SCAN_TOP = 3
+PROGRAM_CHARS = re.compile(r"[^A-Za-z0-9._+-]")
+DETAIL_CHARS = 300
+
+
+def clean_program(name):
+    """A process name fit for the agent's page: up to the first space or colon,
+    only [A-Za-z0-9._+-], at most 15 characters, and "?" when nothing is left."""
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", "replace")
+    name = re.split(r"[\s:]", str(name), maxsplit=1)[0]
+    return PROGRAM_CHARS.sub("", name)[:15] or "?"
+
+
+def scan_linux(proc="/proc", uid=None, page=None):
+    """{name: resident bytes} of this user's processes; other users' are never read."""
+    uid = os.getuid() if uid is None else uid
+    page = page or os.sysconf("SC_PAGE_SIZE")
+    sizes = {}
+    for entry in os.listdir(proc):
+        if not entry.isdigit():
+            continue
+        base = os.path.join(proc, entry)
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            with open(os.path.join(base, "statm"), "rb") as f:
+                rss = int(f.read().split()[1]) * page
+            with open(os.path.join(base, "comm"), "rb") as f:
+                name = clean_program(f.read())
+        except (OSError, ValueError, IndexError):
+            continue
+        sizes[name] = sizes.get(name, 0) + rss
+    return sizes
+
+
+def scan_ps(run=None, uid=None):
+    """macOS: ps for this user's processes alone. ucomm, never comm, which is a
+    full path that can carry the login name."""
+    uid = os.getuid() if uid is None else uid
+    run = run or (lambda argv: text_run(argv, timeout=SCAN_DEADLINE).stdout)
+    sizes = {}
+    for line in run(["ps", "-x", "-U", str(uid), "-o", "rss=,ucomm="]).splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            name = clean_program(parts[1])
+            sizes[name] = sizes.get(name, 0) + int(parts[0]) * 1024
+    return sizes
+
+
+def program_scanner(platform=None):
+    """This system's scan, or None (Windows names no programs in v1)."""
+    return {"linux": scan_linux, "macos": scan_ps}.get(platform_name(platform))
+
+
+class ProgramScan:
+    """The heaviest programs, scanned on a short-lived thread: statm reads can
+    block under thrash, and the sampler must keep its 5 s beat. A scan still
+    stuck from last time means no new one."""
+
+    def __init__(self, scan, deadline=SCAN_DEADLINE):
+        self.scan = scan
+        self.deadline = deadline
+        self.thread = None
+
+    def run(self):
+        """[(name, bytes)] of the top SCAN_TOP, or None when the scan failed or ran late."""
+        if self.thread is not None and self.thread.is_alive():
+            return None
+        box = {}
+
+        def work():
+            try:
+                box["sizes"] = self.scan()
+            except Exception as e:  # a scan's failure is only an empty detail
+                box["error"] = e
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+        self.thread.join(self.deadline)
+        if "sizes" not in box:
+            return None
+        top = sorted(box["sizes"].items(), key=lambda kv: (-kv[1], kv[0]))[:SCAN_TOP]
+        return [(clean_program(name), size) for name, size in top if size > 0]
+
+
+def share_programs(env=None):
+    return (env if env is not None else os.environ).get("UNIO_INBOX_SHARE_PROGRAMS", "").strip() != "0"
+
+
+def decimal_br(value, digits=1):
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def gb_br(n):
+    return decimal_br(n / GIB)
+
+
+def percent(share):
+    return f"{round(share * 100)}%"
+
+
+def owner_message(codes, view, programs=None):
+    """The owner's detail beside a slow cause, always in pt-BR: figures rounded
+    to one decimal GB and whole percents, so jitter does not change the text.
+    Members never see it; the server shows it to the token owner and admins."""
+    values = view.get("values") or {}
+    mem, disk = view.get("mem") or {}, view.get("disk") or {}
+    parts = []
+    for code in codes:
+        if code == "slow_memory":
+            if mem.get("total"):
+                text = f"Memória: {gb_br(mem['avail'])} de {gb_br(mem['total'])} GB livres"
+                if mem.get("swapTotal"):
+                    text += f", swap {percent(1 - mem['swapFree'] / mem['swapTotal'])}"
+            else:
+                text = "Memória sob pressão"
+            if view.get("cap"):
+                cap = view.get("capBytes")
+                text += ", serviço no limite de memória" + (f" ({round(cap / 2**20)} MB)" if cap else "")
+            parts.append(text)
+        elif code == "slow_disk":
+            stall = values.get("psi_io") if values.get("psi_io") is not None else values.get("iowait")
+            if stall is not None:
+                parts.append(f"Disco em espera {percent(stall)} do tempo")
+            elif values.get("blocked") is not None:
+                parts.append(f"{round(values['blocked'])} processos esperando o disco")
+            else:
+                parts.append("Disco sobrecarregado")
+        elif code == "slow_cpu":
+            if values.get("psi_cpu") is not None:
+                parts.append(f"Processador em espera {percent(values['psi_cpu'])} do tempo")
+            elif values.get("cpu_busy") is not None:
+                parts.append(f"Processador {percent(values['cpu_busy'])} ocupado")
+            elif values.get("load") is not None:
+                parts.append(f"Carga do processador {decimal_br(values['load'])} por núcleo")
+            else:
+                parts.append("Processador sobrecarregado")
+        elif code == "low_disk_space" and disk.get("total"):
+            parts.append(f"Disco: {gb_br(disk['free'])} de {gb_br(disk['total'])} GB livres")
+        elif code == "power_saving":
+            limit = view.get("speedLimit")
+            parts.append(f"Processador limitado a {limit}% da velocidade" if limit is not None and limit < 100
+                         else "Modo de economia de energia ligado")
+        elif code == "updating_code":
+            parts.append("Atualizando a cópia do código")
+        elif code == "slow_unio":
+            p90 = view.get("p90")
+            parts.append(f"Unio: 90% das respostas em até {decimal_br(p90)} s" if p90 is not None and p90 >= 1
+                         else "Unio: respostas com erro")
+        elif code == "slow_network":
+            parts.append("Rede: falhas de conexão")
+        elif code == "slow_ai":
+            n = view.get("retries")
+            parts.append("Serviço de IA tentando de novo" if not n else "Serviço de IA: 1 nova tentativa"
+                         if n == 1 else f"Serviço de IA: {n} novas tentativas")
+    if programs:
+        parts.append("Mais pesados: " + ", ".join(f"{clean_program(n)} {gb_br(b)} GB" for n, b in programs))
+    text = ""
+    for part in ("".join(ch for ch in p if ch.isprintable()) for p in parts):
+        # Whole parts only: the server cuts the message at 300 characters.
+        joined = f"{text} · {part}" if text else part
+        if len(joined) > DETAIL_CHARS:
+            break
+        text = joined
+    return text or None
+
+
 def project_slugs(cwd):
     """The names Claude Code (2.1.287) may give the project directory of a session
     run in `cwd`: every character outside [a-zA-Z0-9] becomes '-', and a name
