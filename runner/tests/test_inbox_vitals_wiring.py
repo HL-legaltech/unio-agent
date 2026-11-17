@@ -142,6 +142,35 @@ class Run(HomeCase):
         self.assertTrue(credits)
         self.assertEqual([(c["code"], c["delayMs"]) for c in credits[-1]], [("slow_ai", 1500)])
 
+    def test_the_item_line_says_where_the_time_went(self):
+        os.environ["FAKE_CLAUDE_MODE"] = "retry"
+        psi = {"source": "cgroup", "bot": {"memory": 0.4, "io": 2.1, "cpu": 0.3},
+               "system": {"memory": 1.0, "io": 9.5, "cpu": 0.8}}
+        stub = StubVitals(summary={"wallS": 3.0, "slow": ["slow_ai"], "causeS": {"slow_ai": 2},
+                                   "stall": {}, "psi": psi})
+        self.once(stub)
+        item, = self.items()
+        stages = item["stages"]
+        self.assertEqual(set(stages), {"refreshMs", "readyMs", "startMs", "sessionMs", "teardownMs", "settleMs",
+                                       "session"})
+        self.assertEqual(stages["session"], "reply")
+        # The fake waits 1.2 s after its retry, inside the session.
+        self.assertGreaterEqual(stages["sessionMs"], 1000)
+        self.assertEqual((item["apiMs"], item["ttftMs"]), (1234, 456))
+        self.assertEqual((item["retries"], item["retryErrors"]), (1, {"overloaded": 1}))
+        self.assertEqual((item["slow"], item["causeS"], item["psi"]), (["slow_ai"], {"slow_ai": 2}, psi))
+
+    def test_ready_is_timed_on_the_first_item_of_a_poll_alone(self):
+        second = mention()
+        second["key"], second["comment"]["id"] = "comment:c-0002", "c-0002"
+        self.fake.items = [mention(), second]
+        runner = inbox.Runner(inbox.Config(os.environ, "org_test"), vitals=StubVitals())
+        with mock.patch.object(inbox, "desk_memory", return_value=None):
+            self.assertEqual(runner.locked_poll(once=True), 2)
+        first, other = self.items()
+        self.assertIn("readyMs", first["stages"])
+        self.assertNotIn("readyMs", other["stages"])
+
     def test_a_refresh_that_raises_still_closes_the_stage(self):
         stub = StubVitals()
         runner = inbox.Runner(inbox.Config(os.environ, "org_test"), vitals=stub)

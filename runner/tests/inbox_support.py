@@ -322,7 +322,7 @@ def use(n, name, arguments, ok, text, structured=None):
 
 def result(text, subtype="success", turns=3):
     emit({"type": "result", "subtype": subtype, "is_error": subtype != "success", "num_turns": turns,
-          "total_cost_usd": 0.0123, "result": text,
+          "total_cost_usd": 0.0123, "result": text, "duration_api_ms": 1234, "ttft_ms": 456,
           "modelUsage": {"claude-test": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 1,
                                          "cacheCreationInputTokens": 2, "costUSD": 0.0123}}})
 

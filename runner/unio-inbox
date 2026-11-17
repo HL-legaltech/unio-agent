@@ -4884,6 +4884,8 @@ class Session:
         self.retry_errors = {}
         self.retry_delay_ms = 0
         self.retry_credits = []
+        # time.monotonic() at spawn, at the first stream event, at the result and at exit.
+        self.spawned_at = self.first_event_at = self.result_at = self.exited_at = None
 
     @property
     def bad_init(self):
@@ -4992,6 +4994,25 @@ class Verdict:
         self.question = fields.get("question")
 
 
+def ms_between(start, end):
+    return int((end - start) * 1000) if start is not None and end is not None and end >= start else None
+
+
+def session_stages(s):
+    """Where a session's time went: spawn to its first stream event, that to
+    the result, and the result to the process's exit."""
+    end = s.result_at or s.exited_at
+    return {"startMs": ms_between(s.spawned_at, s.first_event_at),
+            "sessionMs": ms_between(s.first_event_at, end),
+            "teardownMs": ms_between(s.result_at, s.exited_at)}
+
+
+def with_settle(stats, started):
+    """`stats` with settleMs: stats is built before the settlement it reports."""
+    stages = dict(stats.get("stages") or {}, settleMs=int((time.monotonic() - started) * 1000))
+    return {**stats, "stages": stages}
+
+
 class Runner:
     def __init__(self, cfg, vitals=None):
         """`vitals`: a Vitals to use instead of this system's (tests)."""
@@ -5051,6 +5072,8 @@ class Runner:
         self.account = None
         self.account_checked_at = None
         self.probe_hold = None
+        # ready()'s time in this poll, for the first item's log line alone: it runs once per poll.
+        self.ready_ms = None
 
     @staticmethod
     def session_env():
@@ -5278,6 +5301,7 @@ class Runner:
                     s.start_error = f"could not start {self.cfg.claude}: {e}"
                     return s
                 s.started = True
+                s.spawned_at = time.monotonic()
                 reader = threading.Thread(target=self._read, args=(proc, s, transcript), daemon=True)
                 reader.start()
                 try:
@@ -5302,6 +5326,7 @@ class Runner:
                         self.kill(proc)
                     elif on_wait:
                         on_wait(s)
+                s.exited_at = time.monotonic()
                 reader.join(timeout=10)
                 if not reader.is_alive():
                     # Each session's pipe would otherwise stay open until the collector finds it.
@@ -5338,6 +5363,8 @@ class Runner:
                 continue
             if not isinstance(event, dict):
                 continue
+            if s.first_event_at is None:
+                s.first_event_at = time.monotonic()
             if event.get("parent_tool_use_id") is not None:
                 # A subagent's turn (measured on 2.1.311: it inherits the parent's
                 # MCP tools). Its writes and steps are never the run's own.
@@ -5396,6 +5423,7 @@ class Runner:
                 s.rate_limits.update({name: {**w, "at": read_at} for name, w in rate_limits(event).items()})
             elif kind == "result":
                 s.result = event
+                s.result_at = time.monotonic()
 
     @staticmethod
     def _note_retry(s, event):
@@ -5725,11 +5753,14 @@ class Runner:
             return "continue"
 
         # Cloned or refreshed before the claim: a first clone can take minutes.
+        ready_ms, self.ready_ms = self.ready_ms, None
+        refresh_at = time.monotonic()
         self.vitals_call("stage", "refresh")
         try:
             snapshots = self.snapshots.for_team((record.get("team") or {}).get("identifier"), h)
         finally:
             self.vitals_call("stage", None)
+        refresh_ms = int((time.monotonic() - refresh_at) * 1000)
         if stopping.is_set():
             return "stop"
         claim = self.claim(api, item, base)
@@ -5830,7 +5861,17 @@ class Runner:
                  "usage": run_usage(ev, usd if s.started else None),
                  "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
-                 "triage": triage, "slow": (slow_run or {}).get("slow") or None}
+                 "triage": triage}
+        stages = {"refreshMs": refresh_ms, "readyMs": ready_ms, **session_stages(s)}
+        if s.started:
+            # A research run's stages are its own session's, not the reply's that handed it over.
+            stages["session"] = "research" if research else "reply"
+        slow_run = slow_run or {}
+        stats.update(stages={k: v for k, v in stages.items() if v is not None},
+                     apiMs=ev.get("duration_api_ms"), ttftMs=ev.get("ttft_ms"),
+                     retries=s.retries or None, retryErrors=s.retry_errors or None,
+                     slow=slow_run.get("slow") or None, causeS=slow_run.get("causeS") or None,
+                     psi=slow_run.get("psi") or None)
         # What the receipt records of the run: every session of this claim.
         wire = {"usage": usage_body(merge_usage((triage or {}).get("usage"), stats["usage"]),
                                     merge_web((triage or {}).get("web"), stats["web"]), files=0)}
@@ -5839,9 +5880,10 @@ class Runner:
                            projects=s.projects)
 
         if v.kind == "release":
+            began = time.monotonic()
             st, d = self.settle(api, "release", item, claim, reason=wire_reason(v.reason), retryAfter=iso(v.retry),
                                 note=problem_message(v.reason, detail=v.detail), **wire)
-            self.state.log("item", **base, **stats, result="released", reason=v.reason, error=v.error,
+            self.state.log("item", **base, **with_settle(stats, began), result="released", reason=v.reason, error=v.error,
                            retryAfter=iso(v.retry), releaseError=None if st == 200 else describe(st, d))
             if v.reason in RESEARCH_GATE_REASONS:
                 # This item's wait, not the machine's: the next item may still run.
@@ -5919,7 +5961,9 @@ class Runner:
 
         self.state.record_error(h, f"{key}: {v.error}")
         public, message = FAIL_CAUSES[v.cause]
+        began = time.monotonic()
         st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public], **wire)
+        stats = with_settle(stats, began)
         h.setdefault("failed", []).append(iso(utcnow()))
         attempts = ((d or {}).get("data") or {}).get("attempts") if st == 200 else None
         final = isinstance(attempts, int) and attempts >= FINAL_ATTEMPT
@@ -6195,7 +6239,9 @@ class Runner:
         return f"{error}; {fallback}" if fallback else None
 
     def complete(self, api, item, claim, h, base, stats, outcome, note, wire=None, **extra):
+        began = time.monotonic()
         st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note, **(wire or {}))
+        stats = with_settle(stats, began)
         if st == 200:
             h.setdefault("handled", []).append(iso(utcnow()))
             # The answer, the 👍 or the change is the signal now.
@@ -6397,7 +6443,9 @@ class Runner:
         # Before ready(): its `claude auth status` is a process this machine cannot spare now.
         if self.memory_pause(api, h, now):
             return
+        began = time.monotonic()
         reason, error = self.ready()
+        self.ready_ms = int((time.monotonic() - began) * 1000)
         if reason:
             self.pause(h, reason, error, now + MACHINE_PAUSE, api)
             return
