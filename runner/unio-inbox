@@ -1809,9 +1809,9 @@ class Vitals:
     causes they add up to, and what to show for them.
 
     It never raises: a failing signal or step is logged once. `on_change(reason,
-    message)` is called, outside the Vitals lock, when the slow reason or the
-    owner's detail changes: the working reason during a run (run_start() to
-    run_end()), else the idle one. The main thread brackets the pre-claim
+    message, state)` is called, outside the Vitals lock, when the slow reason,
+    the owner's detail or the state they are for changes: the working reason
+    during a run (run_start() to run_end()), else the idle one. The main thread brackets the pre-claim
     refresh with stage("refresh") and stage(None), and hands each run's credited
     retries over with note_retries(). vitals.json in the state folder gets
     snapshot() at most every 30 s."""
@@ -1847,6 +1847,7 @@ class Vitals:
         self.message_at = None
         self.message_codes = None
         self.reported = (None, None)
+        self.reported_state = "idle"
         self.cap_bytes = None
 
     def start(self):
@@ -2005,11 +2006,12 @@ class Vitals:
         with self.publish_lock:
             with self.lock:
                 report = self._report(now, rebuild)
-                changed = report != self.reported
-                self.reported = report
+                state = "idle" if self.run is None else "working"
+                changed = report != self.reported or state != self.reported_state
+                self.reported, self.reported_state = report, state
             if changed and self.on_change is not None:
                 try:
-                    self.on_change(*report)
+                    self.on_change(*report, state)
                 except Exception as e:  # presence trouble is presence's own
                     self._failed("on_change", e)
 
@@ -2903,6 +2905,7 @@ class Presence:
         self.wake = threading.Event()
         self.want = None
         self.extra = {}
+        self.extra_state = None
         self.sent = None
         self.sent_at = None
         self.report = {}
@@ -2929,16 +2932,18 @@ class Presence:
             self.want = body
         self.wake.set()
 
-    def overlay(self, reason, message):
+    def overlay(self, reason, message, state=None):
         """The slow cause, and the owner's detail beside it, that an idle or
-        working body carries from now on; (None, None) clears both."""
+        working body carries from now on; (None, None) clears both. With
+        `state`, only a body in that state carries it."""
         with self.lock:
             self.extra = {"reason": reason, **({"message": str(message)[:300]} if message else {})} \
                 if reason else {}
+            self.extra_state = state
 
-    def refresh(self, reason, message):
+    def refresh(self, reason, message, state=None):
         """overlay(), sent as soon as the spacing rules allow: Vitals' on_change."""
-        self.overlay(reason, message)
+        self.overlay(reason, message, state)
         self.wake.set()
 
     def status(self):
@@ -2954,7 +2959,11 @@ class Presence:
         if self.want.get("state") not in OVERLAID_STATES:
             return self.want
         body = {k: v for k, v in self.want.items() if k not in ("reason", "message")}
-        body.update(self.extra)
+        # Vitals' idle cause must not reach a working row outside its run: the
+        # first write of a run, settle, and review and needs runs, which Vitals
+        # does not bracket, so their causes would skip the working gate.
+        if self.extra_state in (None, body["state"]):
+            body.update(self.extra)
         return body
 
     def _wait(self):

@@ -56,6 +56,18 @@ class Bodies(unittest.TestCase):
         self.assertNotIn("reason", self.body())
         self.assertNotIn("message", self.body())
 
+    def test_a_reason_for_one_state_stays_off_the_other(self):
+        self.p.refresh("low_disk_space", "Disco: 1,0 de 200,0 GB livres", "idle")
+        self.p.set("working", itemKey="review:t-1")
+        self.assertNotIn("reason", self.body())
+        self.assertNotIn("message", self.body())
+        self.p.set("idle")
+        self.assertEqual(self.body()["reason"], "low_disk_space")
+        self.p.refresh("slow_memory", None, "working")
+        self.assertNotIn("reason", self.body())
+        self.p.set("working", itemKey="comment:c-1")
+        self.assertEqual(self.body()["reason"], "slow_memory")
+
     def test_the_detail_is_cut_at_the_servers_300_characters(self):
         self.p.set("idle")
         self.p.refresh("low_disk_space", "x" * 400)

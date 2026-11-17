@@ -51,6 +51,7 @@ class Case(HomeCase):
         self.reader = FakeReader(self.tmp, self.clock)
         self.logs = []
         self.changes = []
+        self.states = []
         self.scans = []
         self.vitals = self.make()
 
@@ -61,7 +62,11 @@ class Case(HomeCase):
         return inbox.Vitals(self.tmp, log=lambda event, **f: self.logs.append((event, f)), platform="linux",
                             reader=self.reader, clock=self.clock, env=env or {}, health=self.health,
                             scan=fake_scan if scan == "default" else scan,
-                            on_change=lambda reason, message: self.changes.append((reason, message)))
+                            on_change=self.changed)
+
+    def changed(self, reason, message, state):
+        self.changes.append((reason, message))
+        self.states.append(state)
 
     def tick(self, n=1, seconds=5):
         for _ in range(n):
@@ -86,7 +91,7 @@ class NeverRaises(Case):
         self.assertEqual(self.events("vitals_signal_off"), [{"signal": "psi", "error": "FileNotFoundError: x"}])
 
     def test_a_failing_on_change_never_stops_the_sampler(self):
-        def broken(reason, message):
+        def broken(reason, message, state):
             raise RuntimeError("presence down")
         self.vitals.on_change = broken
         self.reader.fixed["disk"] = {"free": GB, "total": 200 * GB}
@@ -173,6 +178,16 @@ class Working(Case):
         self.assertEqual(self.vitals.reason()[0], "slow_ai")
         self.tick(13)
         self.assertIsNone(self.vitals.reason()[0])
+
+    def test_each_reason_names_the_state_it_is_for(self):
+        self.reader.fixed["disk"] = {"free": GB, "total": 200 * GB}
+        self.tick(2)
+        self.vitals.run_start()
+        self.vitals.run_end()
+        # The run's end reports the same idle cause again, now for idle.
+        self.assertEqual(self.changes, [("low_disk_space", "Disco: 1,0 de 200,0 GB livres"), (None, None),
+                                        ("low_disk_space", "Disco: 1,0 de 200,0 GB livres")])
+        self.assertEqual(self.states, ["idle", "working", "idle"])
 
     def test_a_bot_stall_goes_ahead_of_slow_unio(self):
         self.tick(1)
