@@ -1273,6 +1273,276 @@ def vitals_reader(state_dir, platform=None):
     return VitalsReader(state_dir)
 
 
+# What makes an answer slow, in the order members see them when several hold.
+SLOW_CODES = ("slow_network", "slow_unio", "slow_ai", "low_disk_space", "slow_memory", "slow_disk", "slow_cpu",
+              "power_saving", "updating_code")
+MACHINE_CODES = ("slow_memory", "slow_disk", "slow_cpu")
+IDLE_CODES = ("updating_code", "low_disk_space", "power_saving", "slow_memory")
+VITALS_WINDOW = 60
+VITALS_RECENT = 10
+VITALS_CLEAR = 300
+VITALS_CALM = 0.7
+# A run shows a cause it has no direct evidence for only after this long: ordinary
+# answers take p50 31 s and p90 64 s.
+WORKING_GRACE = 60
+REFRESH_SLOW = 10
+
+
+def _pick(sample, *keys):
+    for key in keys:
+        sample = sample.get(key) if isinstance(sample, dict) else None
+    return sample
+
+
+def _delta(ws, get):
+    """Δ of a counter over Δ of its clock between the first and last sample
+    that hold both; None without two such samples or after a reset."""
+    points = [p for p in (get(s) for s in ws) if p is not None and None not in p]
+    if len(points) < 2:
+        return None
+    num, den = points[-1][0] - points[0][0], points[-1][1] - points[0][1]
+    if den <= 0 or num < 0:
+        return None
+    return num / den
+
+
+def _gauge(ws, get, low=False):
+    """The window's mildest reading, so a gauge is bad only when every sample is."""
+    values = [v for v in (get(s) for s in ws) if v is not None]
+    if not values:
+        return None
+    return max(values) if low else min(values)
+
+
+def _psi_share(group, resource):
+    def value(ws):
+        # A switch from the cgroup to the system counters is a new clock.
+        source = ws[-1].get("psiSource") if ws else None
+        same = [s for s in ws if group != "psi" or s.get("psiSource") == source]
+        return _delta(same, lambda s: (_pick(s, group, resource), s["at"]))
+    return value
+
+
+def _no_psi(fn):
+    """The /proc/stat and /proc/vmstat fallbacks, used only on a kernel without PSI:
+    load and iowait count tasks in D state, which a disk storm alone fills."""
+    def value(ws):
+        if not ws or any("psi" in s for s in ws):
+            return None
+        return fn(ws)
+    return value
+
+
+def _busy(ws):
+    share = _delta(ws, lambda s: (_pick(s, "cpu", "busy"), _pick(s, "cpu", "total")))
+    if share is None:
+        return None
+    # Windows has no run queue to read: busy time alone decides there.
+    queued = _gauge(ws, lambda s: s["running"] - s["ncpu"] if "running" in s and "ncpu" in s else None)
+    return share if queued is None or queued > 0 else 0.0
+
+
+def _per_second(key):
+    return lambda ws: _delta(ws, lambda s: (_pick(s, "vm", key), s["at"]))
+
+
+def _system_memory(ws):
+    """System memory stall, counted only while memory or swap is nearly gone."""
+    share = _delta(ws, lambda s: (_pick(s, "sysPsi", "memory"), s["at"]))
+    mem = ws[-1].get("mem") if ws else None
+    if share is None or not isinstance(mem, dict) or "swapFree" not in mem:
+        return None
+    short_swap = mem["swapTotal"] > 0 and mem["swapFree"] < 0.1 * mem["swapTotal"]
+    return share if short_swap or mem["avail"] < 0.1 * mem["total"] else 0.0
+
+
+def _windows_memory(s):
+    mem = s.get("mem")
+    if not isinstance(mem, dict) or not mem.get("pageTotal") or not mem.get("total"):
+        return None
+    return min(mem["avail"] / max(GIB, 0.05 * mem["total"]), mem["pageAvail"] / (0.1 * mem["pageTotal"]))
+
+
+def _disk_room(s):
+    disk = s.get("disk")
+    if not isinstance(disk, dict) or not disk.get("total"):
+        return None
+    # Under 2 GiB free, or under 2 % and under 10 GiB.
+    return disk["free"] / max(2 * GIB, min(0.02 * disk["total"], 10 * GIB))
+
+
+def _flag(s):
+    return None if s.get("power") is None else float(bool(s["power"]))
+
+
+class Signal:
+    """One reading against one threshold. `low` signals are bad below it.
+    `instant` ones activate on a single sample (pmset answers every 5 min).
+    `idle` ones may name an idle runner's cause; `bot` ones measure the bot's
+    own stall (its cgroup, or the system's PSI when it has none)."""
+
+    def __init__(self, name, cause, threshold, value, low=False, instant=False, idle=False, bot=False):
+        self.name, self.cause, self.threshold, self.value = name, cause, threshold, value
+        self.low, self.instant, self.idle, self.bot = low, instant, idle, bot
+
+    def bad(self, v):
+        if v is None:
+            return False
+        return v < self.threshold if self.low else v >= self.threshold
+
+    def calm(self, v):
+        if v is None:
+            return True
+        return v >= self.threshold / VITALS_CALM if self.low else v < self.threshold * VITALS_CALM
+
+    def worse(self, a, b):
+        if a is None or b is None:
+            return a if b is None else b
+        return min(a, b) if self.low else max(a, b)
+
+
+SIGNALS = (
+    Signal("psi_memory", "slow_memory", 0.10, _psi_share("psi", "memory"), bot=True),
+    Signal("psi_io", "slow_disk", 0.10, _psi_share("psi", "io"), bot=True),
+    Signal("psi_cpu", "slow_cpu", 0.20, _psi_share("psi", "cpu"), bot=True),
+    Signal("cpu_busy", "slow_cpu", 0.90, _no_psi(_busy)),
+    Signal("blocked", "slow_disk", 2, _no_psi(lambda ws: _gauge(ws, lambda s: s.get("blocked")))),
+    Signal("iowait", "slow_disk", 0.20,
+           _no_psi(lambda ws: _delta(ws, lambda s: (_pick(s, "cpu", "iowait"), _pick(s, "cpu", "total"))))),
+    Signal("swap_ins", "slow_memory", 100, _no_psi(_per_second("pswpin"))),
+    Signal("major_faults", "slow_memory", 200, _no_psi(_per_second("pgmajfault"))),
+    Signal("system_memory", "slow_memory", 0.10, _system_memory, idle=True),
+    Signal("pressure_level", "slow_memory", 2, lambda ws: _gauge(ws, lambda s: s.get("level"))),
+    Signal("load", "slow_cpu", 1.5, lambda ws: _gauge(ws, lambda s: s.get("load"))),
+    Signal("windows_memory", "slow_memory", 1, lambda ws: _gauge(ws, _windows_memory, low=True), low=True),
+    Signal("disk_space", "low_disk_space", 1, lambda ws: _gauge(ws, _disk_room, low=True), low=True, idle=True),
+    Signal("power", "power_saving", 1, lambda ws: _gauge(ws, _flag), instant=True, idle=True),
+)
+
+
+def slow_order(codes, stalled=()):
+    """`codes` in the order members see them. A machine stall measured on the
+    bot goes ahead of Unio and the AI service, whose slowness it causes, and a
+    long refresh goes ahead of everything."""
+    order = list(SLOW_CODES)
+    for code in reversed([c for c in MACHINE_CODES if c in stalled]):
+        order.remove(code)
+        order.insert(1, code)
+    order.remove("updating_code")
+    order.insert(0, "updating_code")
+    return sorted((c for c in set(codes) if c in order), key=order.index)
+
+
+class CauseEngine:
+    """Samples in, causes out. Pure but for its own history: every call takes
+    `now` (monotonic seconds), so tests drive it without sleeping.
+
+    A signal activates when its share over the last 60 s and over the last
+    10 s both pass the threshold; it clears after 300 s continuously calm
+    (under 70 % of the threshold, or above it ÷ 0.7 for a low one). A cause
+    holds while any of its signals does; each stretch is one episode."""
+
+    def __init__(self, signals=SIGNALS):
+        self.signals = signals
+        self.samples = []
+        self.active = {}
+        self.values = {}
+        self.recent = {}
+        self.episodes = {}
+        self.cap = False
+
+    def window(self, now, seconds):
+        # Half a tick of slack, so a 10 s window holds the sample taken 10 s ago.
+        start = now - seconds - VITALS_TICK / 2
+        return [s for s in self.samples if start <= s["at"] <= now]
+
+    def add(self, sample, now):
+        """Takes one sample; returns the episodes that began and ended, as
+        ("slow_start", code, fields) and ("slow_end", code, fields)."""
+        self.samples.append(dict(sample, at=now))
+        self.samples = self.window(now, VITALS_WINDOW)
+        w60, w10 = self.samples, self.window(now, VITALS_RECENT)
+        for sig in self.signals:
+            v60, v10 = sig.value(w60), sig.value(w10)
+            self.values[sig.name], self.recent[sig.name] = v60, v10
+            st = self.active.get(sig.name)
+            if st is None:
+                if sig.instant:
+                    hit = sig.bad(sig.value(w10[-1:]))
+                else:
+                    hit = len(w10) >= 2 and sig.bad(v60) and sig.bad(v10)
+                if hit:
+                    self.active[sig.name] = {"since": now, "calm": None, "peak": v10 if sig.instant else v60}
+                continue
+            st["peak"] = sig.worse(st["peak"], v10)
+            if not sig.calm(v10):
+                st["calm"] = None
+            elif st["calm"] is None:
+                st["calm"] = now
+            elif now - st["calm"] >= VITALS_CLEAR:
+                del self.active[sig.name]
+        # memory.events high/max: cheap page-cache reclaim at the cap raises them,
+        # so they only say the service is at its own limit, never that it is slow.
+        events = [s["events"] for s in w60 if "events" in s]
+        self.cap = len(events) >= 2 and events[-1] > events[0]
+        return self._episodes(now)
+
+    def _episodes(self, now):
+        changes = []
+        live = self.causes()
+        for code, since in live.items():
+            sigs = {s.name: self.active[s.name]["peak"] for s in self.signals
+                    if s.cause == code and s.name in self.active}
+            ep = self.episodes.get(code)
+            if ep is None:
+                self.episodes[code] = {"since": since, "peak": dict(sigs)}
+                changes.append(("slow_start", code, {"signals": self._rounded(sigs)}))
+            else:
+                for name, peak in sigs.items():
+                    sig = next(s for s in self.signals if s.name == name)
+                    ep["peak"][name] = sig.worse(ep["peak"].get(name), peak)
+        for code in [c for c in self.episodes if c not in live]:
+            ep = self.episodes.pop(code)
+            changes.append(("slow_end", code, {"peak": self._rounded(ep["peak"]),
+                                               "durationS": round(now - ep["since"])}))
+        return changes
+
+    @staticmethod
+    def _rounded(values):
+        return {k: round(v, 3) for k, v in values.items() if v is not None}
+
+    def causes(self, idle=None, bot=None):
+        """{code: since} of the active causes, optionally only idle or bot signals'."""
+        out = {}
+        for sig in self.signals:
+            st = self.active.get(sig.name)
+            if st is None or (idle is not None and sig.idle != idle) or (bot is not None and sig.bot != bot):
+                continue
+            out[sig.cause] = min(out.get(sig.cause, st["since"]), st["since"])
+        return out
+
+    def stalled(self):
+        """The machine causes the bot's own memory or io stall holds now."""
+        return {c for c in self.causes(bot=True) if c in ("slow_memory", "slow_disk")}
+
+    def latest(self):
+        return self.samples[-1] if self.samples else {}
+
+
+def idle_cause(active):
+    """What an idle runner shows: the refresh, low disk space, power saving or a
+    system-wide memory stall, never a cause only a run can feel."""
+    order = slow_order(c for c in active if c in IDLE_CODES)
+    return order[0] if order else None
+
+
+def working_cause(active, evidence, elapsed, stalled=()):
+    """What a working run shows: an active cause this run has direct evidence
+    of, or any active cause once the run is WORKING_GRACE old."""
+    order = slow_order((c for c in active if c in evidence or elapsed >= WORKING_GRACE), stalled)
+    return order[0] if order else None
+
+
 def project_slugs(cwd):
     """The names Claude Code (2.1.287) may give the project directory of a session
     run in `cwd`: every character outside [a-zA-Z0-9] becomes '-', and a name

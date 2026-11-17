@@ -290,5 +290,218 @@ class NativeSmoke(HomeCase):
         self.assertIn("power", s)
 
 
+class Feed:
+    """Drives a CauseEngine one 5 s tick at a time, with cumulative PSI counters
+    that grow by the given share of each tick."""
+
+    def __init__(self, source="cgroup"):
+        self.engine = inbox.CauseEngine()
+        self.now = 0.0
+        self.psi = {"memory": 0.0, "io": 0.0, "cpu": 0.0}
+        self.source = source
+        self.log = []
+
+    def tick(self, n=1, memory=0.0, io=0.0, cpu=0.0, **extra):
+        for _ in range(n):
+            self.now += 5
+            for res, share in (("memory", memory), ("io", io), ("cpu", cpu)):
+                self.psi[res] += share * 5
+            sample = {"psiSource": self.source, "psi": dict(self.psi), **extra}
+            self.log += self.engine.add(sample, self.now)
+        return self.engine.causes()
+
+
+class CauseActivation(unittest.TestCase):
+    def test_a_stall_activates_once_both_windows_pass(self):
+        f = Feed()
+        self.assertEqual(f.tick(memory=0.5), {})
+        self.assertEqual(f.tick(memory=0.5), {"slow_memory": 10.0})
+        self.assertEqual([e[:2] for e in f.log], [("slow_start", "slow_memory")])
+
+    def test_one_spike_is_not_a_cause(self):
+        f = Feed()
+        f.tick(12)
+        f.tick(memory=1.0)
+        f.tick(memory=0.0)
+        # The 60 s share is 1/13 of the window, under 10 %.
+        self.assertEqual(f.tick(), {})
+
+    def test_the_recent_window_must_agree(self):
+        engine = inbox.CauseEngine()
+        # 40 s of io stall, then 15 s of none: the minute is over 10 %, the last 10 s are not.
+        engine.samples = [{"at": t, "psiSource": "cgroup", "psi": {"memory": 0, "io": min(t, 40) * 0.3, "cpu": 0}}
+                          for t in range(0, 55, 5)]
+        engine.add({"psiSource": "cgroup", "psi": {"memory": 0, "io": 12.0, "cpu": 0}}, 55)
+        self.assertGreaterEqual(engine.values["psi_io"], 0.1)
+        self.assertEqual(engine.recent["psi_io"], 0)
+        self.assertEqual(engine.causes(), {})
+
+    def test_thresholds_per_resource(self):
+        self.assertEqual(Feed().tick(3, memory=0.09, io=0.09, cpu=0.19), {})
+        self.assertEqual(set(Feed().tick(3, memory=0.1, io=0.1, cpu=0.2)), {"slow_memory", "slow_disk", "slow_cpu"})
+
+
+class CauseClearing(unittest.TestCase):
+    def test_a_cause_clears_after_300_s_calm(self):
+        f = Feed()
+        f.tick(3, memory=0.4)
+        f.tick(2, memory=0.0)
+        calm_from = f.now
+        while f.now - calm_from < 295:
+            self.assertIn("slow_memory", f.tick())
+        self.assertEqual(f.tick(), {})
+        end = f.log[-1]
+        self.assertEqual(end[:2], ("slow_end", "slow_memory"))
+        self.assertEqual(end[2]["peak"], {"psi_memory": 0.4})
+
+    def test_a_reading_between_calm_and_threshold_holds_the_cause(self):
+        f = Feed()
+        f.tick(3, cpu=0.5)
+        # 15 % is under the 20 % threshold but over 70 % of it.
+        f.tick(100, cpu=0.15)
+        self.assertIn("slow_cpu", f.engine.causes())
+
+    def test_one_episode_logs_once(self):
+        f = Feed()
+        f.tick(30, memory=0.5)
+        self.assertEqual(len(f.log), 1)
+
+
+class LowerBoundSignals(unittest.TestCase):
+    def test_low_disk_space_and_its_clear_above_threshold_over_0_7(self):
+        f = Feed()
+        total = 100 * 2**30
+        f.tick(2, disk={"free": 1.5 * 2**30, "total": total})
+        self.assertIn("low_disk_space", f.engine.causes())
+        # 2.5 GiB is over the 2 GiB floor but under 2 / 0.7: still held.
+        f.tick(100, disk={"free": 2.5 * 2**30, "total": total})
+        self.assertIn("low_disk_space", f.engine.causes())
+        f.tick(61, disk={"free": 3 * 2**30, "total": total})
+        self.assertNotIn("low_disk_space", f.engine.causes())
+
+    def test_two_percent_counts_only_under_ten_gib(self):
+        self.assertEqual(Feed().tick(3, disk={"free": 15 * 2**30, "total": 1000 * 2**30}), {})
+        self.assertIn("low_disk_space", Feed().tick(3, disk={"free": 9 * 2**30, "total": 1000 * 2**30}))
+        self.assertEqual(Feed().tick(3, disk={"free": 9 * 2**30, "total": 100 * 2**30}), {})
+
+    def test_windows_memory(self):
+        mem = {"avail": 2**29, "total": 16 * 2**30, "pageAvail": 10 * 2**30, "pageTotal": 20 * 2**30}
+        self.assertIn("slow_memory", Feed().tick(2, mem=mem))
+        mem = dict(mem, avail=2 * 2**30, pageAvail=2**30)
+        self.assertIn("slow_memory", Feed().tick(2, mem=mem))
+        mem = dict(mem, pageAvail=3 * 2**30)
+        self.assertEqual(Feed().tick(2, mem=mem), {})
+
+
+class DiscreteSignals(unittest.TestCase):
+    def test_one_power_reading_activates_and_normal_clears_after_300_s(self):
+        f = Feed()
+        self.assertIn("power_saving", f.tick(power=True))
+        f.tick(59, power=False)
+        self.assertIn("power_saving", f.engine.causes())
+        f.tick(2, power=False)
+        self.assertNotIn("power_saving", f.engine.causes())
+
+    def test_an_unknown_power_state_never_activates(self):
+        self.assertEqual(Feed().tick(3), {})
+
+    def test_macos_pressure_level(self):
+        self.assertIn("slow_memory", Feed().tick(2, level=2))
+        self.assertEqual(Feed().tick(1, level=4), {})
+        self.assertEqual(Feed().tick(3, level=1), {})
+
+
+class WithoutPsi(unittest.TestCase):
+    def feed(self, n, **sample):
+        engine, now, out = inbox.CauseEngine(), 0, {}
+        for i in range(n):
+            now += 5
+            s = {k: (v(i) if callable(v) else v) for k, v in sample.items()}
+            engine.add(s, now)
+        return engine.causes()
+
+    def test_cpu_needs_busy_time_and_a_run_queue(self):
+        busy = lambda i: {"busy": 95 * i, "iowait": 0, "total": 100 * i}
+        self.assertIn("slow_cpu", self.feed(3, cpu=busy, running=30, ncpu=24, blocked=0))
+        self.assertEqual(self.feed(3, cpu=busy, running=10, ncpu=24, blocked=0), {})
+        # Windows has no run queue.
+        self.assertIn("slow_cpu", self.feed(3, cpu=busy))
+
+    def test_disk_from_blocked_tasks_or_iowait(self):
+        idle = lambda i: {"busy": 0, "iowait": 0, "total": 100 * i}
+        self.assertIn("slow_disk", self.feed(3, cpu=idle, blocked=2))
+        self.assertEqual(self.feed(3, cpu=idle, blocked=1), {})
+        waiting = lambda i: {"busy": 0, "iowait": 25 * i, "total": 100 * i}
+        self.assertIn("slow_disk", self.feed(3, cpu=waiting, blocked=0))
+
+    def test_memory_from_swap_ins_or_major_faults(self):
+        self.assertIn("slow_memory", self.feed(3, vm=lambda i: {"pswpin": 600 * i, "pgmajfault": 0}))
+        self.assertIn("slow_memory", self.feed(3, vm=lambda i: {"pswpin": 0, "pgmajfault": 1100 * i}))
+        self.assertEqual(self.feed(3, vm=lambda i: {"pswpin": 400 * i, "pgmajfault": 900 * i}), {})
+
+    def test_the_fallbacks_stay_silent_where_psi_exists(self):
+        self.assertEqual(self.feed(3, psi={"memory": 0, "io": 0, "cpu": 0}, blocked=40,
+                                   vm=lambda i: {"pswpin": 10**6 * i, "pgmajfault": 0}), {})
+
+
+class SystemMemory(unittest.TestCase):
+    def feed(self, mem):
+        engine = inbox.CauseEngine()
+        for i in range(3):
+            engine.add({"sysPsi": {"memory": 2.0 * i, "io": 0, "cpu": 0}, "mem": mem}, 5.0 * (i + 1))
+        return engine
+
+    def test_a_system_stall_counts_for_idle_only_with_memory_or_swap_nearly_gone(self):
+        tight = {"avail": 9, "total": 100, "swapTotal": 100, "swapFree": 50}
+        self.assertEqual(set(self.feed(tight).causes(idle=True)), {"slow_memory"})
+        swapless = {"avail": 50, "total": 100, "swapTotal": 100, "swapFree": 5}
+        self.assertEqual(set(self.feed(swapless).causes(idle=True)), {"slow_memory"})
+        roomy = {"avail": 50, "total": 100, "swapTotal": 0, "swapFree": 0}
+        self.assertEqual(self.feed(roomy).causes(), {})
+
+    def test_the_bot_cgroup_stall_is_not_an_idle_cause(self):
+        f = Feed()
+        f.tick(3, memory=0.5, io=0.5)
+        self.assertEqual(f.engine.causes(idle=True), {})
+        self.assertEqual(f.engine.stalled(), {"slow_memory", "slow_disk"})
+
+
+class ServiceCap(unittest.TestCase):
+    def test_memory_events_only_flag_the_cap(self):
+        f = Feed()
+        f.tick(1, events=3)
+        f.tick(1, events=9)
+        self.assertTrue(f.engine.cap)
+        self.assertEqual(f.engine.causes(), {})
+        f.tick(13, events=9)
+        self.assertFalse(f.engine.cap)
+
+
+class Precedence(unittest.TestCase):
+    def test_members_see_the_first_by_the_table(self):
+        self.assertEqual(inbox.slow_order(["slow_cpu", "slow_ai", "low_disk_space", "slow_network"]),
+                         ["slow_network", "slow_ai", "low_disk_space", "slow_cpu"])
+
+    def test_a_bot_stall_goes_ahead_of_unio_and_the_ai(self):
+        self.assertEqual(inbox.slow_order(["slow_unio", "slow_ai", "slow_disk", "slow_memory", "slow_network"],
+                                          stalled={"slow_disk"}),
+                         ["slow_network", "slow_disk", "slow_unio", "slow_ai", "slow_memory"])
+
+    def test_a_long_refresh_goes_first(self):
+        self.assertEqual(inbox.slow_order(["slow_memory", "updating_code", "slow_network"])[0], "updating_code")
+
+    def test_idle_carries_only_its_causes(self):
+        self.assertIsNone(inbox.idle_cause(["slow_disk", "slow_cpu", "slow_ai", "slow_unio", "slow_network"]))
+        self.assertEqual(inbox.idle_cause(["slow_cpu", "power_saving", "low_disk_space"]), "low_disk_space")
+        self.assertEqual(inbox.idle_cause(["low_disk_space", "updating_code"]), "updating_code")
+
+    def test_working_needs_evidence_or_a_minute(self):
+        active = ["slow_cpu", "slow_unio"]
+        self.assertIsNone(inbox.working_cause(active, set(), 59))
+        self.assertEqual(inbox.working_cause(active, {"slow_cpu"}, 10), "slow_cpu")
+        self.assertEqual(inbox.working_cause(active, set(), 60), "slow_unio")
+        self.assertIsNone(inbox.working_cause([], {"slow_cpu"}, 600))
+
+
 if __name__ == "__main__":
     unittest.main()
