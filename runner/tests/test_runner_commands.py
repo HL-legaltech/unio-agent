@@ -304,9 +304,10 @@ class Commands(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("  computador: mais lento que o normal: pouca memória, disco sobrecarregado (Memória: 1,2 de "
                       "31,4 GB livres · Mais pesados: node 6,9 GB[2J)\n", out)
-        self.assertIn("    enquanto o computador deixar as respostas lentas, o Unio recebe a causa, os números de "
-                      "memória e os nomes dos programas mais pesados deste usuário, que os admins do workspace "
-                      "podem ver (UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)", out)
+        self.assertIn("    enquanto o computador deixar as respostas lentas, o Unio recebe a causa, os números que "
+                      "a explicam (memória, disco, processador, tempo de resposta do Unio e novas tentativas do "
+                      "serviço de IA) e os nomes dos programas mais pesados deste usuário, que os admins do "
+                      "workspace podem ver (UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)", out)
         self.assertNotIn("\x1b", out)
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual(json.loads(out)["workspaces"][0]["vitals"], block)
@@ -323,6 +324,21 @@ class Commands(unittest.TestCase):
         self.assertIn("admins do workspace", notice)
         first, _ = ur.vitals_words({"at": fresh, "causes": {"updating_code": {}, "made_up": {}}}, now)
         self.assertEqual(first, "mais lento que o normal: atualizando a cópia do código")
+
+    def test_the_notice_names_every_figure_that_leaves(self):
+        now = datetime(2026, 11, 17, 12, 0, 0, tzinfo=timezone.utc)
+        for share in (True, False):
+            _, notice = ur.vitals_words({"at": "2026-11-17T11:59:40Z", "causes": {}, "sharePrograms": share}, now)
+            for figure in ("memória", "disco", "processador", "tempo de resposta do Unio", "serviço de IA"):
+                self.assertIn(figure, notice)
+
+    def test_the_setup_notice_follows_the_profile_env(self):
+        self.assertEqual(ur.shared_notice({}, windows=False), ur.SHARED_NOTICE)
+        self.assertEqual(ur.shared_notice({}, windows=True), ur.SHARED_NOTICE_NO_NAMES)
+        self.assertEqual(ur.shared_notice({"UNIO_INBOX_SHARE_PROGRAMS": "0"}, windows=False),
+                         ur.SHARED_NOTICE_NO_NAMES)
+        self.assertIsNone(ur.shared_notice({"UNIO_INBOX_VITALS": "off"}, windows=False))
+        self.assertNotIn("programas", ur.SHARED_NOTICE_NO_NAMES)
 
     def test_status_json_without_profiles(self):
         code, out = self.box.runner(["status", "--json"])

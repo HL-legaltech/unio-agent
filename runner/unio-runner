@@ -1208,19 +1208,36 @@ def vitals_words(block, now=None):
         if block.get("message"):
             first += " (%s)" % clean(block["message"], 300)
     if block.get("sharePrograms"):
-        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa, os números de memória e "
-                  "os nomes dos programas mais pesados deste usuário, que os admins do workspace podem ver "
-                  "(UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)")
+        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa, %s e os nomes dos "
+                  "programas mais pesados deste usuário, que os admins do workspace podem ver "
+                  "(UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)" % SHARED_FIGURES)
     else:
-        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa e os números de memória, "
-                  "que os admins do workspace podem ver")
+        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa e %s, que os admins do "
+                  "workspace podem ver" % SHARED_FIGURES)
     return [first, notice]
 
 
+# Every figure unio-inbox's owner_message() can send beside a cause.
+SHARED_FIGURES = ("os números que a explicam (memória, disco, processador, tempo de resposta do Unio e novas "
+                  "tentativas do serviço de IA)")
+
 # What leaves this computer when it slows answers, said at setup as status says it.
-SHARED_NOTICE = ("Quando este computador deixar as respostas lentas, o Unio recebe a causa, os números de memória e "
-                 "os nomes dos programas mais pesados deste usuário, e os admins do workspace podem ver isso. "
-                 "UNIO_INBOX_SHARE_PROGRAMS=0 no arquivo env do perfil tira os nomes.")
+SHARED_NOTICE = ("Quando este computador deixar as respostas lentas, o Unio recebe a causa, %s e os nomes dos "
+                 "programas mais pesados deste usuário, e os admins do workspace podem ver isso. "
+                 "UNIO_INBOX_SHARE_PROGRAMS=0 no arquivo env do perfil tira os nomes." % SHARED_FIGURES)
+SHARED_NOTICE_NO_NAMES = ("Quando este computador deixar as respostas lentas, o Unio recebe a causa e %s, e os "
+                          "admins do workspace podem ver isso." % SHARED_FIGURES)
+
+
+def shared_notice(env_values, windows=None):
+    """The setup notice for a profile env file's values, or None when it turns
+    the vitals off. unio-inbox reads no program names on Windows."""
+    windows = os.name == "nt" if windows is None else windows
+    if (env_values.get("UNIO_INBOX_VITALS") or "on").strip().lower() == "off":
+        return None
+    if windows or env_values.get("UNIO_INBOX_SHARE_PROGRAMS", "").strip() == "0":
+        return SHARED_NOTICE_NO_NAMES
+    return SHARED_NOTICE
 
 
 def version_key(text):
@@ -1356,7 +1373,9 @@ def setup(opts):
     say("Repositórios salvos em %s (%d)." % (tilde(prof.repos_file), count) if count else
         "Nenhum repositório ligado; a lista fica em %s." % tilde(prof.repos_file))
 
-    say(SHARED_NOTICE)
+    notice = shared_notice(read_env_file(prof.env_file))
+    if notice:
+        say(notice)
     if opts.get("--no-service"):
         say("Para rodar o serviço num terminal que fique aberto: %s" % foreground_command(org))
         say("Perfil do serviço de respostas pronto para %s." % name)
