@@ -149,7 +149,9 @@ class KeepsSending(HomeCase):
             self.p.start()
             self.p.set("working", itemKey="comment:c-1")
             self.p.refresh("slow_cpu", "Processador em espera 35% do tempo")
-            self.assertTrue(self.until(lambda: any(b.get("reason") == "slow_cpu" for b in self.puts())))
+            # The fake records a request before it answers, so wait for the client's own effects too.
+            self.assertTrue(self.until(lambda: any(b.get("reason") == "slow_cpu" for b in self.puts())
+                                       and health.hook_error is not None and "lastOkAt" in self.p.status()))
         self.assertTrue(health.record.called)
         self.assertEqual(health.hook_error, "RuntimeError: hook down")
         self.assertIn("lastOkAt", self.p.status())
