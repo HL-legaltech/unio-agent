@@ -190,6 +190,10 @@ class OnceWithoutProfile(Once):
         self.assertEqual(self.fake.seen("POST", "/v1/agents/inbox/claim"), [])
         health = json.loads((self.state / "health.json").read_text(encoding="utf-8"))
         self.assertEqual(health["backoffReason"], "memory_pressure")
+        # The hold has a reason of its own on the agent's page, no longer `other`.
+        problems = [r["body"] for r in self.fake.seen("PUT") if r["path"].startswith("/v1/agents/presence/")
+                    and r["body"].get("state") == "problem"]
+        self.assertEqual({b.get("reason") for b in problems}, {"memory_pressure"})
 
     def test_the_local_responder_is_still_required(self):
         self.responder.unlink()

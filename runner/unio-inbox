@@ -367,8 +367,9 @@ FAIL_CAUSES = {
 }
 # The reasons the server validates and the web app words in Portuguese.
 # The runner's finer ones travel as `other`, their detail in the note or message.
+# A server older than memory_pressure stores it as `other`, as it got before.
 REASON_CODES = {"signed_out", "usage_limit", "model_unavailable", "unio_unavailable", "unexpected_tools",
-                "budget", "repo_unavailable", "other"}
+                "budget", "repo_unavailable", "memory_pressure", "other"}
 # What people may read about a problem. Never raw output: it can carry paths and URLs.
 PROBLEMS = {
     "signed_out": "Claude Code is not signed in",
