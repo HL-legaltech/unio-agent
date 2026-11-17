@@ -1217,6 +1217,12 @@ def vitals_words(block, now=None):
     return [first, notice]
 
 
+# What leaves this computer when it slows answers, said at setup as status says it.
+SHARED_NOTICE = ("Quando este computador deixar as respostas lentas, o Unio recebe a causa, os números de memória e "
+                 "os nomes dos programas mais pesados deste usuário, e os admins do workspace podem ver isso. "
+                 "UNIO_INBOX_SHARE_PROGRAMS=0 no arquivo env do perfil tira os nomes.")
+
+
 def version_key(text):
     """(major, minor, patch) of "2.0.0", as unio-inbox compares versions, or None."""
     found = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?$", str(text or "").strip())
@@ -1350,6 +1356,7 @@ def setup(opts):
     say("Repositórios salvos em %s (%d)." % (tilde(prof.repos_file), count) if count else
         "Nenhum repositório ligado; a lista fica em %s." % tilde(prof.repos_file))
 
+    say(SHARED_NOTICE)
     if opts.get("--no-service"):
         say("Para rodar o serviço num terminal que fique aberto: %s" % foreground_command(org))
         say("Perfil do serviço de respostas pronto para %s." % name)
