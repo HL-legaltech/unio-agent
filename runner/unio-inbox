@@ -2113,7 +2113,7 @@ class Vitals:
                     "causes": {c: {"since": iso(wall - timedelta(seconds=now - causes[c]))}
                                for c in slow_order(causes, self.engine.stalled())},
                     "atServiceCap": self.engine.cap, "reason": self.reported[0], "message": self.reported[1],
-                    "episodes": list(self.episodes)}
+                    "sharePrograms": self.scan is not None, "episodes": list(self.episodes)}
 
     def _write(self, now):
         try:

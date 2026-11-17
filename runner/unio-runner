@@ -45,7 +45,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
@@ -1163,6 +1163,60 @@ def project_status_words(block):
     return words
 
 
+# The web app's labels for unio-inbox's slow-answer causes (SLOW_CODES), in its order.
+SLOW_LABELS = {
+    "slow_network": "rede instável",
+    "slow_unio": "comunicação lenta com o Unio",
+    "slow_ai": "IA instável",
+    "low_disk_space": "pouco espaço em disco",
+    "slow_memory": "pouca memória",
+    "slow_disk": "disco sobrecarregado",
+    "slow_cpu": "processador sobrecarregado",
+    "power_saving": "desempenho reduzido",
+    "updating_code": "atualizando a cópia do código",
+}
+# unio-inbox rewrites vitals.json every 30 s while it runs.
+VITALS_STALE = 120
+
+
+def vitals(prof):
+    """The vitals.json unio-inbox's sampler keeps in the profile's state folder, or None."""
+    try:
+        block = json.loads((prof.state / "vitals.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return block if isinstance(block, dict) else None
+
+
+def vitals_words(block, now=None):
+    """The "computador" lines of status: how the computer stands, and what of it reaches Unio."""
+    if not block:
+        return ["sem informação ainda (o serviço escreve isso enquanto roda)"]
+    try:
+        at = datetime.strptime(str(block.get("at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        at = None
+    now = now or datetime.now(timezone.utc)
+    if at is None or (now - at).total_seconds() > VITALS_STALE:
+        return ["sem leitura recente (a última foi em %s)" % clean(block.get("at") or "?", 40)]
+    causes = block.get("causes") if isinstance(block.get("causes"), dict) else {}
+    labels = [SLOW_LABELS[code] for code in causes if code in SLOW_LABELS]
+    if not labels:
+        first = "ok"
+    else:
+        first = "mais lento que o normal: %s" % ", ".join(labels)
+        if block.get("message"):
+            first += " (%s)" % clean(block["message"], 300)
+    if block.get("sharePrograms"):
+        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa, os números de memória e "
+                  "os nomes dos programas mais pesados deste usuário, que os admins do workspace podem ver "
+                  "(UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)")
+    else:
+        notice = ("enquanto o computador deixar as respostas lentas, o Unio recebe a causa e os números de memória, "
+                  "que os admins do workspace podem ver")
+    return [first, notice]
+
+
 def version_key(text):
     """(major, minor, patch) of "2.0.0", as unio-inbox compares versions, or None."""
     found = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?$", str(text or "").strip())
@@ -1331,7 +1385,8 @@ def status(opts):
         rows.append((prof, {"workspace": org, "state": svc.state(org) if svc else "unknown",
                             "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
                             "token": prof.token.exists(), "lastLog": entries[-1] if entries else None,
-                            "projectStatus": project_status(prof), "research": research_limits(prof)}))
+                            "projectStatus": project_status(prof), "research": research_limits(prof),
+                            "vitals": vitals(prof)}))
     if opts.get("--json"):
         say(json.dumps({"workspaces": [row for _, row in rows]}))
         return 0
@@ -1345,6 +1400,10 @@ def status(opts):
         say("  status dos projetos: %s" % project_status_words(row["projectStatus"]))
         for line in research_words(row["research"]) if row["research"] else ():
             say(line)
+        first, *rest = vitals_words(row["vitals"])
+        say("  computador: %s" % first)
+        for line in rest:
+            say("    %s" % line)
         say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
     return 0
 

@@ -214,6 +214,7 @@ class RealSampler(HomeCase):
         vitals = json.loads((state / "vitals.json").read_text(encoding="utf-8"))
         self.assertEqual(vitals["platform"], inbox.platform_name())
         self.assertIn("disk", vitals["signals"])
+        self.assertIn("sharePrograms", vitals)
         log = [json.loads(line) for line in (state / "log.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual([e for e in log if e["event"] == "vitals_error"], [])
 

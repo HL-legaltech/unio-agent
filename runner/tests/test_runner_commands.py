@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -252,10 +253,10 @@ class Commands(unittest.TestCase):
         in_clone = (ur.CLONE / ".git").exists()
         self.assertEqual(json.loads(out), {"workspaces": [
             {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
-             "lastLog": None, "projectStatus": None, "research": None},
+             "lastLog": None, "projectStatus": None, "research": None, "vitals": None},
             {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
              "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}, "projectStatus": None,
-             "research": None}]})
+             "research": None, "vitals": None}]})
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
 
@@ -290,6 +291,38 @@ class Commands(unittest.TestCase):
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual(json.loads(out)["workspaces"][0]["projectStatus"],
                          {"mode": "off", "configError": "UNIO_STATUS_INTERVAL is not a number"})
+
+    def test_status_shows_the_computer(self):
+        self.make_profile()
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        block = {"v": 1, "at": at, "platform": "linux", "signals": ["disk", "mem", "psi"],
+                 "causes": {"slow_memory": {"since": at}, "slow_disk": {"since": at}}, "reason": "slow_memory",
+                 "message": "Memória: 1,2 de 31,4 GB livres · Mais pesados: node 6,9 GB\x1b[2J",
+                 "sharePrograms": True, "episodes": []}
+        (self.state / "vitals.json").write_text(json.dumps(block, ensure_ascii=False), encoding="utf-8")
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  computador: mais lento que o normal: pouca memória, disco sobrecarregado (Memória: 1,2 de "
+                      "31,4 GB livres · Mais pesados: node 6,9 GB[2J)\n", out)
+        self.assertIn("    enquanto o computador deixar as respostas lentas, o Unio recebe a causa, os números de "
+                      "memória e os nomes dos programas mais pesados deste usuário, que os admins do workspace "
+                      "podem ver (UNIO_INBOX_SHARE_PROGRAMS=0 tira os nomes)", out)
+        self.assertNotIn("\x1b", out)
+        code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
+        self.assertEqual(json.loads(out)["workspaces"][0]["vitals"], block)
+
+    def test_the_computer_line_in_each_state(self):
+        now = datetime(2026, 11, 17, 12, 0, 0, tzinfo=timezone.utc)
+        fresh, old = "2026-11-17T11:59:40Z", "2026-11-17T11:50:00Z"
+        self.assertEqual(ur.vitals_words(None), ["sem informação ainda (o serviço escreve isso enquanto roda)"])
+        self.assertEqual(ur.vitals_words({"at": old, "causes": {}}, now),
+                         ["sem leitura recente (a última foi em 2026-11-17T11:50:00Z)"])
+        first, notice = ur.vitals_words({"at": fresh, "causes": {}, "sharePrograms": False}, now)
+        self.assertEqual(first, "ok")
+        self.assertNotIn("programas", notice)
+        self.assertIn("admins do workspace", notice)
+        first, _ = ur.vitals_words({"at": fresh, "causes": {"updating_code": {}, "made_up": {}}}, now)
+        self.assertEqual(first, "mais lento que o normal: atualizando a cópia do código")
 
     def test_status_json_without_profiles(self):
         code, out = self.box.runner(["status", "--json"])
