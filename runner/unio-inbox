@@ -1477,7 +1477,8 @@ class CauseEngine:
 
     A signal activates when its share over the last 60 s and over the last
     10 s both pass the threshold; it clears after 300 s continuously calm
-    (under 70 % of the threshold, or above it ÷ 0.7 for a low one). A cause
+    (under 70 % of the threshold, or above it ÷ 0.7 for a low one), every
+    sample of a gauge included. A cause
     holds while any of its signals does; each stretch is one episode."""
 
     def __init__(self, signals=SIGNALS):
@@ -1513,7 +1514,10 @@ class CauseEngine:
                     self.active[sig.name] = {"since": now, "calm": None, "peak": v10 if sig.instant else v60}
                 continue
             st["peak"] = sig.worse(st["peak"], v10)
-            if not sig.calm(v10):
+            # v10 of a gauge is the window's mildest reading, so one calm sample
+            # per window would keep the clock running: every new sample must be
+            # calm too. A rate has no one-sample value, and calm(None) holds.
+            if not sig.calm(v10) or not sig.calm(sig.value(w10[-1:])):
                 st["calm"] = None
             elif st["calm"] is None:
                 st["calm"] = now

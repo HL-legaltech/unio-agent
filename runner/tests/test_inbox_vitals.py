@@ -410,6 +410,18 @@ class DiscreteSignals(unittest.TestCase):
         self.assertEqual(Feed().tick(1, level=4), {})
         self.assertEqual(Feed().tick(3, level=1), {})
 
+    def test_a_gauge_clears_only_when_every_sample_is_calm(self):
+        f = Feed()
+        f.tick(14, level=4)
+        for _ in range(64):
+            f.tick(level=1)
+            f.tick(level=4)
+        self.assertIn("slow_memory", f.engine.causes())
+        f.tick(59, level=1)
+        self.assertIn("slow_memory", f.engine.causes())
+        f.tick(2, level=1)
+        self.assertEqual(f.engine.causes(), {})
+
 
 class WithoutPsi(unittest.TestCase):
     def feed(self, n, **sample):
