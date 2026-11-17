@@ -112,6 +112,32 @@ class UnioCauses(unittest.TestCase):
         h.record("ok", 0.2, 200)
         self.assertEqual(h.causes(), {})
 
+    def test_a_cause_whose_condition_is_gone_clears_after_ten_calls(self):
+        h, clock = health()
+        for _ in range(5):
+            h.record("ok", 3.5, 200)
+        # The p90 falls under 3 s at the ninth 1.2 s answer; ten more clear it.
+        for _ in range(17):
+            h.record("ok", 1.2, 200)
+        self.assertIn("slow_unio", h.causes())
+        h.record("ok", 1.2, 200)
+        self.assertEqual(h.causes(), {})
+
+    def test_a_bad_call_of_its_own_restarts_the_quiet_count(self):
+        h, clock = health()
+        h.record("network", 0.1)
+        h.record("network", 0.1)
+        h.record("ok", 1.2, 200)
+        clock.now += 121
+        for _ in range(9):
+            h.record("ok", 1.2, 200)
+        h.record("network", 0.1)
+        for _ in range(9):
+            h.record("ok", 1.2, 200)
+        self.assertIn("slow_network", h.causes())
+        h.record("ok", 1.2, 200)
+        self.assertEqual(h.causes(), {})
+
     def test_during_a_bot_stall_timeouts_are_the_machines(self):
         h, clock = health()
         h.stalled = True

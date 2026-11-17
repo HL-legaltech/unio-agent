@@ -2546,6 +2546,8 @@ API_WINDOW = 120
 API_SLOW_P90 = 3
 API_FAST = 1
 API_FAST_STREAK = 5
+# One full p90 window of calls with the cause's own condition false.
+API_QUIET_STREAK = 10
 UNREACHABLE_ERRNOS = {errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065}
 
 
@@ -2581,7 +2583,8 @@ class ApiHealth:
     slow_unio: a p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
     their timeout), or 2 answers of 5xx or refusals beside 1 good answer
     within 120 s. Both clear after 5 calls in a row that answer well in under
-    1 s. While the bot's own memory or io stalls, read and connect timeouts are
+    1 s, and each after 10 calls in a row with neither its condition nor a bad
+    call of its own, so a runner whose calls take 1 to 3 s still clears. While the bot's own memory or io stalls, read and connect timeouts are
     the machine's and count for neither."""
 
     def __init__(self, clock=time.monotonic):
@@ -2600,6 +2603,7 @@ class ApiHealth:
         self.unio = deque()
         self.good = deque()
         self.fast = 0
+        self.quiet = {}
 
     def record(self, kind, seconds, status=0, timeout=0, definite=True, now=None):
         with self.lock:
@@ -2634,12 +2638,24 @@ class ApiHealth:
                 self.active = {}
                 self._forget()
                 return
-            if len(self.network) >= 2 and self.good:
-                self.active.setdefault("slow_network", self.seq)
             ordered = sorted(self.latencies)
             p90 = ordered[math.ceil(0.9 * len(ordered)) - 1] if ordered else 0
-            if (len(ordered) >= 5 and p90 >= API_SLOW_P90) or (len(self.unio) >= 2 and self.good):
-                self.active.setdefault("slow_unio", self.seq)
+            held = {
+                "slow_network": len(self.network) >= 2 and bool(self.good),
+                "slow_unio": (len(ordered) >= 5 and p90 >= API_SLOW_P90) or (len(self.unio) >= 2 and bool(self.good)),
+            }
+            for code, now_held in held.items():
+                if now_held:
+                    self.active.setdefault(code, self.seq)
+                if code not in self.active:
+                    self.quiet.pop(code, None)
+                elif now_held or bad == code:
+                    self.quiet[code] = 0
+                else:
+                    self.quiet[code] = self.quiet.get(code, 0) + 1
+                    if self.quiet[code] >= API_QUIET_STREAK:
+                        del self.active[code]
+                        del self.quiet[code]
             if bad in self.active:
                 self.active[bad] = self.seq
 
