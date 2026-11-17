@@ -335,8 +335,9 @@ class Commands(unittest.TestCase):
     def test_the_setup_notice_follows_the_profile_env(self):
         self.assertEqual(ur.shared_notice({}, windows=False), ur.SHARED_NOTICE)
         self.assertEqual(ur.shared_notice({}, windows=True), ur.SHARED_NOTICE_NO_NAMES)
-        self.assertEqual(ur.shared_notice({"UNIO_INBOX_SHARE_PROGRAMS": "0"}, windows=False),
-                         ur.SHARED_NOTICE_NO_NAMES)
+        for off in ("0", "off", "False"):
+            self.assertEqual(ur.shared_notice({"UNIO_INBOX_SHARE_PROGRAMS": off}, windows=False),
+                             ur.SHARED_NOTICE_NO_NAMES, off)
         self.assertIsNone(ur.shared_notice({"UNIO_INBOX_VITALS": "off"}, windows=False))
         self.assertNotIn("programas", ur.SHARED_NOTICE_NO_NAMES)
 

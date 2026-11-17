@@ -80,7 +80,10 @@ class Scanning(unittest.TestCase):
 
     def test_the_opt_out(self):
         self.assertTrue(inbox.share_programs({}))
-        self.assertFalse(inbox.share_programs({"UNIO_INBOX_SHARE_PROGRAMS": "0"}))
+        for off in ("0", "off", "OFF", " false ", "no"):
+            self.assertFalse(inbox.share_programs({"UNIO_INBOX_SHARE_PROGRAMS": off}), off)
+        for on in ("1", "on", ""):
+            self.assertTrue(inbox.share_programs({"UNIO_INBOX_SHARE_PROGRAMS": on}), on)
 
     def test_windows_names_no_programs(self):
         self.assertIsNone(inbox.program_scanner("win32"))

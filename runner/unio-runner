@@ -1235,7 +1235,7 @@ def shared_notice(env_values, windows=None):
     windows = os.name == "nt" if windows is None else windows
     if (env_values.get("UNIO_INBOX_VITALS") or "on").strip().lower() == "off":
         return None
-    if windows or env_values.get("UNIO_INBOX_SHARE_PROGRAMS", "").strip() == "0":
+    if windows or env_values.get("UNIO_INBOX_SHARE_PROGRAMS", "").strip().lower() in ("0", "off", "false", "no"):
         return SHARED_NOTICE_NO_NAMES
     return SHARED_NOTICE
 

@@ -1672,7 +1672,8 @@ class ProgramScan:
 
 
 def share_programs(env=None):
-    return (env if env is not None else os.environ).get("UNIO_INBOX_SHARE_PROGRAMS", "").strip() != "0"
+    value = (env if env is not None else os.environ).get("UNIO_INBOX_SHARE_PROGRAMS", "")
+    return value.strip().lower() not in ("0", "off", "false", "no")
 
 
 def decimal_br(value, digits=1):
