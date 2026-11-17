@@ -1,6 +1,8 @@
 """What makes one answer slow outside the computer: Unio's calls timed and
 sorted, and the AI service's retries counted per run."""
 import errno
+import io
+import json
 import socket
 import unittest
 import urllib.error
@@ -195,6 +197,61 @@ class CallSampling(unittest.TestCase):
         with self.urlopen():
             self.assertEqual(self.api.call("GET", "/x"), (200, {}))
         self.assertEqual(self.health.hook_error, "RuntimeError: boom")
+
+
+def retry(error, status, delay=1000, **extra):
+    return {"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10, "retry_delay_ms": delay,
+            "error_status": status, "error": error, "session_id": "s", **extra}
+
+
+class RetryCredit(unittest.TestCase):
+    def test_overload_and_server_errors_are_the_ai_service(self):
+        for error, status in (("overloaded", 529), ("server_error", 500), ("unknown", 418)):
+            self.assertEqual(inbox.retry_cause(retry(error, status)), "slow_ai")
+
+    def test_limits_and_sign_in_are_problems_of_their_own(self):
+        for error, status in (("rate_limit", 429), ("authentication_failed", 401), ("cloud_credential_error", 403),
+                              ("rate_limit", None)):
+            self.assertIsNone(inbox.retry_cause(retry(error, status)))
+
+    def test_a_connection_error_is_the_network_only_when_unio_calls_failed_too(self):
+        self.assertEqual(inbox.retry_cause(retry("unknown", None)), "slow_ai")
+        self.assertEqual(inbox.retry_cause(retry("unknown", None), network_recent=True), "slow_network")
+
+
+class Proc:
+    def __init__(self, events):
+        self.stdout = [(json.dumps(e) + "\n").encode() for e in events]
+
+
+class RetryCounting(unittest.TestCase):
+    def read(self, events, network=False):
+        s = inbox.Session()
+        h = inbox.ApiHealth()
+        if network:
+            h.record("network", 0.1)
+        with mock.patch.object(inbox, "API_HEALTH", h):
+            inbox.Runner._read(Proc(events), s, io.BytesIO())
+        return s
+
+    def test_retries_are_counted_on_the_session(self):
+        s = self.read([retry("overloaded", 529, 2000), retry("rate_limit", 429, 50000),
+                       retry("unknown", None, 500), retry("overloaded", 529, "soon"),
+                       {"type": "result", "subtype": "success", "result": "ok"}])
+        self.assertEqual(s.retries, 4)
+        self.assertEqual(s.retry_errors, {"overloaded": 2, "rate_limit": 1, "unknown": 1})
+        self.assertEqual(s.retry_delay_ms, 52500)
+        self.assertEqual([(c["code"], c["delayMs"]) for c in s.retry_credits],
+                         [("slow_ai", 2000), ("slow_ai", 500), ("slow_ai", 0)])
+        self.assertEqual(s.result["subtype"], "success")
+
+    def test_a_connection_error_after_unio_network_failures_credits_the_network(self):
+        s = self.read([retry("unknown", None, 800)], network=True)
+        self.assertEqual([c["code"] for c in s.retry_credits], ["slow_network"])
+
+    def test_a_subagents_retry_is_not_the_runs(self):
+        s = self.read([retry("overloaded", 529, parent_tool_use_id="toolu_1")])
+        self.assertEqual(s.retries, 0)
 
 
 if __name__ == "__main__":

@@ -4167,6 +4167,23 @@ def build_needs_prompt(view, items, facts, today, zone, url=None, language="en")
     return "\n".join(lines) + "\n"
 
 
+RETRY_SLOW_ERRORS = {"overloaded", "server_error", "unknown"}
+# Already problem reasons of their own: usage_limit and signed_out.
+RETRY_IGNORED = {"rate_limit", "authentication_failed", "cloud_credential_error"}
+
+
+def retry_cause(event, network_recent=False):
+    """The slow code a system/api_retry event counts for, or None. A null
+    error_status is a connection error: the computer's network when Unio's calls
+    also failed on it lately, else the AI service."""
+    error = event.get("error")
+    if error in RETRY_IGNORED:
+        return None
+    if event.get("error_status") is None:
+        return "slow_network" if network_recent else "slow_ai"
+    return "slow_ai" if error in RETRY_SLOW_ERRORS else None
+
+
 class Session:
     """One headless Claude Code run and what it printed. `required` must be
     offered at init; `allowed` is every tool it may be offered (None: the
@@ -4211,6 +4228,12 @@ class Session:
         self.violation = None
         # Set when a person stopped the run: their name, or "" when the server gives none.
         self.stopped_by = None
+        # system/api_retry events: how many, per error, their delays, and those
+        # retry_cause() credits as {"code", "delayMs", "at" (monotonic)}.
+        self.retries = 0
+        self.retry_errors = {}
+        self.retry_delay_ms = 0
+        self.retry_credits = []
 
     @property
     def bad_init(self):
@@ -4662,6 +4685,8 @@ class Runner:
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 Runner._check_init(proc, s, event)
+            elif kind == "system" and event.get("subtype") == "api_retry":
+                Runner._note_retry(s, event)
             elif kind in ("assistant", "user"):
                 content = (event.get("message") or {}).get("content")
                 for block in content if isinstance(content, list) else []:
@@ -4711,6 +4736,18 @@ class Runner:
                 s.rate_limits.update({name: {**w, "at": read_at} for name, w in rate_limits(event).items()})
             elif kind == "result":
                 s.result = event
+
+    @staticmethod
+    def _note_retry(s, event):
+        delay = event.get("retry_delay_ms")
+        delay = delay if isinstance(delay, int) and not isinstance(delay, bool) and delay > 0 else 0
+        error = str(event.get("error") or "unknown")[:40]
+        s.retries += 1
+        s.retry_errors[error] = s.retry_errors.get(error, 0) + 1
+        s.retry_delay_ms += delay
+        code = retry_cause(event, API_HEALTH.network_recent())
+        if code:
+            s.retry_credits.append({"code": code, "delayMs": delay, "at": time.monotonic()})
 
     @staticmethod
     def _check_web(proc, s, name, args):
