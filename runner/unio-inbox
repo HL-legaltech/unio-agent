@@ -2813,27 +2813,45 @@ class Mcp:
 def presence_change(body):
     """The part of a presence write the server stores at once when it changes."""
     body = body or {}
-    return body.get("state"), body.get("taskId"), body.get("itemKey")
+    return body.get("state"), body.get("taskId"), body.get("itemKey"), body.get("reason")
+
+
+# The states whose body carries the slow cause and the owner's detail (Presence.overlay).
+OVERLAID_STATES = ("idle", "working")
+
+
+def presence_quiet(body):
+    """A body without the owner's detail: a change to it alone waits for the heartbeat."""
+    if body and body.get("state") in OVERLAID_STATES:
+        return {k: v for k, v in body.items() if k != "message"}
+    return body
 
 
 class Presence:
     """This runner's row on the agent's page. A thread sends it: a change of
-    state, task or item goes out at once; one of step or message alone once
-    PRESENCE_SPACING has passed since the last write, the latest winning; and
-    an unchanged state is repeated as a heartbeat so the row stays online (the
-    page calls a presence offline after 90 s of silence)."""
+    state, task, item or reason goes out at once; one of step or message alone
+    once PRESENCE_SPACING has passed since the last write, the latest winning,
+    and the owner's slow-answer detail alone only with the heartbeat; and an
+    unchanged state is repeated as a heartbeat so the row stays online (the
+    page calls a presence offline after 90 s of silence).
 
-    def __init__(self, cfg):
+    The Vitals thread lays the slow cause over an idle or working body with
+    refresh(); set() callers never see it."""
+
+    def __init__(self, cfg, log=None):
         self.cfg = cfg
+        self.log = log
         self.id = None
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.want = None
+        self.extra = {}
         self.sent = None
         self.sent_at = None
         self.report = {}
         self.thread = None
         self.closing = False
+        self.loop_error = None
 
     @property
     def heartbeat(self):
@@ -2854,32 +2872,73 @@ class Presence:
             self.want = body
         self.wake.set()
 
+    def overlay(self, reason, message):
+        """The slow cause, and the owner's detail beside it, that an idle or
+        working body carries from now on; (None, None) clears both."""
+        with self.lock:
+            self.extra = {"reason": reason, **({"message": str(message)[:300]} if message else {})} \
+                if reason else {}
+
+    def refresh(self, reason, message):
+        """overlay(), sent as soon as the spacing rules allow: Vitals' on_change."""
+        self.overlay(reason, message)
+        self.wake.set()
+
     def status(self):
         with self.lock:
             return {"id": self.id, **self.report} if self.id else None
 
-    def _wait(self):
-        """Seconds until the next write is due; None while there is nothing to send."""
+    def _body(self):
+        """What goes out: `want`, with the overlay in an idle or working state.
+        A cleared cause leaves both keys out, which the server stores as null
+        and an older one accepts."""
         if self.want is None:
             return None
-        if self.sent_at is None or presence_change(self.want) != presence_change(self.sent):
+        if self.want.get("state") not in OVERLAID_STATES:
+            return self.want
+        body = {k: v for k, v in self.want.items() if k not in ("reason", "message")}
+        body.update(self.extra)
+        return body
+
+    def _wait(self):
+        """Seconds until the next write is due; None while there is nothing to send."""
+        body = self._body()
+        if body is None:
+            return None
+        if self.sent_at is None or presence_change(body) != presence_change(self.sent):
             return 0
-        gap = PRESENCE_SPACING if self.want != self.sent else self.heartbeat
+        gap = PRESENCE_SPACING if presence_quiet(body) != presence_quiet(self.sent) else self.heartbeat
         return self.sent_at + gap - time.monotonic()
 
     def _loop(self):
         while not self.closing:
-            with self.lock:
-                wait = self._wait()
-            if wait is not None and wait <= 0:
-                self._send()
-                continue
+            try:
+                with self.lock:
+                    wait = self._wait()
+                if wait is not None and wait <= 0:
+                    self._send()
+                    continue
+            except Exception as e:  # the row must outlive any one bad write
+                self._failed(e)
+                wait = PRESENCE_SPACING
             self.wake.wait(wait)
             self.wake.clear()
 
+    def _failed(self, e):
+        error = short(f"{type(e).__name__}: {e}", 300)
+        with self.lock:
+            self.report.update(lastError=error, lastErrorAt=iso(utcnow()))
+            new = error != self.loop_error
+            self.loop_error = error
+        if new and self.log is not None:
+            try:
+                self.log("presence_error", error=error)
+            except Exception:  # nothing left to tell
+                pass
+
     def _send(self):
         with self.lock:
-            body = dict(self.want)
+            body = dict(self._body())
             self.sent_at = time.monotonic()
         token = self.cfg.token()
         try:
@@ -2909,9 +2968,12 @@ class Presence:
         if ended:
             self.set("ended")
         with self.lock:
-            due = self.want is not None and self.want != self.sent
+            due = self.want is not None and self._body() != self.sent
         if due:
-            self._send()
+            try:
+                self._send()
+            except Exception as e:  # the service still stops cleanly
+                self._failed(e)
 
 
 class Progress:
