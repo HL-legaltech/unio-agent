@@ -252,6 +252,38 @@ TOO_LARGE_REPLY = {
     "pt-BR": ("**Este pedido é grande demais para uma resposta automática.** "
               "Faça uma pergunta mais específica ou leve-o para uma sessão de código."),
 }
+# Instead of TOO_LARGE_REPLY when a reply ran out of time while a slow cause
+# held (timeout_cause): fixed copy around one SLOW_SENTENCES line, never a
+# figure, a program name or the host.
+SLOW_TIMEOUT_REPLY = {
+    "en": "**I could not answer in time.** {cause} Mention me again in a few minutes.",
+    "pt-BR": "**Não consegui responder a tempo.** {cause} Me chame de novo em alguns minutos.",
+}
+# The member sentence of each slow cause; the pt-BR lines are the web app's.
+SLOW_SENTENCES = {
+    "en": {
+        "slow_network": "The internet connection of the agent's computer is unstable.",
+        "slow_unio": "The connection between the agent's computer and Unio is slow.",
+        "slow_ai": "The AI service is unstable, and the agent is trying again.",
+        "low_disk_space": "The agent's computer is almost out of disk space.",
+        "slow_memory": "The agent is short of memory to work at its normal pace.",
+        "slow_disk": "The disk of the agent's computer is overloaded.",
+        "slow_cpu": "The processor of the agent's computer is overloaded.",
+        "power_saving": "The agent's computer reduced its performance to save energy or cool down.",
+        "updating_code": "The agent is downloading the latest version of the code before answering.",
+    },
+    "pt-BR": {
+        "slow_network": "A conexão de internet do computador do agente está instável.",
+        "slow_unio": "A comunicação entre o computador do agente e o Unio está lenta.",
+        "slow_ai": "O serviço de IA está instável, e o agente está tentando de novo.",
+        "low_disk_space": "O computador do agente está quase sem espaço em disco.",
+        "slow_memory": "Falta memória para o agente trabalhar no ritmo normal.",
+        "slow_disk": "O disco do computador do agente está sobrecarregado.",
+        "slow_cpu": "O processador do computador do agente está sobrecarregado.",
+        "power_saving": "O computador do agente reduziu o desempenho para economizar energia ou esfriar.",
+        "updating_code": "O agente está baixando a versão mais recente do código antes de responder.",
+    },
+}
 # Instead of TOO_LARGE_REPLY, or of silence, when a run made a project and stopped
 # before answering: whoever asked would otherwise not know it exists.
 PROJECT_MADE_REPLY = {
@@ -5859,11 +5891,17 @@ class Runner:
         if v.kind == "too_large":
             outcome = written_outcome(s.succeeded)
             note_error = None
+            # Only a reply that ran out of time: a stop, the web check or the turn cap is no slowness.
+            cause = timeout_cause(slow_run, ai_retry_delay(s.retry_credits)) if s.timed_out else None
             if not s.succeeded & COMMENT_WRITES:
-                note = project_note(s, self.language) or TOO_LARGE_REPLY[self.language]
-                note_error = self.reply(api, item, note, f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE, wire,
-                          error=v.error, noteError=note_error)
+                text = project_note(s, self.language) or (
+                    SLOW_TIMEOUT_REPLY[self.language].format(cause=SLOW_SENTENCES[self.language][cause]) if cause
+                    else TOO_LARGE_REPLY[self.language])
+                note_error = self.reply(api, item, text, f"unio-inbox:note:{key}:{claim['claimId']}")
+            # The complete allowlist has no reason field: the code travels in the note.
+            note = f"timed out ({cause})" if cause else TOO_LARGE_NOTE
+            self.complete(api, item, claim, h, base, stats, outcome, note, wire, error=v.error, noteError=note_error,
+                          cause=cause)
             return "continue"
 
         if v.kind == "ok":
