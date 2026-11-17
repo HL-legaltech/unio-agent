@@ -1713,6 +1713,382 @@ def owner_message(codes, view, programs=None):
     return text or None
 
 
+VITALS_WRITE_EVERY = 30
+VITALS_EPISODES = 5
+SCAN_EVERY = 60
+MESSAGE_EVERY = 60
+# A credited retry holds its cause for the rest of the run and this long after.
+RETRY_HOLD = 120
+STALL_OF = {"slow_memory": "memory", "slow_disk": "io", "slow_cpu": "cpu"}
+STALL_THRESHOLDS = {"memory": 0.10, "io": 0.10, "cpu": 0.20}
+TIMEOUT_STALL = 0.15
+TIMEOUT_RETRY_MS = 60000
+TIMEOUT_HELD = 60
+TIMEOUT_HELD_SHARE = 0.25
+NEVER_CREDITED = {"updating_code", "low_disk_space"}
+
+
+def ai_retry_delay(credits):
+    return sum(c.get("delayMs") or 0 for c in credits or () if c.get("code") == "slow_ai")
+
+
+def timeout_cause(run, ai_delay_ms=0):
+    """The cause a reply that ran out of time is put down to, or None. `run` is
+    Vitals.run_end()'s summary. A cause seen in the run counts when the bot's
+    own stall of its resource was 15 % of the run, when slow_ai's credited
+    retries waited 60 s in all, or when it held for max(60 s, 25 % of the
+    run). The refresh and disk space never explain a timeout."""
+    if not run:
+        return None
+    wall, held, stall = run.get("wallS") or 0, run.get("causeS") or {}, run.get("stall") or {}
+    credited = []
+    for code in run.get("slow") or ():
+        if code in NEVER_CREDITED:
+            continue
+        if held.get(code, 0) >= max(TIMEOUT_HELD, TIMEOUT_HELD_SHARE * wall) \
+                or (code in STALL_OF and (stall.get(STALL_OF[code]) or 0) >= TIMEOUT_STALL) \
+                or (code == "slow_ai" and ai_delay_ms >= TIMEOUT_RETRY_MS):
+            credited.append(code)
+    order = slow_order(credited)
+    return order[0] if order else None
+
+
+def _psi_point(sample):
+    if not sample or "psi" not in sample:
+        return None
+    return {"at": sample["at"], "source": sample.get("psiSource"), "psi": dict(sample["psi"]),
+            "sysPsi": dict(sample.get("sysPsi") or {})}
+
+
+def _gb(n):
+    return round(n / GIB, 1) if isinstance(n, (int, float)) else None
+
+
+class Vitals:
+    """The computer's vitals on a thread of their own: a sample every 5 s, the
+    causes they add up to, and what to show for them.
+
+    It never raises: a failing signal or step is logged once. `on_change(reason,
+    message)` is called, outside the Vitals lock, when the slow reason or the
+    owner's detail changes: the working reason during a run (run_start() to
+    run_end()), else the idle one. The main thread brackets the pre-claim
+    refresh with stage("refresh") and stage(None), and hands each run's credited
+    retries over with note_retries(). vitals.json in the state folder gets
+    snapshot() at most every 30 s."""
+
+    def __init__(self, state_dir, log=None, platform=None, reader=None, clock=time.monotonic, env=None,
+                 health=None, scan=None, on_change=None):
+        self.dir = Path(state_dir)
+        self.file = self.dir / "vitals.json"
+        self.log_fn = log
+        self.platform = platform_name(platform)
+        self.reader = reader
+        self.clock = clock
+        self.health = health if health is not None else API_HEALTH
+        scan = program_scanner(platform) if scan is None else scan
+        self.scan = ProgramScan(scan) if scan and share_programs(env) else None
+        self.on_change = on_change
+        self.engine = CauseEngine()
+        self.lock = threading.Lock()
+        # Keeps on_change calls in order; taken before, never inside, self.lock.
+        self.publish_lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = None
+        self.stage_at = None
+        self.run = None
+        self.retry_until = {}
+        self.extra_since = {}
+        self.episodes = deque(maxlen=VITALS_EPISODES)
+        self.logged = set()
+        self.written_at = None
+        self.programs = None
+        self.programs_at = None
+        self.message = None
+        self.message_at = None
+        self.message_codes = None
+        self.reported = (None, None)
+        self.cap_bytes = None
+
+    def start(self):
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._loop, name="unio-vitals", daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=VITALS_TICK + SCAN_DEADLINE + 1)
+        self._write(self.clock())
+
+    def _loop(self):
+        while not self.stopped.is_set():
+            self.tick()
+            self.stopped.wait(VITALS_TICK)
+
+    def _log(self, event, **fields):
+        if self.log_fn is None:
+            return
+        try:
+            self.log_fn(event, **fields)
+        except Exception:  # logging must never stop the sampler
+            pass
+
+    def _once(self, key, event, **fields):
+        if key not in self.logged:
+            self.logged.add(key)
+            self._log(event, **fields)
+
+    def _failed(self, what, e):
+        self._once("error:" + what, "vitals_error", what=what, error=short(f"{type(e).__name__}: {e}", 200))
+
+    def tick(self, now=None):
+        try:
+            self._tick(self.clock() if now is None else now)
+        except Exception as e:  # the sampler outlives any one bad reading
+            self._failed("tick", e)
+
+    def _tick(self, now):
+        if self.reader is None:
+            self.reader = vitals_reader(self.dir, self.platform)
+        sample = self.reader.sample()
+        for name, why in list(self.reader.off.items()) + list(self.reader.failed.items()):
+            self._once("signal:" + name, "vitals_signal_off", signal=name, error=why)
+        if self.health.hook_error:
+            self._once("error:api_timing", "vitals_error", what="api_timing", error=self.health.hook_error)
+        with self.lock:
+            changes = self.engine.add(sample, now)
+            self.cap_bytes = sample.get("cap") or self.cap_bytes
+            self.health.stalled = bool(self.engine.stalled())
+            changes += self._extra_episodes(now)
+            causes = self._causes(now)
+            if self.run is not None:
+                self._account(now, causes)
+            wall = iso(utcnow())
+            for kind, code, fields in changes:
+                if kind == "slow_end":
+                    self.episodes.append({"code": code, "endedAt": wall, **fields})
+            started = any(kind == "slow_start" for kind, _, _ in changes)
+            machine = any(code in MACHINE_CODES for code in causes)
+            if not machine:
+                self.programs = self.programs_at = None
+            scan_due = bool(self.scan and machine and (started or self.programs_at is None
+                                                       or now - self.programs_at >= SCAN_EVERY))
+        for kind, code, fields in changes:
+            self._log(kind, code=code, **fields)
+        if scan_due:
+            programs = self.scan.run()
+            with self.lock:
+                self.programs_at = now
+                self.programs = programs if programs is not None else self.programs
+        self._publish(now, rebuild=started or scan_due)
+        if self.written_at is None or now - self.written_at >= VITALS_WRITE_EVERY:
+            self._write(now)
+
+    def _extra(self, now):
+        """The causes the engine does not hold: Unio's calls, the AI service's
+        retries, and a pre-claim refresh past REFRESH_SLOW."""
+        codes = set(self.health.causes())
+        codes.update(c for c, until in self.retry_until.items() if until > now)
+        if self.run is not None:
+            codes.update(self.run["retryCodes"])
+        if self.stage_at and self.stage_at[0] == "refresh" and now - self.stage_at[1] > REFRESH_SLOW:
+            codes.add("updating_code")
+        return codes
+
+    def _extra_episodes(self, now):
+        live, changes = self._extra(now), []
+        for code in sorted(live - set(self.extra_since)):
+            self.extra_since[code] = now
+            changes.append(("slow_start", code, {}))
+        for code in sorted(set(self.extra_since) - live):
+            changes.append(("slow_end", code, {"durationS": round(now - self.extra_since.pop(code))}))
+        return changes
+
+    def _causes(self, now):
+        out = dict(self.engine.causes())
+        for code in self._extra(now):
+            out.setdefault(code, self.extra_since.get(code, now))
+        return out
+
+    def _account(self, now, causes):
+        run = self.run
+        if run["psi0"] is None:
+            run["psi0"] = _psi_point(self.engine.latest())
+        step = max(0.0, now - run["tick"])
+        # Each interval goes to the causes active at its start.
+        for code in run["prev"]:
+            run["causeS"][code] = run["causeS"].get(code, 0) + step
+        run["tick"], run["prev"] = now, set(causes)
+        run["seen"].update(causes)
+
+    def _stall(self, run):
+        """The bot's stall shares since the claim: memory and io full, cpu some."""
+        p0, p1 = run["psi0"], _psi_point(self.engine.latest())
+        if not p0 or not p1 or p0["source"] != p1["source"] or p1["at"] - p0["at"] < VITALS_TICK:
+            return {}
+        span = p1["at"] - p0["at"]
+        return {res: max(0.0, p1["psi"][res] - p0["psi"][res]) / span for res in STALL_THRESHOLDS
+                if res in p0["psi"] and res in p1["psi"]}
+
+    def _reason(self, now, causes):
+        stalled = self.engine.stalled()
+        run = self.run
+        if run is None:
+            idle = dict(self.engine.causes(idle=True))
+            if "updating_code" in causes:
+                idle["updating_code"] = causes["updating_code"]
+            return idle_cause(idle), slow_order(causes, stalled)
+        stall = self._stall(run)
+        evidence = {code for code, res in STALL_OF.items() if stall.get(res, 0) >= STALL_THRESHOLDS[res]}
+        evidence.update(run["retryCodes"])
+        evidence.update(code for code, seq in self.health.causes().items() if seq > run["seq"])
+        return working_cause(causes, evidence, now - run["start"], stalled), slow_order(causes, stalled)
+
+    def _view(self):
+        latest = self.engine.latest()
+        return {"mem": latest.get("mem"), "disk": latest.get("disk"), "values": dict(self.engine.values),
+                "cap": self.engine.cap, "capBytes": self.cap_bytes, "speedLimit": latest.get("speedLimit"),
+                "p90": self.health.p90(), "retries": self.run["retryCount"] if self.run else 0}
+
+    def _report(self, now, rebuild=False):
+        reason, codes = self._reason(now, self._causes(now))
+        if reason is None:
+            self.message = self.message_at = self.message_codes = None
+            return None, None
+        if rebuild or tuple(codes) != self.message_codes or self.message_at is None \
+                or now - self.message_at >= MESSAGE_EVERY:
+            self.message = owner_message(codes, self._view(), self.programs)
+            self.message_at, self.message_codes = now, tuple(codes)
+        return reason, self.message
+
+    def _publish(self, now, rebuild=False):
+        with self.publish_lock:
+            with self.lock:
+                report = self._report(now, rebuild)
+                changed = report != self.reported
+                self.reported = report
+            if changed and self.on_change is not None:
+                try:
+                    self.on_change(*report)
+                except Exception as e:  # presence trouble is presence's own
+                    self._failed("on_change", e)
+
+    def reason(self):
+        """(reason, message) as last reported."""
+        with self.lock:
+            return self.reported
+
+    def stage(self, name):
+        """stage("refresh") before the pre-claim refresh, stage(None) after it."""
+        try:
+            now = self.clock()
+            with self.lock:
+                ended = name is None and self.stage_at is not None
+                self.stage_at = (name, now) if name else None
+            if ended:
+                self._publish(now)
+        except Exception as e:
+            self._failed("stage", e)
+
+    def run_start(self):
+        try:
+            now = self.clock()
+            with self.lock:
+                self.run = {"start": now, "tick": now, "seq": self.health.seq,
+                            "psi0": _psi_point(self.engine.latest()), "causeS": {},
+                            "seen": set(self._causes(now)), "retryCodes": {}, "retryCount": 0}
+                self.run["prev"] = set(self.run["seen"])
+            self._publish(now)
+        except Exception as e:
+            self._failed("run_start", e)
+
+    def note_retries(self, credits):
+        """A run's Session.retry_credits; each call may repeat the earlier ones."""
+        try:
+            now = self.clock()
+            with self.lock:
+                if self.run is None:
+                    return
+                before = set(self.run["retryCodes"])
+                for c in credits or ():
+                    if c.get("code") in ("slow_ai", "slow_network"):
+                        self.run["retryCodes"].setdefault(c["code"], c.get("at", now))
+                self.run["retryCount"] = max(self.run["retryCount"], len(credits or ()))
+                new = set(self.run["retryCodes"]) != before
+            if new:
+                self._publish(now)
+        except Exception as e:
+            self._failed("note_retries", e)
+
+    def run_end(self):
+        """The run's summary for its item log line and timeout_cause(), or None:
+        {"wallS", "slow" (codes seen), "causeS" (seconds each held), "stall" (the
+        bot's shares since the claim), "psi" (stall seconds: bot, system)}."""
+        try:
+            now = self.clock()
+            with self.lock:
+                run = self.run
+                if run is None:
+                    return None
+                self._account(now, self._causes(now))
+                self.run = None
+                stall = self._stall(run)
+                p0, p1 = run["psi0"], _psi_point(self.engine.latest())
+                psi = {}
+                if p0 and p1 and p1["at"] > p0["at"]:
+                    if p0["source"] == p1["source"]:
+                        psi["source"] = p1["source"]
+                        psi["bot"] = {r: round(p1["psi"][r] - p0["psi"][r], 1) for r in p1["psi"] if r in p0["psi"]}
+                    if p0["sysPsi"] and p1["sysPsi"]:
+                        psi["system"] = {r: round(p1["sysPsi"][r] - p0["sysPsi"][r], 1)
+                                         for r in p1["sysPsi"] if r in p0["sysPsi"]}
+                for code in run["retryCodes"]:
+                    self.retry_until[code] = now + RETRY_HOLD
+                summary = {"wallS": round(now - run["start"], 1), "slow": slow_order(run["seen"]),
+                           "causeS": {c: round(v) for c, v in run["causeS"].items() if round(v)},
+                           "stall": {r: round(v, 3) for r, v in stall.items()}, "psi": psi}
+            self._publish(now)
+            return summary
+        except Exception as e:
+            self._failed("run_end", e)
+            return None
+
+    def snapshot(self):
+        """What vitals.json holds: the platform, the signals read, rounded
+        readings, the active causes with since, the reported reason and detail,
+        and the last episodes."""
+        now, wall = self.clock(), utcnow()
+        with self.lock:
+            latest = self.engine.latest()
+            causes = self._causes(now)
+            mem, disk = latest.get("mem") or {}, latest.get("disk") or {}
+            readings = {"memAvailGB": _gb(mem.get("avail")), "memTotalGB": _gb(mem.get("total")),
+                        "swapUsedPct": round(100 * (1 - mem["swapFree"] / mem["swapTotal"]))
+                        if mem.get("swapTotal") else None,
+                        "diskFreeGB": _gb(disk.get("free")), "diskTotalGB": _gb(disk.get("total")),
+                        "pressureLevel": latest.get("level"), "power": latest.get("power"),
+                        "speedLimit": latest.get("speedLimit"), "unioP90S": self.health.p90(),
+                        "shares": {k: round(v, 3) for k, v in self.engine.values.items() if v is not None}}
+            return {"v": 1, "at": iso(wall), "platform": self.platform,
+                    "signals": self.reader.signals() if self.reader else [],
+                    "off": dict(self.reader.off) if self.reader else {},
+                    "psiSource": latest.get("psiSource"),
+                    "readings": {k: v for k, v in readings.items() if v is not None},
+                    "causes": {c: {"since": iso(wall - timedelta(seconds=now - causes[c]))}
+                               for c in slow_order(causes, self.engine.stalled())},
+                    "atServiceCap": self.engine.cap, "reason": self.reported[0], "message": self.reported[1],
+                    "episodes": list(self.episodes)}
+
+    def _write(self, now):
+        try:
+            if not self.dir.is_dir():
+                return
+            write_atomic(self.file, json.dumps(self.snapshot(), ensure_ascii=False, indent=2) + "\n")
+            self.written_at = now
+        except Exception as e:
+            self._failed("vitals.json", e)
+
+
 def project_slugs(cwd):
     """The names Claude Code (2.1.287) may give the project directory of a session
     run in `cwd`: every character outside [a-zA-Z0-9] becomes '-', and a name
@@ -2662,6 +3038,9 @@ class Progress:
         return False
 
 
+LOG_LOCK = threading.Lock()
+
+
 class State:
     def __init__(self, cfg):
         self.dir = cfg.state_dir
@@ -2743,13 +3122,15 @@ class State:
 
     def log(self, event, **fields):
         entry = {"at": iso(utcnow()), "event": event, **{k: v for k, v in fields.items() if v is not None}}
-        try:
-            if self.log_file.stat().st_size >= LOG_MAX_BYTES:
-                replace_file(self.log_file, self.log_file.with_name("log.jsonl.1"))
-        except OSError:
-            pass  # missing, or held open on Windows: this line goes on the current file
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # The Vitals thread logs too, and a rotation between two writers loses lines.
+        with LOG_LOCK:
+            try:
+                if self.log_file.stat().st_size >= LOG_MAX_BYTES:
+                    replace_file(self.log_file, self.log_file.with_name("log.jsonl.1"))
+            except OSError:
+                pass  # missing, or held open on Windows: this line goes on the current file
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     @staticmethod
     def record_error(h, message):
