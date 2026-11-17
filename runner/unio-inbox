@@ -120,6 +120,9 @@ UNIO_INBOX_RESEARCH_DAILY_RUNS (8 over any 24 h) and UNIO_INBOX_RESEARCH_MODEL
 UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
 UNIO_INBOX_MEMORY_FLOOR_GIB (a profile on Linux; default none): GiB of memory
 available below which answers wait.
+UNIO_INBOX_VITALS (on or off; default on): off reads none of the computer's
+vitals and reports no slow-answer cause. UNIO_INBOX_SHARE_PROGRAMS=0 leaves the
+heaviest programs' names out of the detail the agent's page gets.
 UNIO_REVIEW (off, observe or on; default off), UNIO_REVIEW_WINDOW (06:30-09:00),
 UNIO_REVIEW_TZ (America/Sao_Paulo) and UNIO_REVIEW_MODEL (default: the inbox's).
 UNIO_NEEDS (off, observe or on; default off), UNIO_NEEDS_INTERVAL (15 min between
@@ -2314,6 +2317,9 @@ class Config:
         self.api = (env.get("UNIO_API_URL") or "https://api.unio.so/v1").rstrip("/")
         self.interval = float(env.get("UNIO_INBOX_INTERVAL") or 30)
         self.timeout = float(env.get("UNIO_INBOX_TIMEOUT") or 600)
+        # Off in the tests that drive a whole run: the test machine's load must
+        # never reach a presence body or a reply.
+        self.vitals = (env.get("UNIO_INBOX_VITALS") or "on").strip().lower() != "off"
         self.max_turns = int(env.get("UNIO_INBOX_MAX_TURNS") or 30)
         self.max_budget = str(env.get("UNIO_INBOX_MAX_BUDGET_USD") or "1")
         self.max_budget_usd = float(self.max_budget)
@@ -4954,12 +4960,18 @@ class Verdict:
 
 
 class Runner:
-    def __init__(self, cfg):
+    def __init__(self, cfg, vitals=None):
+        """`vitals`: a Vitals to use instead of this system's (tests)."""
         self.cfg = cfg
         self.state = State(cfg)
         self.snapshots = Snapshots(cfg, self.state)
         self._teams, self._teams_at = None, None
-        self.presence = Presence(cfg)
+        self.presence = Presence(cfg, log=self.state.log)
+        if vitals is None and cfg.vitals:
+            vitals = Vitals(cfg.state_dir, log=self.state.log)
+        if vitals is not None and vitals.on_change is None:
+            vitals.on_change = self.presence.refresh
+        self.vitals = vitals
         self.acked = {}
         self.claim_presence = True
         self.ask_subjects = True
@@ -5012,6 +5024,10 @@ class Runner:
         env = {k: v for k, v in os.environ.items() if k not in SESSION_VARS}
         env.update(SESSION_ENV)
         return env
+
+    def vitals_call(self, name, *args):
+        """A Vitals hook, or None without one (Vitals' methods never raise)."""
+        return getattr(self.vitals, name)(*args) if self.vitals is not None else None
 
     def save(self, h):
         status = self.presence.status()
@@ -5676,7 +5692,11 @@ class Runner:
             return "continue"
 
         # Cloned or refreshed before the claim: a first clone can take minutes.
-        snapshots = self.snapshots.for_team((record.get("team") or {}).get("identifier"), h)
+        self.vitals_call("stage", "refresh")
+        try:
+            snapshots = self.snapshots.for_team((record.get("team") or {}).get("identifier"), h)
+        finally:
+            self.vitals_call("stage", None)
         if stopping.is_set():
             return "stop"
         claim = self.claim(api, item, base)
@@ -5716,9 +5736,11 @@ class Runner:
             if time.monotonic() > next_ack[0]:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
+            self.vitals_call("note_retries", s.retry_credits)
 
         # What a research run was: why it ran, when, where, and a gate that held it.
         research, triage = None, None
+        self.vitals_call("run_start")
         try:
             # Asked again after the claim: the snapshot refresh before it can take minutes.
             low = desk_memory(self.cfg.memory_floor)
@@ -5752,6 +5774,7 @@ class Runner:
                                       error=f"runner error: {type(e).__name__}: {short(e, 200)}")
         finally:
             h.pop("current", None)
+            slow_run = self.vitals_call("run_end")
         ev = s.result or {}
         if research:
             usd = self.charge(h, s, research["at"], "research", self.cfg.research_max_budget_usd)
@@ -5774,7 +5797,7 @@ class Runner:
                  "usage": run_usage(ev, usd if s.started else None),
                  "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
-                 "triage": triage}
+                 "triage": triage, "slow": (slow_run or {}).get("slow") or None}
         # What the receipt records of the run: every session of this claim.
         wire = {"usage": usage_body(merge_usage((triage or {}).get("usage"), stats["usage"]),
                                     merge_web((triage or {}).get("web"), stats["web"]), files=0)}
@@ -6414,6 +6437,8 @@ class Runner:
         if self.cfg.zone_note:
             self.state.log("zone_fallback", detail=self.cfg.zone_note)
         self.presence.start()
+        # On its own: Presence.start does nothing without a runner id.
+        self.vitals_call("start")
         moved = None
         while not stopping.is_set():
             if updater and updater.due(utcnow()):
@@ -6429,6 +6454,7 @@ class Runner:
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
                 self.save(h)
             stopping.wait(self.cfg.interval)
+        self.vitals_call("stop")
         # A restart for an update keeps the row online: the new process takes it over within seconds.
         self.presence.close(ended=not moved)
         with file_lock(self.state.lock_file) as held:
