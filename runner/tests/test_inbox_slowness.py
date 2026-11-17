@@ -55,6 +55,13 @@ class UnioCauses(unittest.TestCase):
         h.record("ok", 0.2, 200)
         self.assertIn("slow_network", h.causes())
 
+    def test_a_server_error_is_not_the_answer_slow_network_needs(self):
+        h, clock = health()
+        h.record("network", 0.1)
+        h.record("network", 0.1)
+        h.record("ok", 0.2, 502)
+        self.assertNotIn("slow_network", h.causes())
+
     def test_failures_older_than_two_minutes_do_not_count(self):
         h, clock = health()
         h.record("network", 0.1)

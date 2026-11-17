@@ -2577,8 +2577,8 @@ class ApiHealth:
     """How this runner's Unio calls fare, for slow_network and slow_unio. One
     per process behind its own lock: a new Api is built for each presence write.
 
-    slow_network: 2 network failures and 1 answer within 120 s. slow_unio: a
-    p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
+    slow_network: 2 network failures and 1 good answer within 120 s.
+    slow_unio: a p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
     their timeout), or 2 answers of 5xx or refusals beside 1 good answer
     within 120 s. Both clear after 5 calls in a row that answer well in under
     1 s. While the bot's own memory or io stalls, read and connect timeouts are
@@ -2598,7 +2598,6 @@ class ApiHealth:
         self.latencies = deque(maxlen=10)
         self.network = deque()
         self.unio = deque()
-        self.answered = deque()
         self.good = deque()
         self.fast = 0
 
@@ -2606,12 +2605,11 @@ class ApiHealth:
         with self.lock:
             now = self.clock() if now is None else now
             self.seq += 1
-            for q in (self.network, self.unio, self.answered, self.good):
+            for q in (self.network, self.unio, self.good):
                 while q and q[0] < now - API_WINDOW:
                     q.popleft()
             bad = None
             if kind == "ok":
-                self.answered.append(now)
                 self.latencies.append(seconds)
                 if status >= 500:
                     self.unio.append(now)
@@ -2636,7 +2634,7 @@ class ApiHealth:
                 self.active = {}
                 self._forget()
                 return
-            if len(self.network) >= 2 and self.answered:
+            if len(self.network) >= 2 and self.good:
                 self.active.setdefault("slow_network", self.seq)
             ordered = sorted(self.latencies)
             p90 = ordered[math.ceil(0.9 * len(ordered)) - 1] if ordered else 0
