@@ -282,7 +282,7 @@ def start(org):
     log = log_file(org)
     mark = size(log)
     # A test's runner must never update the checkout the tests run from.
-    env = dict(os.environ, PYTHONUTF8="1", UNIO_RUNNER_AUTOUPDATE="off")
+    env = dict(os.environ, PYTHONUTF8="1", UNIO_RUNNER_AUTOUPDATE="off", UNIO_INBOX_VITALS="off")
     if os.name == "nt":
         flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
     else:

@@ -120,6 +120,9 @@ UNIO_INBOX_RESEARCH_DAILY_RUNS (8 over any 24 h) and UNIO_INBOX_RESEARCH_MODEL
 UNIO_RUNNER_AUTOUPDATE (on or off; default on): a profile's self-update.
 UNIO_INBOX_MEMORY_FLOOR_GIB (a profile on Linux; default none): GiB of memory
 available below which answers wait.
+UNIO_INBOX_VITALS (on or off; default on): off reads none of the computer's
+vitals and reports no slow-answer cause. UNIO_INBOX_SHARE_PROGRAMS=0 leaves the
+heaviest programs' names out of the detail the agent's page gets.
 UNIO_REVIEW (off, observe or on; default off), UNIO_REVIEW_WINDOW (06:30-09:00),
 UNIO_REVIEW_TZ (America/Sao_Paulo) and UNIO_REVIEW_MODEL (default: the inbox's).
 UNIO_NEEDS (off, observe or on; default off), UNIO_NEEDS_INTERVAL (15 min between
@@ -134,6 +137,8 @@ closing and the runner finishing it).
 """
 import argparse
 import csv
+import errno
+import fnmatch
 import hashlib
 import io
 import ipaddress
@@ -157,6 +162,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -167,10 +173,16 @@ if os.name == "nt":
 else:
     import fcntl
 
+try:
+    import ctypes
+    import ctypes.util
+except ImportError:  # a Python built without libffi: macOS and Windows then read only the disk
+    ctypes = None
+
 # Equal to runner/VERSION, which the self-update compares (a test checks). The
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project"
 OUTCOMES = ("replied", "reacted", "acted", "skipped")
@@ -239,6 +251,38 @@ TOO_LARGE_REPLY = {
            "Ask a narrower question, or take it to a coding session."),
     "pt-BR": ("**Este pedido é grande demais para uma resposta automática.** "
               "Faça uma pergunta mais específica ou leve-o para uma sessão de código."),
+}
+# Instead of TOO_LARGE_REPLY when a reply ran out of time while a slow cause
+# held (timeout_cause): fixed copy around one SLOW_SENTENCES line, never a
+# figure, a program name or the host.
+SLOW_TIMEOUT_REPLY = {
+    "en": "**I could not answer in time.** {cause} Mention me again in a few minutes.",
+    "pt-BR": "**Não consegui responder a tempo.** {cause} Me chame de novo em alguns minutos.",
+}
+# The member sentence of each slow cause; the pt-BR lines are the web app's.
+SLOW_SENTENCES = {
+    "en": {
+        "slow_network": "The internet connection of the agent's computer is unstable.",
+        "slow_unio": "The connection between the agent's computer and Unio is slow.",
+        "slow_ai": "The AI service is unstable, and the agent is trying again.",
+        "low_disk_space": "The agent's computer is almost out of disk space.",
+        "slow_memory": "The agent is short of memory to work at its normal pace.",
+        "slow_disk": "The disk of the agent's computer is overloaded.",
+        "slow_cpu": "The processor of the agent's computer is overloaded.",
+        "power_saving": "The agent's computer reduced its performance to save energy or cool down.",
+        "updating_code": "The agent is downloading the latest version of the code before answering.",
+    },
+    "pt-BR": {
+        "slow_network": "A conexão de internet do computador do agente está instável.",
+        "slow_unio": "A comunicação entre o computador do agente e o Unio está lenta.",
+        "slow_ai": "O serviço de IA está instável, e o agente está tentando de novo.",
+        "low_disk_space": "O computador do agente está quase sem espaço em disco.",
+        "slow_memory": "Falta memória para o agente trabalhar no ritmo normal.",
+        "slow_disk": "O disco do computador do agente está sobrecarregado.",
+        "slow_cpu": "O processador do computador do agente está sobrecarregado.",
+        "power_saving": "O computador do agente reduziu o desempenho para economizar energia ou esfriar.",
+        "updating_code": "O agente está baixando a versão mais recente do código antes de responder.",
+    },
 }
 # Instead of TOO_LARGE_REPLY, or of silence, when a run made a project and stopped
 # before answering: whoever asked would otherwise not know it exists.
@@ -355,8 +399,9 @@ FAIL_CAUSES = {
 }
 # The reasons the server validates and the web app words in Portuguese.
 # The runner's finer ones travel as `other`, their detail in the note or message.
+# A server older than memory_pressure stores it as `other`, as it got before.
 REASON_CODES = {"signed_out", "usage_limit", "model_unavailable", "unio_unavailable", "unexpected_tools",
-                "budget", "repo_unavailable", "other"}
+                "budget", "repo_unavailable", "memory_pressure", "other"}
 # What people may read about a problem. Never raw output: it can carry paths and URLs.
 PROBLEMS = {
     "signed_out": "Claude Code is not signed in",
@@ -877,6 +922,1216 @@ def desk_memory(floor=None):
     return None
 
 
+GIB = 2**30
+VITALS_TICK = 5
+# The service unit whose cgroup is the bot's own; any other cgroup reads the system's PSI.
+RUNNER_UNIT = "unio-runner@*.service"
+PMSET_EVERY = 300
+PMSET_TIMEOUT = 3
+
+if ctypes is not None:
+    # Fixed-width fields, never ctypes.wintypes: off Windows a DWORD there is 8 bytes.
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+    class SYSTEM_POWER_STATUS(ctypes.Structure):
+        _fields_ = [("ACLineStatus", ctypes.c_uint8), ("BatteryFlag", ctypes.c_uint8),
+                    ("BatteryLifePercent", ctypes.c_uint8), ("SystemStatusFlag", ctypes.c_uint8),
+                    ("BatteryLifeTime", ctypes.c_uint32), ("BatteryFullLifeTime", ctypes.c_uint32)]
+
+    class XSW_USAGE(ctypes.Structure):
+        _fields_ = [("xsu_total", ctypes.c_uint64), ("xsu_avail", ctypes.c_uint64), ("xsu_used", ctypes.c_uint64),
+                    ("xsu_pagesize", ctypes.c_uint32), ("xsu_encrypted", ctypes.c_uint32)]
+
+
+def read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def existing_dir(path):
+    """`path`, or its nearest folder that exists: disk_usage needs a real one."""
+    path = Path(path)
+    while not path.exists() and path.parent != path:
+        path = path.parent
+    return path
+
+
+def mount_path(text):
+    """A mountinfo field: spaces, tabs and backslashes come as octal escapes."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), text)
+
+
+def cgroup_dir(read_file):
+    """The cgroup2 folder of this process when a runner unit owns it, else None.
+    The mount comes from mountinfo: /sys/fs/cgroup is only the usual place."""
+    path = None
+    for line in read_file("/proc/self/cgroup").splitlines():
+        if line.startswith("0::"):
+            path = line[3:].strip()
+    if not path or not fnmatch.fnmatchcase(PurePosixPath(path).name, RUNNER_UNIT):
+        return None
+    for line in read_file("/proc/self/mountinfo").splitlines():
+        head, sep, tail = line.partition(" - ")
+        fields = head.split()
+        if not sep or len(fields) < 5 or tail.split()[:1] != ["cgroup2"]:
+            continue
+        root, mount = mount_path(fields[3]), mount_path(fields[4])
+        if root != "/" and (path == root or path.startswith(root + "/")):
+            path = path[len(root):] or "/"
+        return mount.rstrip("/") + path
+    return None
+
+
+def parse_psi(text):
+    """{"some": s, "full": s}: a pressure file's total= counters, in seconds."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and parts[0] in ("some", "full"):
+            for part in parts[1:]:
+                if part.startswith("total="):
+                    out[parts[0]] = int(part[6:]) / 1e6
+    return out
+
+
+def parse_proc_stat(text):
+    """CPU ticks (busy, iowait, total) and the running and blocked counts from /proc/stat."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if parts[:1] == ["cpu"]:
+            ticks = [int(v) for v in parts[1:9]]
+            ticks += [0] * (8 - len(ticks))
+            total = sum(ticks[:8])
+            out["cpu"] = {"busy": total - ticks[3] - ticks[4], "iowait": ticks[4], "total": total}
+        elif parts[:1] == ["procs_running"]:
+            out["running"] = int(parts[1])
+        elif parts[:1] == ["procs_blocked"]:
+            out["blocked"] = int(parts[1])
+    if "cpu" not in out:
+        raise ValueError("no cpu line")
+    return out
+
+
+def parse_keyed(text, keys, scale=1):
+    """The named counters of a "key value" file (/proc/vmstat, memory.events, /proc/meminfo)."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.replace(":", " ").split()
+        if len(parts) >= 2 and parts[0] in keys:
+            out[parts[0]] = int(parts[1]) * scale
+    missing = [k for k in keys if k not in out]
+    if missing:
+        raise ValueError("missing " + ", ".join(missing))
+    return out
+
+
+def parse_pmset(general, therm):
+    """{"lowPower", "speedLimit"} from `pmset -g` and `pmset -g therm`; None where
+    the line is absent (CPU_Speed_Limit is, on Apple Silicon), never a default."""
+    low = None
+    for line in (general or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in ("lowpowermode", "powermode"):
+            # powermode: 0 automatic, 1 low power, 2 high power.
+            on = parts[1].lower() in ("1", "low")
+            low = bool(low) or on
+    m = re.search(r"CPU_Speed_Limit\s*=\s*(\d+)", therm or "")
+    return {"lowPower": low, "speedLimit": int(m.group(1)) if m else None}
+
+
+def power_state(pm):
+    if pm.get("lowPower") or (pm.get("speedLimit") is not None and pm["speedLimit"] < 100):
+        return True
+    if pm.get("lowPower") is None and pm.get("speedLimit") is None:
+        return None
+    return False
+
+
+class VitalsReader:
+    """One platform's readings, as a dict per sample. A signal whose read fails
+    is switched off (`off` keeps why) and never raises; `retry` signals stay on."""
+
+    platform = "other"
+
+    def __init__(self, state_dir, disk_usage=shutil.disk_usage):
+        self.state_dir = Path(state_dir)
+        self.disk_usage = disk_usage
+        self.off = {}
+        self.failed = {}
+        # The signals the latest sample read.
+        self.got = set()
+
+    def read(self, name, fn, retry=False):
+        if name in self.off:
+            return None
+        try:
+            value = fn()
+            self.got.add(name)
+            return value
+        except Exception as e:  # any failure is this signal's alone
+            why = short(f"{type(e).__name__}: {e}", 200)
+            if retry:
+                self.failed[name] = why
+            else:
+                self.off[name] = why
+            return None
+
+    def sample(self):
+        self.got = set()
+        out = {}
+        disk = self.read("disk", lambda: self.disk_usage(str(existing_dir(self.state_dir))))
+        if disk is not None:
+            out["disk"] = {"free": disk.free, "total": disk.total}
+        return out
+
+    def signals(self):
+        return sorted(self.got)
+
+
+class LinuxReader(VitalsReader):
+    platform = "linux"
+
+    def __init__(self, state_dir, read_file=read_text, disk_usage=shutil.disk_usage, ncpu=None):
+        super().__init__(state_dir, disk_usage)
+        self.read_file = read_file
+        self.ncpu = ncpu or self._cpus()
+        self.cgroup = self.read("cgroup", lambda: cgroup_dir(read_file))
+        self.off.pop("cgroup", None)
+        self.cap = None
+        if self.cgroup:
+            high = self.read("cap", lambda: read_file(self.cgroup + "/memory.high").strip())
+            self.off.pop("cap", None)
+            self.cap = int(high) if high and high.isdigit() else None
+
+    @staticmethod
+    def _cpus():
+        try:
+            return len(os.sched_getaffinity(0)) or 1
+        except (AttributeError, OSError):
+            return os.cpu_count() or 1
+
+    def _psi(self, cgroup=None):
+        kinds = {"memory": "full", "io": "full", "cpu": "some"}
+        path = (cgroup + "/{}.pressure") if cgroup else "/proc/pressure/{}"
+        return {res: parse_psi(self.read_file(path.format(res)))[kind] for res, kind in kinds.items()}
+
+    def _bot_psi(self):
+        if self.cgroup:
+            try:
+                return "cgroup", self._psi(self.cgroup)
+            except (OSError, KeyError, ValueError):
+                self.cgroup = None
+        return "system", self._psi()
+
+    def sample(self):
+        out = super().sample()
+        out["ncpu"] = self.ncpu
+        bot = self.read("psi", self._bot_psi)
+        if bot is not None:
+            out["psiSource"], out["psi"] = bot
+        system = bot[1] if bot and bot[0] == "system" else self.read("sysPsi", self._psi)
+        if system is not None:
+            out["sysPsi"] = system
+        st = self.read("stat", lambda: parse_proc_stat(self.read_file("/proc/stat")))
+        if st:
+            out.update(st)
+        vm = self.read("vm", lambda: parse_keyed(self.read_file("/proc/vmstat"), ("pswpin", "pgmajfault")))
+        if vm:
+            out["vm"] = vm
+        mi = self.read("mem", lambda: parse_keyed(self.read_file("/proc/meminfo"),
+                                                  ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"), 1024))
+        if mi:
+            out["mem"] = {"avail": mi["MemAvailable"], "total": mi["MemTotal"],
+                          "swapTotal": mi["SwapTotal"], "swapFree": mi["SwapFree"]}
+        if self.cgroup:
+            ev = self.read("events", lambda: parse_keyed(self.read_file(self.cgroup + "/memory.events"),
+                                                         ("high", "max")))
+            if ev:
+                out["events"] = ev["high"] + ev["max"]
+                out["cap"] = self.cap
+        return out
+
+
+def native_sysctl():
+    """sysctlbyname(3) as sysctl(name, ctype) -> a ctype value; raises OSError."""
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib", use_errno=True)
+    fn = libc.sysctlbyname
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
+                   ctypes.c_size_t]
+    fn.restype = ctypes.c_int
+
+    def sysctl(name, ctype):
+        value = ctype()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if fn(name.encode(), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), f"sysctlbyname {name}")
+        return value
+    return sysctl
+
+
+def run_pmset(*args):
+    return text_run(["pmset", "-g", *args], timeout=PMSET_TIMEOUT).stdout
+
+
+class MacReader(VitalsReader):
+    platform = "macos"
+
+    def __init__(self, state_dir, sysctl=None, loadavg=None, ncpu=None, pmset=run_pmset,
+                 disk_usage=shutil.disk_usage, clock=time.monotonic):
+        super().__init__(state_dir, disk_usage)
+        self.sysctl = sysctl or self.read("sysctl", native_sysctl)
+        self.loadavg = loadavg or os.getloadavg
+        self.ncpu = ncpu or os.cpu_count() or 1
+        self.pmset = pmset
+        self.clock = clock
+        self.power_at = None
+        self.power = None
+        self.speed_limit = None
+
+    def _sysctl(self, name, ctype):
+        if self.sysctl is None:
+            raise OSError("sysctlbyname is unavailable")
+        return self.sysctl(name, ctype)
+
+    def _power(self):
+        pm = parse_pmset(self.pmset(), self.pmset("therm"))
+        return power_state(pm), pm["speedLimit"]
+
+    def sample(self):
+        out = super().sample()
+        level = self.read("level", lambda: self._sysctl("kern.memorystatus_vm_pressure_level", ctypes.c_int32).value)
+        if level is not None:
+            out["level"] = level
+
+        def memory():
+            total = self._sysctl("hw.memsize", ctypes.c_uint64).value
+            free = self._sysctl("kern.memorystatus_level", ctypes.c_int32).value
+            return {"total": total, "avail": total * free // 100}
+        mem = self.read("mem", memory)
+        swap = self.read("swap", lambda: self._sysctl("vm.swapusage", XSW_USAGE))
+        if mem:
+            if swap is not None:
+                mem.update(swapTotal=swap.xsu_total, swapFree=swap.xsu_avail)
+            out["mem"] = mem
+        load = self.read("load", lambda: self.loadavg()[0] / self.ncpu)
+        if load is not None:
+            out["load"] = load
+        now = self.clock()
+        if self.power_at is None or now - self.power_at >= PMSET_EVERY:
+            self.power_at = now
+            got = self.read("power", self._power, retry=True)
+            # A failed read is unknown, not normal.
+            self.power, self.speed_limit = got if got else (None, None)
+        if self.power is not None:
+            out["power"] = self.power
+        if self.speed_limit is not None:
+            out["speedLimit"] = self.speed_limit
+        return out
+
+
+def native_kernel32():
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+    k.GlobalMemoryStatusEx.restype = ctypes.c_int32
+    k.GetSystemTimes.argtypes = [ctypes.POINTER(FILETIME)] * 3
+    k.GetSystemTimes.restype = ctypes.c_int32
+    k.GetSystemPowerStatus.argtypes = [ctypes.POINTER(SYSTEM_POWER_STATUS)]
+    k.GetSystemPowerStatus.restype = ctypes.c_int32
+    return k
+
+
+def win_failed(name):
+    return OSError(getattr(ctypes, "get_last_error", lambda: 0)(), f"{name} failed")
+
+
+class WinReader(VitalsReader):
+    platform = "windows"
+
+    def __init__(self, state_dir, kernel32=None, disk_usage=shutil.disk_usage):
+        super().__init__(state_dir, disk_usage)
+        self.k = kernel32 or self.read("kernel32", native_kernel32)
+
+    def _kernel32(self):
+        if self.k is None:
+            raise OSError("kernel32 is unavailable")
+        return self.k
+
+    def _memory(self):
+        m = MEMORYSTATUSEX()
+        m.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not self._kernel32().GlobalMemoryStatusEx(ctypes.pointer(m)):
+            raise win_failed("GlobalMemoryStatusEx")
+        return {"avail": m.ullAvailPhys, "total": m.ullTotalPhys, "pageAvail": m.ullAvailPageFile,
+                "pageTotal": m.ullTotalPageFile, "load": m.dwMemoryLoad}
+
+    def _cpu(self):
+        idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+        if not self._kernel32().GetSystemTimes(ctypes.pointer(idle), ctypes.pointer(kernel), ctypes.pointer(user)):
+            raise win_failed("GetSystemTimes")
+        ticks = [t.dwHighDateTime << 32 | t.dwLowDateTime for t in (idle, kernel, user)]
+        # Kernel time includes idle time.
+        total = ticks[1] + ticks[2]
+        return {"busy": total - ticks[0], "total": total}
+
+    def _power(self):
+        p = SYSTEM_POWER_STATUS()
+        if not self._kernel32().GetSystemPowerStatus(ctypes.pointer(p)):
+            raise win_failed("GetSystemPowerStatus")
+        return p.SystemStatusFlag == 1
+
+    def sample(self):
+        out = super().sample()
+        for name, fn in (("mem", self._memory), ("cpu", self._cpu), ("power", self._power)):
+            value = self.read(name, fn)
+            if value is not None:
+                out[name] = value
+        return out
+
+
+def vitals_reader(state_dir, platform=None):
+    """The reader for this system; an unknown one reads only the disk."""
+    name = platform_name(platform)
+    if name == "linux":
+        return LinuxReader(state_dir)
+    if ctypes is None:
+        return VitalsReader(state_dir)
+    if name == "macos":
+        return MacReader(state_dir)
+    if name == "windows":
+        return WinReader(state_dir)
+    return VitalsReader(state_dir)
+
+
+# What makes an answer slow, in the order members see them when several hold.
+SLOW_CODES = ("slow_network", "slow_unio", "slow_ai", "low_disk_space", "slow_memory", "slow_disk", "slow_cpu",
+              "power_saving", "updating_code")
+MACHINE_CODES = ("slow_memory", "slow_disk", "slow_cpu")
+IDLE_CODES = ("updating_code", "low_disk_space", "power_saving", "slow_memory")
+VITALS_WINDOW = 60
+VITALS_RECENT = 10
+VITALS_CLEAR = 300
+VITALS_CALM = 0.7
+# A run shows a cause it has no direct evidence for only after this long: ordinary
+# answers take p50 31 s and p90 64 s.
+WORKING_GRACE = 60
+REFRESH_SLOW = 10
+
+
+def _pick(sample, *keys):
+    for key in keys:
+        sample = sample.get(key) if isinstance(sample, dict) else None
+    return sample
+
+
+def _delta(ws, get):
+    """Δ of a counter over Δ of its clock between the first and last sample
+    that hold both; None without two such samples or after a reset."""
+    points = [p for p in (get(s) for s in ws) if p is not None and None not in p]
+    if len(points) < 2:
+        return None
+    num, den = points[-1][0] - points[0][0], points[-1][1] - points[0][1]
+    if den <= 0 or num < 0:
+        return None
+    return num / den
+
+
+def _gauge(ws, get, low=False):
+    """The window's mildest reading, so a gauge is bad only when every sample is."""
+    values = [v for v in (get(s) for s in ws) if v is not None]
+    if not values:
+        return None
+    return max(values) if low else min(values)
+
+
+def _psi_share(group, resource):
+    def value(ws):
+        # A switch from the cgroup to the system counters is a new clock.
+        source = ws[-1].get("psiSource") if ws else None
+        same = [s for s in ws if group != "psi" or s.get("psiSource") == source]
+        return _delta(same, lambda s: (_pick(s, group, resource), s["at"]))
+    return value
+
+
+def _no_psi(fn):
+    """The /proc/stat and /proc/vmstat fallbacks, used only on a kernel without PSI:
+    load and iowait count tasks in D state, which a disk storm alone fills."""
+    def value(ws):
+        if not ws or any("psi" in s for s in ws):
+            return None
+        return fn(ws)
+    return value
+
+
+def _busy(ws):
+    share = _delta(ws, lambda s: (_pick(s, "cpu", "busy"), _pick(s, "cpu", "total")))
+    if share is None:
+        return None
+    # Windows has no run queue to read: busy time alone decides there.
+    queued = _gauge(ws, lambda s: s["running"] - s["ncpu"] if "running" in s and "ncpu" in s else None)
+    return share if queued is None or queued > 0 else 0.0
+
+
+def _per_second(key):
+    return lambda ws: _delta(ws, lambda s: (_pick(s, "vm", key), s["at"]))
+
+
+def _system_memory(ws):
+    """System memory stall, counted only while memory or swap is nearly gone."""
+    share = _delta(ws, lambda s: (_pick(s, "sysPsi", "memory"), s["at"]))
+    mem = ws[-1].get("mem") if ws else None
+    if share is None or not isinstance(mem, dict) or "swapFree" not in mem:
+        return None
+    short_swap = mem["swapTotal"] > 0 and mem["swapFree"] < 0.1 * mem["swapTotal"]
+    return share if short_swap or mem["avail"] < 0.1 * mem["total"] else 0.0
+
+
+def _windows_memory(s):
+    mem = s.get("mem")
+    if not isinstance(mem, dict) or not mem.get("pageTotal") or not mem.get("total"):
+        return None
+    return min(mem["avail"] / max(GIB, 0.05 * mem["total"]), mem["pageAvail"] / (0.1 * mem["pageTotal"]))
+
+
+def _disk_room(s):
+    disk = s.get("disk")
+    if not isinstance(disk, dict) or not disk.get("total"):
+        return None
+    # Under 2 GiB free, or under 2 % and under 10 GiB.
+    return disk["free"] / max(2 * GIB, min(0.02 * disk["total"], 10 * GIB))
+
+
+def _flag(s):
+    return None if s.get("power") is None else float(bool(s["power"]))
+
+
+class Signal:
+    """One reading against one threshold. `low` signals are bad below it.
+    `instant` ones activate on a single sample (pmset answers every 5 min).
+    `idle` ones may name an idle runner's cause; `bot` ones measure the bot's
+    own stall (its cgroup, or the system's PSI when it has none)."""
+
+    def __init__(self, name, cause, threshold, value, low=False, instant=False, idle=False, bot=False):
+        self.name, self.cause, self.threshold, self.value = name, cause, threshold, value
+        self.low, self.instant, self.idle, self.bot = low, instant, idle, bot
+
+    def bad(self, v):
+        if v is None:
+            return False
+        return v < self.threshold if self.low else v >= self.threshold
+
+    def calm(self, v):
+        if v is None:
+            return True
+        return v >= self.threshold / VITALS_CALM if self.low else v < self.threshold * VITALS_CALM
+
+    def worse(self, a, b):
+        if a is None or b is None:
+            return a if b is None else b
+        return min(a, b) if self.low else max(a, b)
+
+
+SIGNALS = (
+    Signal("psi_memory", "slow_memory", 0.10, _psi_share("psi", "memory"), bot=True),
+    Signal("psi_io", "slow_disk", 0.10, _psi_share("psi", "io"), bot=True),
+    Signal("psi_cpu", "slow_cpu", 0.20, _psi_share("psi", "cpu"), bot=True),
+    Signal("cpu_busy", "slow_cpu", 0.90, _no_psi(_busy)),
+    Signal("blocked", "slow_disk", 2, _no_psi(lambda ws: _gauge(ws, lambda s: s.get("blocked")))),
+    Signal("iowait", "slow_disk", 0.20,
+           _no_psi(lambda ws: _delta(ws, lambda s: (_pick(s, "cpu", "iowait"), _pick(s, "cpu", "total"))))),
+    Signal("swap_ins", "slow_memory", 100, _no_psi(_per_second("pswpin"))),
+    Signal("major_faults", "slow_memory", 200, _no_psi(_per_second("pgmajfault"))),
+    Signal("system_memory", "slow_memory", 0.10, _system_memory, idle=True),
+    Signal("pressure_level", "slow_memory", 2, lambda ws: _gauge(ws, lambda s: s.get("level"))),
+    Signal("load", "slow_cpu", 1.5, lambda ws: _gauge(ws, lambda s: s.get("load"))),
+    Signal("windows_memory", "slow_memory", 1, lambda ws: _gauge(ws, _windows_memory, low=True), low=True),
+    Signal("disk_space", "low_disk_space", 1, lambda ws: _gauge(ws, _disk_room, low=True), low=True, idle=True),
+    Signal("power", "power_saving", 1, lambda ws: _gauge(ws, _flag), instant=True, idle=True),
+)
+
+
+def slow_order(codes, stalled=()):
+    """`codes` in the order members see them. A machine stall measured on the
+    bot goes ahead of Unio and the AI service, whose slowness it causes, and a
+    long refresh goes ahead of everything."""
+    order = list(SLOW_CODES)
+    for code in reversed([c for c in MACHINE_CODES if c in stalled]):
+        order.remove(code)
+        order.insert(1, code)
+    order.remove("updating_code")
+    order.insert(0, "updating_code")
+    return sorted((c for c in set(codes) if c in order), key=order.index)
+
+
+class CauseEngine:
+    """Samples in, causes out. Pure but for its own history: every call takes
+    `now` (monotonic seconds), so tests drive it without sleeping.
+
+    A signal activates when its share over the last 60 s and over the last
+    10 s both pass the threshold; it clears after 300 s continuously calm
+    (under 70 % of the threshold, or above it ÷ 0.7 for a low one), every
+    sample of a gauge included. A cause
+    holds while any of its signals does; each stretch is one episode."""
+
+    def __init__(self, signals=SIGNALS):
+        self.signals = signals
+        self.samples = []
+        self.active = {}
+        self.values = {}
+        self.recent = {}
+        self.episodes = {}
+        self.cap = False
+
+    def window(self, now, seconds):
+        # Half a tick of slack, so a 10 s window holds the sample taken 10 s ago.
+        start = now - seconds - VITALS_TICK / 2
+        return [s for s in self.samples if start <= s["at"] <= now]
+
+    def add(self, sample, now):
+        """Takes one sample; returns the episodes that began and ended, as
+        ("slow_start", code, fields) and ("slow_end", code, fields)."""
+        self.samples.append(dict(sample, at=now))
+        self.samples = self.window(now, VITALS_WINDOW)
+        w60, w10 = self.samples, self.window(now, VITALS_RECENT)
+        for sig in self.signals:
+            v60, v10 = sig.value(w60), sig.value(w10)
+            self.values[sig.name], self.recent[sig.name] = v60, v10
+            st = self.active.get(sig.name)
+            if st is None:
+                if sig.instant:
+                    hit = sig.bad(sig.value(w10[-1:]))
+                else:
+                    hit = len(w10) >= 2 and sig.bad(v60) and sig.bad(v10)
+                if hit:
+                    self.active[sig.name] = {"since": now, "calm": None, "peak": v10 if sig.instant else v60}
+                continue
+            st["peak"] = sig.worse(st["peak"], v10)
+            # v10 of a gauge is the window's mildest reading, so one calm sample
+            # per window would keep the clock running: every new sample must be
+            # calm too. A rate has no one-sample value, and calm(None) holds.
+            if not sig.calm(v10) or not sig.calm(sig.value(w10[-1:])):
+                st["calm"] = None
+            elif st["calm"] is None:
+                st["calm"] = now
+            elif now - st["calm"] >= VITALS_CLEAR:
+                del self.active[sig.name]
+        # memory.events high/max: cheap page-cache reclaim at the cap raises them,
+        # so they only say the service is at its own limit, never that it is slow.
+        events = [s["events"] for s in w60 if "events" in s]
+        self.cap = len(events) >= 2 and events[-1] > events[0]
+        return self._episodes(now)
+
+    def _episodes(self, now):
+        changes = []
+        live = self.causes()
+        for code, since in live.items():
+            sigs = {s.name: self.active[s.name]["peak"] for s in self.signals
+                    if s.cause == code and s.name in self.active}
+            ep = self.episodes.get(code)
+            if ep is None:
+                self.episodes[code] = {"since": since, "peak": dict(sigs)}
+                changes.append(("slow_start", code, {"signals": self._rounded(sigs)}))
+            else:
+                for name, peak in sigs.items():
+                    sig = next(s for s in self.signals if s.name == name)
+                    ep["peak"][name] = sig.worse(ep["peak"].get(name), peak)
+        for code in [c for c in self.episodes if c not in live]:
+            ep = self.episodes.pop(code)
+            changes.append(("slow_end", code, {"peak": self._rounded(ep["peak"]),
+                                               "durationS": round(now - ep["since"])}))
+        return changes
+
+    @staticmethod
+    def _rounded(values):
+        return {k: round(v, 3) for k, v in values.items() if v is not None}
+
+    def causes(self, idle=None, bot=None):
+        """{code: since} of the active causes, optionally only idle or bot signals'."""
+        out = {}
+        for sig in self.signals:
+            st = self.active.get(sig.name)
+            if st is None or (idle is not None and sig.idle != idle) or (bot is not None and sig.bot != bot):
+                continue
+            out[sig.cause] = min(out.get(sig.cause, st["since"]), st["since"])
+        return out
+
+    def stalled(self):
+        """The machine causes the bot's own memory or io stall holds now."""
+        return {c for c in self.causes(bot=True) if c in ("slow_memory", "slow_disk")}
+
+    def latest(self):
+        return self.samples[-1] if self.samples else {}
+
+
+def idle_cause(active):
+    """What an idle runner shows: the refresh, low disk space, power saving or a
+    system-wide memory stall, never a cause only a run can feel."""
+    order = slow_order(c for c in active if c in IDLE_CODES)
+    return order[0] if order else None
+
+
+def working_cause(active, evidence, elapsed, stalled=()):
+    """What a working run shows: an active cause this run has direct evidence
+    of, or any active cause once the run is WORKING_GRACE old."""
+    order = slow_order((c for c in active if c in evidence or elapsed >= WORKING_GRACE), stalled)
+    return order[0] if order else None
+
+
+SCAN_DEADLINE = 2
+SCAN_TOP = 3
+PROGRAM_CHARS = re.compile(r"[^A-Za-z0-9._+-]")
+DETAIL_CHARS = 300
+
+
+def clean_program(name):
+    """A process name fit for the agent's page: up to the first space or colon,
+    only [A-Za-z0-9._+-], at most 15 characters, and "?" when nothing is left."""
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", "replace")
+    name = re.split(r"[\s:]", str(name), maxsplit=1)[0]
+    return PROGRAM_CHARS.sub("", name)[:15] or "?"
+
+
+def scan_linux(proc="/proc", uid=None, page=None):
+    """{name: resident bytes} of this user's processes; other users' are never read."""
+    uid = os.getuid() if uid is None else uid
+    page = page or os.sysconf("SC_PAGE_SIZE")
+    sizes = {}
+    for entry in os.listdir(proc):
+        if not entry.isdigit():
+            continue
+        base = os.path.join(proc, entry)
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            with open(os.path.join(base, "statm"), "rb") as f:
+                rss = int(f.read().split()[1]) * page
+            with open(os.path.join(base, "comm"), "rb") as f:
+                name = clean_program(f.read())
+        except (OSError, ValueError, IndexError):
+            continue
+        sizes[name] = sizes.get(name, 0) + rss
+    return sizes
+
+
+def scan_ps(run=None, uid=None):
+    """macOS: ps for this user's processes alone. ucomm, never comm, which is a
+    full path that can carry the login name."""
+    uid = os.getuid() if uid is None else uid
+    run = run or (lambda argv: text_run(argv, timeout=SCAN_DEADLINE).stdout)
+    sizes = {}
+    for line in run(["ps", "-x", "-U", str(uid), "-o", "rss=,ucomm="]).splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            name = clean_program(parts[1])
+            sizes[name] = sizes.get(name, 0) + int(parts[0]) * 1024
+    return sizes
+
+
+def program_scanner(platform=None):
+    """This system's scan, or None (Windows names no programs in v1)."""
+    return {"linux": scan_linux, "macos": scan_ps}.get(platform_name(platform))
+
+
+class ProgramScan:
+    """The heaviest programs, scanned on a short-lived thread: statm reads can
+    block under thrash, and the sampler must keep its 5 s beat. A scan still
+    stuck from last time means no new one."""
+
+    def __init__(self, scan, deadline=SCAN_DEADLINE):
+        self.scan = scan
+        self.deadline = deadline
+        self.thread = None
+
+    def run(self):
+        """[(name, bytes)] of the top SCAN_TOP, or None when the scan failed or ran late."""
+        if self.thread is not None and self.thread.is_alive():
+            return None
+        box = {}
+
+        def work():
+            try:
+                box["sizes"] = self.scan()
+            except Exception as e:  # a scan's failure is only an empty detail
+                box["error"] = e
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+        self.thread.join(self.deadline)
+        if "sizes" not in box:
+            return None
+        top = sorted(box["sizes"].items(), key=lambda kv: (-kv[1], kv[0]))[:SCAN_TOP]
+        return [(clean_program(name), size) for name, size in top if size > 0]
+
+
+def share_programs(env=None):
+    value = (env if env is not None else os.environ).get("UNIO_INBOX_SHARE_PROGRAMS", "")
+    return value.strip().lower() not in ("0", "off", "false", "no")
+
+
+def decimal_br(value, digits=1):
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def gb_br(n):
+    return decimal_br(n / GIB)
+
+
+def percent(share):
+    return f"{round(share * 100)}%"
+
+
+def owner_message(codes, view, programs=None):
+    """The owner's detail beside a slow cause, always in pt-BR: figures rounded
+    to one decimal GB and whole percents, so jitter does not change the text.
+    Members never see it; the server shows it to the token owner and admins."""
+    values = view.get("values") or {}
+    mem, disk = view.get("mem") or {}, view.get("disk") or {}
+    parts = []
+    for code in codes:
+        if code == "slow_memory":
+            if mem.get("total"):
+                text = f"Memória: {gb_br(mem['avail'])} de {gb_br(mem['total'])} GB livres"
+                if mem.get("swapTotal"):
+                    text += f", swap {percent(1 - mem['swapFree'] / mem['swapTotal'])}"
+            else:
+                text = "Memória sob pressão"
+            if view.get("cap"):
+                cap = view.get("capBytes")
+                text += ", serviço no limite de memória" + (f" ({round(cap / 2**20)} MB)" if cap else "")
+            parts.append(text)
+        elif code == "slow_disk":
+            stall = values.get("psi_io") if values.get("psi_io") is not None else values.get("iowait")
+            if stall is not None:
+                parts.append(f"Disco em espera {percent(stall)} do tempo")
+            elif values.get("blocked") is not None:
+                parts.append(f"{round(values['blocked'])} processos esperando o disco")
+            else:
+                parts.append("Disco sobrecarregado")
+        elif code == "slow_cpu":
+            if values.get("psi_cpu") is not None:
+                parts.append(f"Processador em espera {percent(values['psi_cpu'])} do tempo")
+            elif values.get("cpu_busy") is not None:
+                parts.append(f"Processador {percent(values['cpu_busy'])} ocupado")
+            elif values.get("load") is not None:
+                parts.append(f"Carga do processador {decimal_br(values['load'])} por núcleo")
+            else:
+                parts.append("Processador sobrecarregado")
+        elif code == "low_disk_space" and disk.get("total"):
+            parts.append(f"Disco: {gb_br(disk['free'])} de {gb_br(disk['total'])} GB livres")
+        elif code == "power_saving":
+            limit = view.get("speedLimit")
+            parts.append(f"Processador limitado a {limit}% da velocidade" if limit is not None and limit < 100
+                         else "Modo de economia de energia ligado")
+        elif code == "updating_code":
+            parts.append("Atualizando a cópia do código")
+        elif code == "slow_unio":
+            p90 = view.get("p90")
+            parts.append(f"Unio: 90% das respostas em até {decimal_br(p90)} s" if p90 is not None and p90 >= 1
+                         else "Unio: respostas com erro")
+        elif code == "slow_network":
+            parts.append("Rede: falhas de conexão")
+        elif code == "slow_ai":
+            n = view.get("retries")
+            parts.append("Serviço de IA tentando de novo" if not n else "Serviço de IA: 1 nova tentativa"
+                         if n == 1 else f"Serviço de IA: {n} novas tentativas")
+    if programs:
+        parts.append("Mais pesados: " + ", ".join(f"{clean_program(n)} {gb_br(b)} GB" for n, b in programs))
+    text = ""
+    for part in ("".join(ch for ch in p if ch.isprintable()) for p in parts):
+        # Whole parts only: the server cuts the message at 300 characters.
+        joined = f"{text} · {part}" if text else part
+        if len(joined) > DETAIL_CHARS:
+            break
+        text = joined
+    return text or None
+
+
+VITALS_WRITE_EVERY = 30
+VITALS_EPISODES = 5
+SCAN_EVERY = 60
+MESSAGE_EVERY = 60
+# A credited retry holds its cause for the rest of the run and this long after.
+RETRY_HOLD = 120
+STALL_OF = {"slow_memory": "memory", "slow_disk": "io", "slow_cpu": "cpu"}
+STALL_THRESHOLDS = {"memory": 0.10, "io": 0.10, "cpu": 0.20}
+TIMEOUT_STALL = 0.15
+TIMEOUT_RETRY_MS = 60000
+TIMEOUT_HELD = 60
+TIMEOUT_HELD_SHARE = 0.25
+NEVER_CREDITED = {"updating_code", "low_disk_space"}
+
+
+def ai_retry_delay(credits):
+    return sum(c.get("delayMs") or 0 for c in credits or () if c.get("code") == "slow_ai")
+
+
+def timeout_cause(run, ai_delay_ms=0):
+    """The cause a reply that ran out of time is put down to, or None. `run` is
+    Vitals.run_end()'s summary. A cause seen in the run counts when the bot's
+    own stall of its resource was 15 % of the run, when slow_ai's credited
+    retries waited 60 s in all, or when it held for max(60 s, 25 % of the
+    run). The refresh and disk space never explain a timeout."""
+    if not run:
+        return None
+    wall, held, stall = run.get("wallS") or 0, run.get("causeS") or {}, run.get("stall") or {}
+    credited = []
+    for code in run.get("slow") or ():
+        if code in NEVER_CREDITED:
+            continue
+        if held.get(code, 0) >= max(TIMEOUT_HELD, TIMEOUT_HELD_SHARE * wall) \
+                or (code in STALL_OF and (stall.get(STALL_OF[code]) or 0) >= TIMEOUT_STALL) \
+                or (code == "slow_ai" and ai_delay_ms >= TIMEOUT_RETRY_MS):
+            credited.append(code)
+    order = slow_order(credited)
+    return order[0] if order else None
+
+
+def _psi_point(sample):
+    if not sample or "psi" not in sample:
+        return None
+    return {"at": sample["at"], "source": sample.get("psiSource"), "psi": dict(sample["psi"]),
+            "sysPsi": dict(sample.get("sysPsi") or {})}
+
+
+def _gb(n):
+    return round(n / GIB, 1) if isinstance(n, (int, float)) else None
+
+
+class Vitals:
+    """The computer's vitals on a thread of their own: a sample every 5 s, the
+    causes they add up to, and what to show for them.
+
+    It never raises: a failing signal or step is logged once. `on_change(reason,
+    message, state)` is called, outside the Vitals lock, when the slow reason,
+    the owner's detail or the state they are for changes: the working reason
+    during a run (run_start() to run_end()), else the idle one. The main thread brackets the pre-claim
+    refresh with stage("refresh") and stage(None), and hands each run's credited
+    retries over with note_retries(). vitals.json in the state folder gets
+    snapshot() at most every 30 s."""
+
+    def __init__(self, state_dir, log=None, platform=None, reader=None, clock=time.monotonic, env=None,
+                 health=None, scan=None, on_change=None):
+        self.dir = Path(state_dir)
+        self.file = self.dir / "vitals.json"
+        self.log_fn = log
+        self.platform = platform_name(platform)
+        self.reader = reader
+        self.clock = clock
+        self.health = health if health is not None else API_HEALTH
+        scan = program_scanner(platform) if scan is None else scan
+        self.scan = ProgramScan(scan) if scan and share_programs(env) else None
+        self.on_change = on_change
+        self.engine = CauseEngine()
+        self.lock = threading.Lock()
+        # Keeps on_change calls in order; taken before, never inside, self.lock.
+        self.publish_lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = None
+        self.stage_at = None
+        self.run = None
+        self.retry_until = {}
+        self.extra_since = {}
+        self.episodes = deque(maxlen=VITALS_EPISODES)
+        self.logged = set()
+        self.written_at = None
+        self.programs = None
+        self.programs_at = None
+        self.message = None
+        self.message_at = None
+        self.message_codes = None
+        self.reported = (None, None)
+        self.reported_state = "idle"
+        self.cap_bytes = None
+
+    def start(self):
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._loop, name="unio-vitals", daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=VITALS_TICK + SCAN_DEADLINE + 1)
+        self._write(self.clock())
+
+    def _loop(self):
+        while not self.stopped.is_set():
+            self.tick()
+            self.stopped.wait(VITALS_TICK)
+
+    def _log(self, event, **fields):
+        if self.log_fn is None:
+            return
+        try:
+            self.log_fn(event, **fields)
+        except Exception:  # logging must never stop the sampler
+            pass
+
+    def _once(self, key, event, **fields):
+        if key not in self.logged:
+            self.logged.add(key)
+            self._log(event, **fields)
+
+    def _failed(self, what, e):
+        self._once("error:" + what, "vitals_error", what=what, error=short(f"{type(e).__name__}: {e}", 200))
+
+    def tick(self, now=None):
+        try:
+            self._tick(self.clock() if now is None else now)
+        except Exception as e:  # the sampler outlives any one bad reading
+            self._failed("tick", e)
+
+    def _tick(self, now):
+        if self.reader is None:
+            self.reader = vitals_reader(self.dir, self.platform)
+        sample = self.reader.sample()
+        for name, why in list(self.reader.off.items()) + list(self.reader.failed.items()):
+            self._once("signal:" + name, "vitals_signal_off", signal=name, error=why)
+        if self.health.hook_error:
+            self._once("error:api_timing", "vitals_error", what="api_timing", error=self.health.hook_error)
+        with self.lock:
+            changes = self.engine.add(sample, now)
+            self.cap_bytes = sample.get("cap") or self.cap_bytes
+            self.health.stalled = bool(self.engine.stalled())
+            changes += self._extra_episodes(now)
+            causes = self._causes(now)
+            if self.run is not None:
+                self._account(now, causes)
+            wall = iso(utcnow())
+            for kind, code, fields in changes:
+                if kind == "slow_end":
+                    self.episodes.append({"code": code, "endedAt": wall, **fields})
+            started = any(kind == "slow_start" for kind, _, _ in changes)
+            machine = any(code in MACHINE_CODES for code in causes)
+            if not machine:
+                self.programs = self.programs_at = None
+            scan_due = bool(self.scan and machine and (started or self.programs_at is None
+                                                       or now - self.programs_at >= SCAN_EVERY))
+        for kind, code, fields in changes:
+            self._log(kind, code=code, **fields)
+        if scan_due:
+            programs = self.scan.run()
+            with self.lock:
+                self.programs_at = now
+                self.programs = programs if programs is not None else self.programs
+        self._publish(now, rebuild=started or scan_due)
+        if self.written_at is None or now - self.written_at >= VITALS_WRITE_EVERY:
+            self._write(now)
+
+    def _extra(self, now):
+        """The causes the engine does not hold: Unio's calls, the AI service's
+        retries, and a pre-claim refresh past REFRESH_SLOW."""
+        codes = set(self.health.causes())
+        codes.update(c for c, until in self.retry_until.items() if until > now)
+        if self.run is not None:
+            codes.update(self.run["retryCodes"])
+        if self.stage_at and self.stage_at[0] == "refresh" and now - self.stage_at[1] > REFRESH_SLOW:
+            codes.add("updating_code")
+        return codes
+
+    def _extra_episodes(self, now):
+        live, changes = self._extra(now), []
+        for code in sorted(live - set(self.extra_since)):
+            self.extra_since[code] = now
+            changes.append(("slow_start", code, {}))
+        for code in sorted(set(self.extra_since) - live):
+            changes.append(("slow_end", code, {"durationS": round(now - self.extra_since.pop(code))}))
+        return changes
+
+    def _causes(self, now):
+        out = dict(self.engine.causes())
+        for code in self._extra(now):
+            out.setdefault(code, self.extra_since.get(code, now))
+        return out
+
+    def _account(self, now, causes):
+        run = self.run
+        if run["psi0"] is None:
+            run["psi0"] = _psi_point(self.engine.latest())
+        step = max(0.0, now - run["tick"])
+        # Each interval goes to the causes active at its start.
+        for code in run["prev"]:
+            run["causeS"][code] = run["causeS"].get(code, 0) + step
+        run["tick"], run["prev"] = now, set(causes)
+        run["seen"].update(causes)
+
+    def _stall(self, run):
+        """The bot's stall shares since the claim: memory and io full, cpu some."""
+        p0, p1 = run["psi0"], _psi_point(self.engine.latest())
+        if not p0 or not p1 or p0["source"] != p1["source"] or p1["at"] - p0["at"] < VITALS_TICK:
+            return {}
+        span = p1["at"] - p0["at"]
+        return {res: max(0.0, p1["psi"][res] - p0["psi"][res]) / span for res in STALL_THRESHOLDS
+                if res in p0["psi"] and res in p1["psi"]}
+
+    def _reason(self, now, causes):
+        stalled = self.engine.stalled()
+        run = self.run
+        if run is None:
+            idle = dict(self.engine.causes(idle=True))
+            if "updating_code" in causes:
+                idle["updating_code"] = causes["updating_code"]
+            return idle_cause(idle), slow_order(causes, stalled)
+        stall = self._stall(run)
+        evidence = {code for code, res in STALL_OF.items() if stall.get(res, 0) >= STALL_THRESHOLDS[res]}
+        evidence.update(run["retryCodes"])
+        evidence.update(code for code, seq in self.health.causes().items() if seq > run["seq"])
+        return working_cause(causes, evidence, now - run["start"], stalled), slow_order(causes, stalled)
+
+    def _view(self):
+        latest = self.engine.latest()
+        return {"mem": latest.get("mem"), "disk": latest.get("disk"), "values": dict(self.engine.values),
+                "cap": self.engine.cap, "capBytes": self.cap_bytes, "speedLimit": latest.get("speedLimit"),
+                "p90": self.health.p90(), "retries": self.run["retryCount"] if self.run else 0}
+
+    def _report(self, now, rebuild=False):
+        reason, codes = self._reason(now, self._causes(now))
+        if reason is None:
+            self.message = self.message_at = self.message_codes = None
+            return None, None
+        if rebuild or tuple(codes) != self.message_codes or self.message_at is None \
+                or now - self.message_at >= MESSAGE_EVERY:
+            self.message = owner_message(codes, self._view(), self.programs)
+            self.message_at, self.message_codes = now, tuple(codes)
+        return reason, self.message
+
+    def _publish(self, now, rebuild=False):
+        with self.publish_lock:
+            with self.lock:
+                report = self._report(now, rebuild)
+                state = "idle" if self.run is None else "working"
+                changed = report != self.reported or state != self.reported_state
+                self.reported, self.reported_state = report, state
+            if changed and self.on_change is not None:
+                try:
+                    self.on_change(*report, state)
+                except Exception as e:  # presence trouble is presence's own
+                    self._failed("on_change", e)
+
+    def reason(self):
+        """(reason, message) as last reported."""
+        with self.lock:
+            return self.reported
+
+    def stage(self, name):
+        """stage("refresh") before the pre-claim refresh, stage(None) after it."""
+        try:
+            now = self.clock()
+            with self.lock:
+                ended = name is None and self.stage_at is not None
+                self.stage_at = (name, now) if name else None
+            if ended:
+                self._publish(now)
+        except Exception as e:
+            self._failed("stage", e)
+
+    def run_start(self):
+        try:
+            now = self.clock()
+            with self.lock:
+                self.run = {"start": now, "tick": now, "seq": self.health.seq,
+                            "psi0": _psi_point(self.engine.latest()), "causeS": {},
+                            "seen": set(self._causes(now)), "retryCodes": {}, "retryCount": 0}
+                self.run["prev"] = set(self.run["seen"])
+            self._publish(now)
+        except Exception as e:
+            self._failed("run_start", e)
+
+    def note_retries(self, credits):
+        """A run's Session.retry_credits; each call may repeat the earlier ones."""
+        try:
+            now = self.clock()
+            with self.lock:
+                if self.run is None:
+                    return
+                before = set(self.run["retryCodes"])
+                for c in credits or ():
+                    if c.get("code") in ("slow_ai", "slow_network"):
+                        self.run["retryCodes"].setdefault(c["code"], c.get("at", now))
+                self.run["retryCount"] = max(self.run["retryCount"], len(credits or ()))
+                new = set(self.run["retryCodes"]) != before
+            if new:
+                self._publish(now)
+        except Exception as e:
+            self._failed("note_retries", e)
+
+    def run_end(self):
+        """The run's summary for its item log line and timeout_cause(), or None:
+        {"wallS", "slow" (codes seen), "causeS" (seconds each held), "stall" (the
+        bot's shares since the claim), "psi" (stall seconds: bot, system)}."""
+        try:
+            now = self.clock()
+            with self.lock:
+                run = self.run
+                if run is None:
+                    return None
+                self._account(now, self._causes(now))
+                self.run = None
+                stall = self._stall(run)
+                p0, p1 = run["psi0"], _psi_point(self.engine.latest())
+                psi = {}
+                if p0 and p1 and p1["at"] > p0["at"]:
+                    if p0["source"] == p1["source"]:
+                        psi["source"] = p1["source"]
+                        psi["bot"] = {r: round(p1["psi"][r] - p0["psi"][r], 1) for r in p1["psi"] if r in p0["psi"]}
+                    if p0["sysPsi"] and p1["sysPsi"]:
+                        psi["system"] = {r: round(p1["sysPsi"][r] - p0["sysPsi"][r], 1)
+                                         for r in p1["sysPsi"] if r in p0["sysPsi"]}
+                for code in run["retryCodes"]:
+                    self.retry_until[code] = now + RETRY_HOLD
+                summary = {"wallS": round(now - run["start"], 1), "slow": slow_order(run["seen"]),
+                           "causeS": {c: round(v) for c, v in run["causeS"].items() if round(v)},
+                           "stall": {r: round(v, 3) for r, v in stall.items()}, "psi": psi}
+            self._publish(now)
+            return summary
+        except Exception as e:
+            self._failed("run_end", e)
+            return None
+
+    def snapshot(self):
+        """What vitals.json holds: the platform, the signals read, rounded
+        readings, the active causes with since, the reported reason and detail,
+        and the last episodes."""
+        now, wall = self.clock(), utcnow()
+        with self.lock:
+            latest = self.engine.latest()
+            causes = self._causes(now)
+            mem, disk = latest.get("mem") or {}, latest.get("disk") or {}
+            readings = {"memAvailGB": _gb(mem.get("avail")), "memTotalGB": _gb(mem.get("total")),
+                        "swapUsedPct": round(100 * (1 - mem["swapFree"] / mem["swapTotal"]))
+                        if mem.get("swapTotal") else None,
+                        "diskFreeGB": _gb(disk.get("free")), "diskTotalGB": _gb(disk.get("total")),
+                        "pressureLevel": latest.get("level"), "power": latest.get("power"),
+                        "speedLimit": latest.get("speedLimit"), "unioP90S": self.health.p90(),
+                        "shares": {k: round(v, 3) for k, v in self.engine.values.items() if v is not None}}
+            return {"v": 1, "at": iso(wall), "platform": self.platform,
+                    "signals": self.reader.signals() if self.reader else [],
+                    "off": dict(self.reader.off) if self.reader else {},
+                    "psiSource": latest.get("psiSource"),
+                    "readings": {k: v for k, v in readings.items() if v is not None},
+                    "causes": {c: {"since": iso(wall - timedelta(seconds=now - causes[c]))}
+                               for c in slow_order(causes, self.engine.stalled())},
+                    "atServiceCap": self.engine.cap, "reason": self.reported[0], "message": self.reported[1],
+                    "sharePrograms": self.scan is not None, "episodes": list(self.episodes)}
+
+    def _write(self, now):
+        try:
+            if not self.dir.is_dir():
+                return
+            write_atomic(self.file, json.dumps(self.snapshot(), ensure_ascii=False, indent=2) + "\n")
+            self.written_at = now
+        except Exception as e:
+            self._failed("vitals.json", e)
+
+
 def project_slugs(cwd):
     """The names Claude Code (2.1.287) may give the project directory of a session
     run in `cwd`: every character outside [a-zA-Z0-9] becomes '-', and a name
@@ -1102,6 +2357,9 @@ class Config:
         self.api = (env.get("UNIO_API_URL") or "https://api.unio.so/v1").rstrip("/")
         self.interval = float(env.get("UNIO_INBOX_INTERVAL") or 30)
         self.timeout = float(env.get("UNIO_INBOX_TIMEOUT") or 600)
+        # Off in the tests that drive a whole run: the test machine's load must
+        # never reach a presence body or a reply.
+        self.vitals = (env.get("UNIO_INBOX_VITALS") or "on").strip().lower() != "off"
         self.max_turns = int(env.get("UNIO_INBOX_MAX_TURNS") or 30)
         self.max_budget = str(env.get("UNIO_INBOX_MAX_BUDGET_USD") or "1")
         self.max_budget_usd = float(self.max_budget)
@@ -1286,11 +2544,162 @@ def env_number(env, name, default, minimum, maximum, integer=False):
     return value, None
 
 
+API_SAMPLE_MAX_TIMEOUT = 20
+API_WINDOW = 120
+API_SLOW_P90 = 3
+API_FAST = 1
+API_FAST_STREAK = 5
+# One full p90 window of calls with the cause's own condition false.
+API_QUIET_STREAK = 10
+UNREACHABLE_ERRNOS = {errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065}
+
+
+def unreachable_kind(error):
+    """(kind, definite) of a failed call. urllib wraps connect, TLS and send
+    failures in URLError; a read timeout arrives bare. network: the computer's
+    own connection (definite unless it is a connect timeout); unio: refused,
+    Unio's side; slow: a read timeout; None: anything else."""
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, socket.gaierror):
+            return "network", True
+        if isinstance(reason, ConnectionRefusedError):
+            return "unio", False
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            return "network", False
+        if isinstance(reason, OSError) and (reason.errno in UNREACHABLE_ERRNOS
+                                            or getattr(reason, "winerror", None) in UNREACHABLE_ERRNOS):
+            return "network", True
+        return None, False
+    if isinstance(error, ConnectionRefusedError):
+        return "unio", False
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return "slow", False
+    return None, False
+
+
+class ApiHealth:
+    """How this runner's Unio calls fare, for slow_network and slow_unio. One
+    per process behind its own lock: a new Api is built for each presence write.
+
+    slow_network: 2 network failures and 1 good answer within 120 s.
+    slow_unio: a p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
+    their timeout), or 2 answers of 5xx or refusals beside 1 good answer
+    within 120 s. Both clear after 5 calls in a row that answer well in under
+    1 s, and each after 10 answered calls with neither its condition nor a bad
+    call of its own, so a runner whose calls take 1 to 3 s still clears. A
+    failure that counts for neither cause never counts toward clearing one:
+    it is no sign the network or Unio is well. While the bot's own memory or
+    io stalls, read and connect timeouts are the machine's and count for
+    neither."""
+
+    def __init__(self, clock=time.monotonic):
+        self.lock = threading.Lock()
+        self.clock = clock
+        self.seq = 0
+        self.stalled = False
+        self.network_at = None
+        self.hook_error = None
+        self.active = {}
+        self._forget()
+
+    def _forget(self):
+        self.latencies = deque(maxlen=10)
+        self.network = deque()
+        self.unio = deque()
+        self.good = deque()
+        self.fast = 0
+        self.quiet = {}
+
+    def record(self, kind, seconds, status=0, timeout=0, definite=True, now=None):
+        with self.lock:
+            now = self.clock() if now is None else now
+            self.seq += 1
+            for q in (self.network, self.unio, self.good):
+                while q and q[0] < now - API_WINDOW:
+                    q.popleft()
+            bad = None
+            if kind == "ok":
+                self.latencies.append(seconds)
+                if status >= 500:
+                    self.unio.append(now)
+                    bad = "slow_unio"
+                else:
+                    self.good.append(now)
+                    if seconds >= API_SLOW_P90:
+                        bad = "slow_unio"
+            elif kind == "slow" and not self.stalled:
+                self.latencies.append(max(seconds, timeout))
+                bad = "slow_unio"
+            elif kind == "network":
+                self.network_at = now
+                if definite or not self.stalled:
+                    self.network.append(now)
+                    bad = "slow_network"
+            elif kind == "unio":
+                self.unio.append(now)
+                bad = "slow_unio"
+            self.fast = self.fast + 1 if kind == "ok" and status < 500 and seconds < API_FAST else 0
+            if self.fast >= API_FAST_STREAK and self.active:
+                self.active = {}
+                self._forget()
+                return
+            ordered = sorted(self.latencies)
+            p90 = ordered[math.ceil(0.9 * len(ordered)) - 1] if ordered else 0
+            held = {
+                "slow_network": len(self.network) >= 2 and bool(self.good),
+                "slow_unio": (len(ordered) >= 5 and p90 >= API_SLOW_P90) or (len(self.unio) >= 2 and bool(self.good)),
+            }
+            for code, now_held in held.items():
+                if now_held:
+                    self.active.setdefault(code, self.seq)
+                if code not in self.active:
+                    self.quiet.pop(code, None)
+                elif now_held or bad == code:
+                    self.quiet[code] = 0
+                elif kind == "ok":
+                    self.quiet[code] = self.quiet.get(code, 0) + 1
+                    if self.quiet[code] >= API_QUIET_STREAK:
+                        del self.active[code]
+                        del self.quiet[code]
+            if bad in self.active:
+                self.active[bad] = self.seq
+
+    def causes(self):
+        """{code: seq of the latest bad call behind it}."""
+        with self.lock:
+            return dict(self.active)
+
+    def p90(self):
+        with self.lock:
+            ordered = sorted(self.latencies)
+            return ordered[math.ceil(0.9 * len(ordered)) - 1] if len(ordered) >= 5 else None
+
+    def network_recent(self, now=None):
+        with self.lock:
+            now = self.clock() if now is None else now
+            return self.network_at is not None and now - self.network_at <= API_WINDOW
+
+
+API_HEALTH = ApiHealth()
+
+
+def api_sample(kind, seconds, status=0, timeout=0, definite=True):
+    """Api.call's timing hook: it never raises into a call."""
+    try:
+        API_HEALTH.record(kind, seconds, status, timeout, definite)
+    except Exception as e:  # a hook must never break a call
+        if API_HEALTH.hook_error is None:
+            API_HEALTH.hook_error = short(f"{type(e).__name__}: {e}", 200)
+
+
 class ApiUnreachable(Exception):
-    def __init__(self, message, untrusted=False):
+    def __init__(self, message, untrusted=False, kind=None):
         super().__init__(message)
         # TLS refused the server's certificate: this Python trusts no CA that signed it.
         self.untrusted = untrusted
+        # unreachable_kind(): network, unio, slow or None.
+        self.kind = kind
 
 
 class Api:
@@ -1298,7 +2707,10 @@ class Api:
         self.base = base
         self.token = token
 
-    def call(self, method, path, body=None, idempotency_key=None, timeout=20, ascii_only=True):
+    def call(self, method, path, body=None, idempotency_key=None, timeout=20, ascii_only=True, sample=True):
+        """`sample`: whether ApiHealth times this call; uploads (timeout over 20 s)
+        and settle's retries never count."""
+        sample = sample and timeout <= API_SAMPLE_MAX_TIMEOUT
         if stopping.is_set():
             # systemd's TimeoutStopSec bounds the whole shutdown.
             timeout = min(timeout, 5)
@@ -1317,22 +2729,30 @@ class Api:
             req.add_header("Content-Type", "application/json")
         if idempotency_key:
             req.add_header("Idempotency-Key", idempotency_key)
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, self._json(resp.read())
+                status, data = resp.status, self._json(resp.read())
         except urllib.error.HTTPError as e:
-            return e.code, self._json(e.read())
+            status, data = e.code, self._json(e.read())
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
-            raise ApiUnreachable(f"{self.base} unreachable: {reason}",
+            kind, definite = unreachable_kind(e)
+            if sample:
+                api_sample(kind, time.monotonic() - started, timeout=timeout, definite=definite)
+            raise ApiUnreachable(f"{self.base} unreachable: {reason}", kind=kind,
                                  untrusted=isinstance(reason, ssl.SSLCertVerificationError)) from None
+        if sample:
+            api_sample("ok", time.monotonic() - started, status)
+        return status, data
 
     def settle(self, method, path, body, idempotency_key, timeout=20, ascii_only=True):
         """Writes that must land: a lost one leaves the item claimed for 15 minutes."""
         status, data = 0, {}
         for attempt in range(3):
             try:
-                status, data = self.call(method, path, body, idempotency_key, timeout=timeout, ascii_only=ascii_only)
+                status, data = self.call(method, path, body, idempotency_key, timeout=timeout, ascii_only=ascii_only,
+                                         sample=attempt == 0)
             except ApiUnreachable as e:
                 status, data = 0, {"error": str(e)}
             if 0 < status < 500:
@@ -1456,27 +2876,46 @@ class Mcp:
 def presence_change(body):
     """The part of a presence write the server stores at once when it changes."""
     body = body or {}
-    return body.get("state"), body.get("taskId"), body.get("itemKey")
+    return body.get("state"), body.get("taskId"), body.get("itemKey"), body.get("reason")
+
+
+# The states whose body carries the slow cause and the owner's detail (Presence.overlay).
+OVERLAID_STATES = ("idle", "working")
+
+
+def presence_quiet(body):
+    """A body without the owner's detail: a change to it alone waits for the heartbeat."""
+    if body and body.get("state") in OVERLAID_STATES:
+        return {k: v for k, v in body.items() if k != "message"}
+    return body
 
 
 class Presence:
     """This runner's row on the agent's page. A thread sends it: a change of
-    state, task or item goes out at once; one of step or message alone once
-    PRESENCE_SPACING has passed since the last write, the latest winning; and
-    an unchanged state is repeated as a heartbeat so the row stays online (the
-    page calls a presence offline after 90 s of silence)."""
+    state, task, item or reason goes out at once; one of step or message alone
+    once PRESENCE_SPACING has passed since the last write, the latest winning,
+    and the owner's slow-answer detail alone only with the heartbeat; and an
+    unchanged state is repeated as a heartbeat so the row stays online (the
+    page calls a presence offline after 90 s of silence).
 
-    def __init__(self, cfg):
+    The Vitals thread lays the slow cause over an idle or working body with
+    refresh(); set() callers never see it."""
+
+    def __init__(self, cfg, log=None):
         self.cfg = cfg
+        self.log = log
         self.id = None
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.want = None
+        self.extra = {}
+        self.extra_state = None
         self.sent = None
         self.sent_at = None
         self.report = {}
         self.thread = None
         self.closing = False
+        self.loop_error = None
 
     @property
     def heartbeat(self):
@@ -1497,32 +2936,79 @@ class Presence:
             self.want = body
         self.wake.set()
 
+    def overlay(self, reason, message, state=None):
+        """The slow cause, and the owner's detail beside it, that an idle or
+        working body carries from now on; (None, None) clears both. With
+        `state`, only a body in that state carries it."""
+        with self.lock:
+            self.extra = {"reason": reason, **({"message": str(message)[:300]} if message else {})} \
+                if reason else {}
+            self.extra_state = state
+
+    def refresh(self, reason, message, state=None):
+        """overlay(), sent as soon as the spacing rules allow: Vitals' on_change."""
+        self.overlay(reason, message, state)
+        self.wake.set()
+
     def status(self):
         with self.lock:
             return {"id": self.id, **self.report} if self.id else None
 
-    def _wait(self):
-        """Seconds until the next write is due; None while there is nothing to send."""
+    def _body(self):
+        """What goes out: `want`, with the overlay in an idle or working state.
+        A cleared cause leaves both keys out, which the server stores as null
+        and an older one accepts."""
         if self.want is None:
             return None
-        if self.sent_at is None or presence_change(self.want) != presence_change(self.sent):
+        if self.want.get("state") not in OVERLAID_STATES:
+            return self.want
+        body = {k: v for k, v in self.want.items() if k not in ("reason", "message")}
+        # Vitals' idle cause must not reach a working row outside its run: the
+        # first write of a run, settle, and review and needs runs, which Vitals
+        # does not bracket, so their causes would skip the working gate.
+        if self.extra_state in (None, body["state"]):
+            body.update(self.extra)
+        return body
+
+    def _wait(self):
+        """Seconds until the next write is due; None while there is nothing to send."""
+        body = self._body()
+        if body is None:
+            return None
+        if self.sent_at is None or presence_change(body) != presence_change(self.sent):
             return 0
-        gap = PRESENCE_SPACING if self.want != self.sent else self.heartbeat
+        gap = PRESENCE_SPACING if presence_quiet(body) != presence_quiet(self.sent) else self.heartbeat
         return self.sent_at + gap - time.monotonic()
 
     def _loop(self):
         while not self.closing:
-            with self.lock:
-                wait = self._wait()
-            if wait is not None and wait <= 0:
-                self._send()
-                continue
+            try:
+                with self.lock:
+                    wait = self._wait()
+                if wait is not None and wait <= 0:
+                    self._send()
+                    continue
+            except Exception as e:  # the row must outlive any one bad write
+                self._failed(e)
+                wait = PRESENCE_SPACING
             self.wake.wait(wait)
             self.wake.clear()
 
+    def _failed(self, e):
+        error = short(f"{type(e).__name__}: {e}", 300)
+        with self.lock:
+            self.report.update(lastError=error, lastErrorAt=iso(utcnow()))
+            new = error != self.loop_error
+            self.loop_error = error
+        if new and self.log is not None:
+            try:
+                self.log("presence_error", error=error)
+            except Exception:  # nothing left to tell
+                pass
+
     def _send(self):
         with self.lock:
-            body = dict(self.want)
+            body = dict(self._body())
             self.sent_at = time.monotonic()
         token = self.cfg.token()
         try:
@@ -1552,9 +3038,12 @@ class Presence:
         if ended:
             self.set("ended")
         with self.lock:
-            due = self.want is not None and self.want != self.sent
+            due = self.want is not None and self._body() != self.sent
         if due:
-            self._send()
+            try:
+                self._send()
+            except Exception as e:  # the service still stops cleanly
+                self._failed(e)
 
 
 class Progress:
@@ -1681,6 +3170,9 @@ class Progress:
         return False
 
 
+LOG_LOCK = threading.Lock()
+
+
 class State:
     def __init__(self, cfg):
         self.dir = cfg.state_dir
@@ -1762,13 +3254,15 @@ class State:
 
     def log(self, event, **fields):
         entry = {"at": iso(utcnow()), "event": event, **{k: v for k, v in fields.items() if v is not None}}
-        try:
-            if self.log_file.stat().st_size >= LOG_MAX_BYTES:
-                replace_file(self.log_file, self.log_file.with_name("log.jsonl.1"))
-        except OSError:
-            pass  # missing, or held open on Windows: this line goes on the current file
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # The Vitals thread logs too, and a rotation between two writers loses lines.
+        with LOG_LOCK:
+            try:
+                if self.log_file.stat().st_size >= LOG_MAX_BYTES:
+                    replace_file(self.log_file, self.log_file.with_name("log.jsonl.1"))
+            except OSError:
+                pass  # missing, or held open on Windows: this line goes on the current file
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     @staticmethod
     def record_error(h, message):
@@ -3354,6 +4848,23 @@ def build_needs_prompt(view, items, facts, today, zone, url=None, language="en")
     return "\n".join(lines) + "\n"
 
 
+RETRY_SLOW_ERRORS = {"overloaded", "server_error", "unknown"}
+# Already problem reasons of their own: usage_limit and signed_out.
+RETRY_IGNORED = {"rate_limit", "authentication_failed", "cloud_credential_error"}
+
+
+def retry_cause(event, network_recent=False):
+    """The slow code a system/api_retry event counts for, or None. A null
+    error_status is a connection error: the computer's network when Unio's calls
+    also failed on it lately, else the AI service."""
+    error = event.get("error")
+    if error in RETRY_IGNORED:
+        return None
+    if event.get("error_status") is None:
+        return "slow_network" if network_recent else "slow_ai"
+    return "slow_ai" if error in RETRY_SLOW_ERRORS else None
+
+
 class Session:
     """One headless Claude Code run and what it printed. `required` must be
     offered at init; `allowed` is every tool it may be offered (None: the
@@ -3398,6 +4909,14 @@ class Session:
         self.violation = None
         # Set when a person stopped the run: their name, or "" when the server gives none.
         self.stopped_by = None
+        # system/api_retry events: how many, per error, their delays, and those
+        # retry_cause() credits as {"code", "delayMs", "at" (monotonic)}.
+        self.retries = 0
+        self.retry_errors = {}
+        self.retry_delay_ms = 0
+        self.retry_credits = []
+        # time.monotonic() at spawn, at the first stream event, at the result and at exit.
+        self.spawned_at = self.first_event_at = self.result_at = self.exited_at = None
 
     @property
     def bad_init(self):
@@ -3506,13 +5025,38 @@ class Verdict:
         self.question = fields.get("question")
 
 
+def ms_between(start, end):
+    return int((end - start) * 1000) if start is not None and end is not None and end >= start else None
+
+
+def session_stages(s):
+    """Where a session's time went: spawn to its first stream event, that to
+    the result, and the result to the process's exit."""
+    end = s.result_at or s.exited_at
+    return {"startMs": ms_between(s.spawned_at, s.first_event_at),
+            "sessionMs": ms_between(s.first_event_at, end),
+            "teardownMs": ms_between(s.result_at, s.exited_at)}
+
+
+def with_settle(stats, started):
+    """`stats` with settleMs: stats is built before the settlement it reports."""
+    stages = dict(stats.get("stages") or {}, settleMs=int((time.monotonic() - started) * 1000))
+    return {**stats, "stages": stages}
+
+
 class Runner:
-    def __init__(self, cfg):
+    def __init__(self, cfg, vitals=None):
+        """`vitals`: a Vitals to use instead of this system's (tests)."""
         self.cfg = cfg
         self.state = State(cfg)
         self.snapshots = Snapshots(cfg, self.state)
         self._teams, self._teams_at = None, None
-        self.presence = Presence(cfg)
+        self.presence = Presence(cfg, log=self.state.log)
+        if vitals is None and cfg.vitals:
+            vitals = Vitals(cfg.state_dir, log=self.state.log)
+        if vitals is not None and vitals.on_change is None:
+            vitals.on_change = self.presence.refresh
+        self.vitals = vitals
         self.acked = {}
         self.claim_presence = True
         self.ask_subjects = True
@@ -3559,12 +5103,18 @@ class Runner:
         self.account = None
         self.account_checked_at = None
         self.probe_hold = None
+        # ready()'s time in this poll, for the first item's log line alone: it runs once per poll.
+        self.ready_ms = None
 
     @staticmethod
     def session_env():
         env = {k: v for k, v in os.environ.items() if k not in SESSION_VARS}
         env.update(SESSION_ENV)
         return env
+
+    def vitals_call(self, name, *args):
+        """A Vitals hook, or None without one (Vitals' methods never raise)."""
+        return getattr(self.vitals, name)(*args) if self.vitals is not None else None
 
     def save(self, h):
         status = self.presence.status()
@@ -3782,6 +5332,7 @@ class Runner:
                     s.start_error = f"could not start {self.cfg.claude}: {e}"
                     return s
                 s.started = True
+                s.spawned_at = time.monotonic()
                 reader = threading.Thread(target=self._read, args=(proc, s, transcript), daemon=True)
                 reader.start()
                 try:
@@ -3806,6 +5357,7 @@ class Runner:
                         self.kill(proc)
                     elif on_wait:
                         on_wait(s)
+                s.exited_at = time.monotonic()
                 reader.join(timeout=10)
                 if not reader.is_alive():
                     # Each session's pipe would otherwise stay open until the collector finds it.
@@ -3842,6 +5394,8 @@ class Runner:
                 continue
             if not isinstance(event, dict):
                 continue
+            if s.first_event_at is None:
+                s.first_event_at = time.monotonic()
             if event.get("parent_tool_use_id") is not None:
                 # A subagent's turn (measured on 2.1.311: it inherits the parent's
                 # MCP tools). Its writes and steps are never the run's own.
@@ -3849,6 +5403,8 @@ class Runner:
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 Runner._check_init(proc, s, event)
+            elif kind == "system" and event.get("subtype") == "api_retry":
+                Runner._note_retry(s, event)
             elif kind in ("assistant", "user"):
                 content = (event.get("message") or {}).get("content")
                 for block in content if isinstance(content, list) else []:
@@ -3898,6 +5454,19 @@ class Runner:
                 s.rate_limits.update({name: {**w, "at": read_at} for name, w in rate_limits(event).items()})
             elif kind == "result":
                 s.result = event
+                s.result_at = time.monotonic()
+
+    @staticmethod
+    def _note_retry(s, event):
+        delay = event.get("retry_delay_ms")
+        delay = delay if isinstance(delay, int) and not isinstance(delay, bool) and delay > 0 else 0
+        error = str(event.get("error") or "unknown")[:40]
+        s.retries += 1
+        s.retry_errors[error] = s.retry_errors.get(error, 0) + 1
+        s.retry_delay_ms += delay
+        code = retry_cause(event, API_HEALTH.network_recent())
+        if code:
+            s.retry_credits.append({"code": code, "delayMs": delay, "at": time.monotonic()})
 
     @staticmethod
     def _check_web(proc, s, name, args):
@@ -4215,7 +5784,14 @@ class Runner:
             return "continue"
 
         # Cloned or refreshed before the claim: a first clone can take minutes.
-        snapshots = self.snapshots.for_team((record.get("team") or {}).get("identifier"), h)
+        ready_ms, self.ready_ms = self.ready_ms, None
+        refresh_at = time.monotonic()
+        self.vitals_call("stage", "refresh")
+        try:
+            snapshots = self.snapshots.for_team((record.get("team") or {}).get("identifier"), h)
+        finally:
+            self.vitals_call("stage", None)
+        refresh_ms = int((time.monotonic() - refresh_at) * 1000)
         if stopping.is_set():
             return "stop"
         claim = self.claim(api, item, base)
@@ -4255,9 +5831,11 @@ class Runner:
             if time.monotonic() > next_ack[0]:
                 self.acknowledge_new(api)
                 next_ack[0] = time.monotonic() + self.cfg.interval
+            self.vitals_call("note_retries", s.retry_credits)
 
         # What a research run was: why it ran, when, where, and a gate that held it.
         research, triage = None, None
+        self.vitals_call("run_start")
         try:
             # Asked again after the claim: the snapshot refresh before it can take minutes.
             low = desk_memory(self.cfg.memory_floor)
@@ -4291,6 +5869,7 @@ class Runner:
                                       error=f"runner error: {type(e).__name__}: {short(e, 200)}")
         finally:
             h.pop("current", None)
+            slow_run = self.vitals_call("run_end")
         ev = s.result or {}
         if research:
             usd = self.charge(h, s, research["at"], "research", self.cfg.research_max_budget_usd)
@@ -4314,6 +5893,16 @@ class Runner:
                  "web": s.web.counts(s.answer_body) if s.started else None,
                  "mode": "research" if research else None, "research": research and research["log"],
                  "triage": triage}
+        stages = {"refreshMs": refresh_ms, "readyMs": ready_ms, **session_stages(s)}
+        if s.started:
+            # A research run's stages are its own session's, not the reply's that handed it over.
+            stages["session"] = "research" if research else "reply"
+        slow_run = slow_run or {}
+        stats.update(stages={k: v for k, v in stages.items() if v is not None},
+                     apiMs=ev.get("duration_api_ms"), ttftMs=ev.get("ttft_ms"),
+                     retries=s.retries or None, retryErrors=s.retry_errors or None,
+                     slow=slow_run.get("slow") or None, causeS=slow_run.get("causeS") or None,
+                     psi=slow_run.get("psi") or None)
         # What the receipt records of the run: every session of this claim.
         wire = {"usage": usage_body(merge_usage((triage or {}).get("usage"), stats["usage"]),
                                     merge_web((triage or {}).get("web"), stats["web"]), files=0)}
@@ -4322,9 +5911,10 @@ class Runner:
                            projects=s.projects)
 
         if v.kind == "release":
+            began = time.monotonic()
             st, d = self.settle(api, "release", item, claim, reason=wire_reason(v.reason), retryAfter=iso(v.retry),
                                 note=problem_message(v.reason, detail=v.detail), **wire)
-            self.state.log("item", **base, **stats, result="released", reason=v.reason, error=v.error,
+            self.state.log("item", **base, **with_settle(stats, began), result="released", reason=v.reason, error=v.error,
                            retryAfter=iso(v.retry), releaseError=None if st == 200 else describe(st, d))
             if v.reason in RESEARCH_GATE_REASONS:
                 # This item's wait, not the machine's: the next item may still run.
@@ -4374,11 +5964,17 @@ class Runner:
         if v.kind == "too_large":
             outcome = written_outcome(s.succeeded)
             note_error = None
+            # Only a reply that ran out of time: a stop, the web check or the turn cap is no slowness.
+            cause = timeout_cause(slow_run, ai_retry_delay(s.retry_credits)) if s.timed_out else None
             if not s.succeeded & COMMENT_WRITES:
-                note = project_note(s, self.language) or TOO_LARGE_REPLY[self.language]
-                note_error = self.reply(api, item, note, f"unio-inbox:note:{key}:{claim['claimId']}")
-            self.complete(api, item, claim, h, base, stats, outcome, TOO_LARGE_NOTE, wire,
-                          error=v.error, noteError=note_error)
+                text = project_note(s, self.language) or (
+                    SLOW_TIMEOUT_REPLY[self.language].format(cause=SLOW_SENTENCES[self.language][cause]) if cause
+                    else TOO_LARGE_REPLY[self.language])
+                note_error = self.reply(api, item, text, f"unio-inbox:note:{key}:{claim['claimId']}")
+            # The complete allowlist has no reason field: the code travels in the note.
+            note = f"timed out ({cause})" if cause else TOO_LARGE_NOTE
+            self.complete(api, item, claim, h, base, stats, outcome, note, wire, error=v.error, noteError=note_error,
+                          cause=cause)
             return "continue"
 
         if v.kind == "ok":
@@ -4396,7 +5992,9 @@ class Runner:
 
         self.state.record_error(h, f"{key}: {v.error}")
         public, message = FAIL_CAUSES[v.cause]
+        began = time.monotonic()
         st, d = self.settle(api, "fail", item, claim, error=message, reason="other", note=FAIL_NOTES[public], **wire)
+        stats = with_settle(stats, began)
         h.setdefault("failed", []).append(iso(utcnow()))
         attempts = ((d or {}).get("data") or {}).get("attempts") if st == 200 else None
         final = isinstance(attempts, int) and attempts >= FINAL_ATTEMPT
@@ -4672,7 +6270,9 @@ class Runner:
         return f"{error}; {fallback}" if fallback else None
 
     def complete(self, api, item, claim, h, base, stats, outcome, note, wire=None, **extra):
+        began = time.monotonic()
         st, d = self.settle(api, "complete", item, claim, outcome=outcome, note=note, **(wire or {}))
+        stats = with_settle(stats, began)
         if st == 200:
             h.setdefault("handled", []).append(iso(utcnow()))
             # The answer, the 👍 or the change is the signal now.
@@ -4874,7 +6474,9 @@ class Runner:
         # Before ready(): its `claude auth status` is a process this machine cannot spare now.
         if self.memory_pause(api, h, now):
             return
+        began = time.monotonic()
         reason, error = self.ready()
+        self.ready_ms = int((time.monotonic() - began) * 1000)
         if reason:
             self.pause(h, reason, error, now + MACHINE_PAUSE, api)
             return
@@ -4953,6 +6555,8 @@ class Runner:
         if self.cfg.zone_note:
             self.state.log("zone_fallback", detail=self.cfg.zone_note)
         self.presence.start()
+        # On its own: Presence.start does nothing without a runner id.
+        self.vitals_call("start")
         moved = None
         while not stopping.is_set():
             if updater and updater.due(utcnow()):
@@ -4968,6 +6572,7 @@ class Runner:
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
                 self.save(h)
             stopping.wait(self.cfg.interval)
+        self.vitals_call("stop")
         # A restart for an update keeps the row online: the new process takes it over within seconds.
         self.presence.close(ended=not moved)
         with file_lock(self.state.lock_file) as held:

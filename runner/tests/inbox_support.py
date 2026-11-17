@@ -67,6 +67,8 @@ class HomeCase(unittest.TestCase):
             "LOCALAPPDATA": str(self.home / "AppData" / "Local"),
             "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
             "UNIO_RUNNER_AUTOUPDATE": "off",
+            # This machine's load must never reach a presence body or a reply.
+            "UNIO_INBOX_VITALS": "off",
         }
         cleared = {k: "" for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
         patcher = mock.patch.dict(os.environ, {**cleared, **self.env})
@@ -266,7 +268,9 @@ research_cap stops at the turn cap after the checkpoint, research_silent
 before it; research_file also writes a CSV into the prompt's files folder and
 names it, and research_files a Markdown file as well; research_bad_file names as a PDF a report the runner
 refuses (raw HTML); research_slow waits a minute after the checkpoint, and
-research_slow_silent before it, to be stopped."""
+research_slow_silent before it, to be stopped. retry reports one overloaded
+retry of the AI service (system/api_retry) and waits a second before answering;
+hang reads the task and then waits a minute, for the runner's timeout."""
 import json
 import os
 import re
@@ -318,7 +322,7 @@ def use(n, name, arguments, ok, text, structured=None):
 
 def result(text, subtype="success", turns=3):
     emit({"type": "result", "subtype": subtype, "is_error": subtype != "success", "num_turns": turns,
-          "total_cost_usd": 0.0123, "result": text,
+          "total_cost_usd": 0.0123, "result": text, "duration_api_ms": 1234, "ttft_ms": 456,
           "modelUsage": {"claude-test": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 1,
                                          "cacheCreationInputTokens": 2, "costUSD": 0.0123}}})
 
@@ -402,6 +406,13 @@ if mode == "too_large":
 if mode == "escalate":
     result("Needs the web.\n{\"outcome\":\"research\",\"question\":\"ISS rates for software\"}")
     sys.exit(0)
+if mode == "hang":
+    time.sleep(60)
+if mode == "retry":
+    # Claude Code 2.1.326's api_retry event; the wait lets the runner's wait loop see it.
+    emit({"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10, "retry_delay_ms": 1500,
+          "error_status": 529, "error": "overloaded"})
+    time.sleep(1.2)
 post_comment(content)
 result(content + "\n{\"outcome\":\"replied\",\"note\":\"answered the question\"}")
 '''

@@ -50,6 +50,7 @@ class SetupWithoutService(Base):
         code, out = self.setup("--repos-json", str(self.repos))
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[-1], "Perfil do serviço de respostas pronto para %s." % WORKSPACE)
+        self.assertIn(ur.shared_notice({}), out)
         self.assertIn("Claude Code 2.1.309 encontrado.", out)
         self.assertIn("Claude Code conectado a uma conta.", out)
         self.assertIn("Token aceito: %s, no workspace %s." % (AGENT, WORKSPACE), out)
@@ -338,6 +339,7 @@ class SetupWithService(Base):
         code, out = self.run_setup(svc)
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[-1], "Serviço de respostas ligado para %s." % WORKSPACE)
+        self.assertIn(ur.shared_notice({}), out)
         self.assertIn("a hint from the service manager", out)
         self.assertEqual(svc.installed, [("org_test", sys.executable, str(self.box.inbox), ur.service_path(
             dict(os.environ, PATH=self.box.env()["PATH"])))])
