@@ -134,6 +134,7 @@ closing and the runner finishing it).
 """
 import argparse
 import csv
+import errno
 import fnmatch
 import hashlib
 import io
@@ -158,6 +159,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -1952,11 +1954,145 @@ def env_number(env, name, default, minimum, maximum, integer=False):
     return value, None
 
 
+API_SAMPLE_MAX_TIMEOUT = 20
+API_WINDOW = 120
+API_SLOW_P90 = 3
+API_FAST = 1
+API_FAST_STREAK = 5
+UNREACHABLE_ERRNOS = {errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065}
+
+
+def unreachable_kind(error):
+    """(kind, definite) of a failed call. urllib wraps connect, TLS and send
+    failures in URLError; a read timeout arrives bare. network: the computer's
+    own connection (definite unless it is a connect timeout); unio: refused,
+    Unio's side; slow: a read timeout; None: anything else."""
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, socket.gaierror):
+            return "network", True
+        if isinstance(reason, ConnectionRefusedError):
+            return "unio", False
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            return "network", False
+        if isinstance(reason, OSError) and (reason.errno in UNREACHABLE_ERRNOS
+                                            or getattr(reason, "winerror", None) in UNREACHABLE_ERRNOS):
+            return "network", True
+        return None, False
+    if isinstance(error, ConnectionRefusedError):
+        return "unio", False
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return "slow", False
+    return None, False
+
+
+class ApiHealth:
+    """How this runner's Unio calls fare, for slow_network and slow_unio. One
+    per process behind its own lock: a new Api is built for each presence write.
+
+    slow_network: 2 network failures and 1 answer within 120 s. slow_unio: a
+    p90 of 3 s over the last 10 calls (5 at least, read timeouts counted at
+    their timeout), or 2 answers of 5xx or refusals beside 1 good answer
+    within 120 s. Both clear after 5 calls in a row that answer well in under
+    1 s. While the bot's own memory or io stalls, read and connect timeouts are
+    the machine's and count for neither."""
+
+    def __init__(self, clock=time.monotonic):
+        self.lock = threading.Lock()
+        self.clock = clock
+        self.seq = 0
+        self.stalled = False
+        self.network_at = None
+        self.hook_error = None
+        self.active = {}
+        self._forget()
+
+    def _forget(self):
+        self.latencies = deque(maxlen=10)
+        self.network = deque()
+        self.unio = deque()
+        self.answered = deque()
+        self.good = deque()
+        self.fast = 0
+
+    def record(self, kind, seconds, status=0, timeout=0, definite=True, now=None):
+        with self.lock:
+            now = self.clock() if now is None else now
+            self.seq += 1
+            for q in (self.network, self.unio, self.answered, self.good):
+                while q and q[0] < now - API_WINDOW:
+                    q.popleft()
+            bad = None
+            if kind == "ok":
+                self.answered.append(now)
+                self.latencies.append(seconds)
+                if status >= 500:
+                    self.unio.append(now)
+                    bad = "slow_unio"
+                else:
+                    self.good.append(now)
+                    if seconds >= API_SLOW_P90:
+                        bad = "slow_unio"
+            elif kind == "slow" and not self.stalled:
+                self.latencies.append(max(seconds, timeout))
+                bad = "slow_unio"
+            elif kind == "network":
+                self.network_at = now
+                if definite or not self.stalled:
+                    self.network.append(now)
+                    bad = "slow_network"
+            elif kind == "unio":
+                self.unio.append(now)
+                bad = "slow_unio"
+            self.fast = self.fast + 1 if kind == "ok" and status < 500 and seconds < API_FAST else 0
+            if self.fast >= API_FAST_STREAK and self.active:
+                self.active = {}
+                self._forget()
+                return
+            if len(self.network) >= 2 and self.answered:
+                self.active.setdefault("slow_network", self.seq)
+            ordered = sorted(self.latencies)
+            p90 = ordered[math.ceil(0.9 * len(ordered)) - 1] if ordered else 0
+            if (len(ordered) >= 5 and p90 >= API_SLOW_P90) or (len(self.unio) >= 2 and self.good):
+                self.active.setdefault("slow_unio", self.seq)
+            if bad in self.active:
+                self.active[bad] = self.seq
+
+    def causes(self):
+        """{code: seq of the latest bad call behind it}."""
+        with self.lock:
+            return dict(self.active)
+
+    def p90(self):
+        with self.lock:
+            ordered = sorted(self.latencies)
+            return ordered[math.ceil(0.9 * len(ordered)) - 1] if len(ordered) >= 5 else None
+
+    def network_recent(self, now=None):
+        with self.lock:
+            now = self.clock() if now is None else now
+            return self.network_at is not None and now - self.network_at <= API_WINDOW
+
+
+API_HEALTH = ApiHealth()
+
+
+def api_sample(kind, seconds, status=0, timeout=0, definite=True):
+    """Api.call's timing hook: it never raises into a call."""
+    try:
+        API_HEALTH.record(kind, seconds, status, timeout, definite)
+    except Exception as e:  # a hook must never break a call
+        if API_HEALTH.hook_error is None:
+            API_HEALTH.hook_error = short(f"{type(e).__name__}: {e}", 200)
+
+
 class ApiUnreachable(Exception):
-    def __init__(self, message, untrusted=False):
+    def __init__(self, message, untrusted=False, kind=None):
         super().__init__(message)
         # TLS refused the server's certificate: this Python trusts no CA that signed it.
         self.untrusted = untrusted
+        # unreachable_kind(): network, unio, slow or None.
+        self.kind = kind
 
 
 class Api:
@@ -1964,7 +2100,10 @@ class Api:
         self.base = base
         self.token = token
 
-    def call(self, method, path, body=None, idempotency_key=None, timeout=20, ascii_only=True):
+    def call(self, method, path, body=None, idempotency_key=None, timeout=20, ascii_only=True, sample=True):
+        """`sample`: whether ApiHealth times this call; uploads (timeout over 20 s)
+        and settle's retries never count."""
+        sample = sample and timeout <= API_SAMPLE_MAX_TIMEOUT
         if stopping.is_set():
             # systemd's TimeoutStopSec bounds the whole shutdown.
             timeout = min(timeout, 5)
@@ -1983,22 +2122,30 @@ class Api:
             req.add_header("Content-Type", "application/json")
         if idempotency_key:
             req.add_header("Idempotency-Key", idempotency_key)
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, self._json(resp.read())
+                status, data = resp.status, self._json(resp.read())
         except urllib.error.HTTPError as e:
-            return e.code, self._json(e.read())
+            status, data = e.code, self._json(e.read())
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
-            raise ApiUnreachable(f"{self.base} unreachable: {reason}",
+            kind, definite = unreachable_kind(e)
+            if sample:
+                api_sample(kind, time.monotonic() - started, timeout=timeout, definite=definite)
+            raise ApiUnreachable(f"{self.base} unreachable: {reason}", kind=kind,
                                  untrusted=isinstance(reason, ssl.SSLCertVerificationError)) from None
+        if sample:
+            api_sample("ok", time.monotonic() - started, status)
+        return status, data
 
     def settle(self, method, path, body, idempotency_key, timeout=20, ascii_only=True):
         """Writes that must land: a lost one leaves the item claimed for 15 minutes."""
         status, data = 0, {}
         for attempt in range(3):
             try:
-                status, data = self.call(method, path, body, idempotency_key, timeout=timeout, ascii_only=ascii_only)
+                status, data = self.call(method, path, body, idempotency_key, timeout=timeout, ascii_only=ascii_only,
+                                         sample=attempt == 0)
             except ApiUnreachable as e:
                 status, data = 0, {"error": str(e)}
             if 0 < status < 500:
