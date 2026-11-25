@@ -213,6 +213,8 @@ class FakeUnio:
             return 200, {"data": {}}
         if method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/comments"):
             return 201, {"data": {"id": "c-runner-reply"}}
+        if method == "POST" and path.startswith("/v1/agents/customers/") and path.endswith("/notes"):
+            return 201, {"data": {"id": "n-runner-reply"}}
         if method == "POST" and path == "/v1/agents/inbox/files":
             if body.get("target") == "task" and self.task_files_refused:
                 return 403, {"error": "Sem permissão.", "code": "agent_scope_author"}
