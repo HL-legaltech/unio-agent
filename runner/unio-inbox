@@ -4980,6 +4980,8 @@ class Session:
         self.started = False
         self.start_error = None
         self.timed_out = False
+        # The seconds run_session gave it, which a client note caps below UNIO_INBOX_TIMEOUT.
+        self.timeout = None
         self.interrupted = False
         self.stderr_tail = ""
         # The subscription's windows as the last rate_limit_event gave them (rate_limits()),
@@ -5497,6 +5499,7 @@ class Runner:
                 if subject == "customer":
                     timeout = min(timeout, CUSTOMER_SESSION_CAP)
                 s = Session(required=required)
+        s.timeout = timeout
         config = {"mcpServers": {"unio": {"type": "http", "url": self.cfg.mcp_url, "headers": headers}}}
         fd = os.open(mcp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -5703,7 +5706,7 @@ class Runner:
             stop_group(proc)
 
     def classify(self, s, now=None, timeout=None):
-        v = self._classify(s, now or utcnow(), timeout or self.cfg.timeout)
+        v = self._classify(s, now or utcnow(), timeout or s.timeout or self.cfg.timeout)
         written = written_outcome(s.succeeded)
         if v.kind in ("release", "fail") and written != "skipped":
             # The answer is out: a release or a retry could only post it twice.

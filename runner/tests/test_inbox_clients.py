@@ -316,5 +316,6 @@ class SessionCap(HomeCase):
             s = runner.run_session(note(), "prompt\n", [], out, {"claimId": CLAIM})
         self.assertTrue(s.timed_out)
         self.assertLess(time.monotonic() - began, 30)
+        self.assertEqual(runner.classify(s).error, "timed out after 1 s")
         self.assertEqual(s.required, inbox.CUSTOMER_REQUIRED_TOOLS)
         self.assertTrue(Path(out / "prompt.txt").is_file())
