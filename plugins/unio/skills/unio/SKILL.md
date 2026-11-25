@@ -2,12 +2,12 @@
 name: unio
 description: Track engineering work in Unio, the team's task tracker, through the `unio` MCP tools, acting as the workspace's agent. Use in the top-level session at the start of substantive work (the user pastes a Unio task link or a key such as ABC-12, or asks to build, fix, investigate, migrate or ship something that will become a commit or pull request), whenever the work changes phase (plan settled, pull request opened, review round, merged, deployed, blocked), when a new topic deserves its own task, when work is larger than one task and should be planned as a project with milestones, and whenever the user mentions Unio, a task (tarefa), a ticket, a card, a project (projeto) or a milestone (marco).
 metadata:
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Track the work in Unio
 
-This is version 1.4 of the Unio skill.
+This is version 1.5 of the Unio skill.
 
 Every substantive session belongs to one Unio task, and that task reads at
 any moment like a precise record: what the work is, where it stands, what
@@ -335,8 +335,8 @@ ask first.
   or finished in the last 90 days, and the pieces your plan adds; a bug
   found on the way elsewhere does not count. A project at four, or at three
   with stages that ship in order, several owners, or a date for the whole.
-  Never after "Don't track this session", for a `clientLinked` task, or
-  when the `timeline` shows a person took the task out of a project.
+  Never after "Don't track this session", or when the `timeline` shows a
+  person took the task out of a project.
 - **Create it:** `search_projects` in the root's team first, and file into a
   live project that covers the outcome. Otherwise one `create_project`,
   shaped as its description says, with `lead` `"issuer"` unless the user
@@ -367,8 +367,7 @@ ask first.
   to 5 linked tasks or milestones, the next milestone dated like `Oct 15`;
   no percentages, mentions or outside links. On a `soft` tier, say it in one
   chat line and offer the update. A refusal ends it: say so in the chat.
-- Never move a task to another team to fit a project, and never change a
-  `clientLinked` project.
+- Never move a task to another team to fit a project.
 
 ## 11. Name the conversation on its task
 
