@@ -58,7 +58,7 @@ TOKEN = re.compile(r"^unio_[0-9A-Za-z]{46}$")
 # The rule unio-inbox applies to repos.json.
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DEFAULT_API = "https://api.unio.so/v1"
-AGENTS_PAGE = "Configurações > Sistema > Agentes"
+AGENTS_PAGE = "Configurações > Workspace > Agentes"
 START_WAIT = 60
 # How long a stop may take before the runner is killed, its item then left
 # claimed for 15 minutes. Against an API that never answers, unio-inbox's

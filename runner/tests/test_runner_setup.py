@@ -458,7 +458,7 @@ class ServiceEndToEnd(Base):
         code, out = self.box.runner(["uninstall", "--workspace", "org_test", "--yes"])
         self.assertEqual(code, 0, out)
         self.assertIn("Serviço de org_test removido.", out)
-        self.assertIn("revogue-o em Configurações > Sistema > Agentes", out)
+        self.assertIn("revogue-o em Configurações > Workspace > Agentes", out)
         self.assertIsNone(self.token())
         self.assertTrue((self.config / "repos.json").exists())
         self.assertIn("org_test: sem serviço instalado", self.box.runner(["status"])[1])
