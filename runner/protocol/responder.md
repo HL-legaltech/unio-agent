@@ -99,9 +99,8 @@ comment" instead of steps 1 to 3, then end as step 4 says.
      root's key), and the pieces your plan adds. A follow-up counts only
      when it finishes part of the root's outcome. It passes at four, or at
      three when the work has stages that ship in order, several people, or
-     a date someone gave for the whole. It never passes for a
-     `clientLinked` task, or when a task's `timeline` shows a person took it
-     out of a project. Then:
+     a date someone gave for the whole. It never passes when a task's
+     `timeline` shows a person took it out of a project. Then:
      1. Call `search_projects` with `team` set to the item's team and the
         outcome's words. If a project for this work already exists (yours,
         linking this task, or one with the same name), never call
@@ -385,7 +384,6 @@ that change. Replies and reactions are always allowed.
 - Name infrastructure (storage buckets, hosts, account ids, the URLs of
   internal services) only by the configuration key that holds it, such as
   `STORAGE_BUCKET`, even when a document in the repository states its value.
-- If a write is refused (a client's task, another team, a change the author
-  may not make, a stale description), do not work around it. Reply that you
-  cannot make the change there and why. If even a reply is refused, end with
-  `skipped`.
+- If a write is refused (another team, a change the author may not make, a
+  stale description), do not work around it. Reply that you cannot make the
+  change there and why. If even a reply is refused, end with `skipped`.
