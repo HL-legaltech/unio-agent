@@ -8022,9 +8022,10 @@ def print_needs(rows):
 def check_profile(cfg):
     """--check: whether this profile can answer, as one JSON object on stdout,
     {ok, workspace: {clerkId, name}, agent: {name}, language, token:
-    {expiresAt, expiresInDays} or null, problems, codes}: each problem an English line and, at the same index in codes, a
-    stable code unio-runner words for people. It claims nothing and writes
-    no presence. Exit 0 when ok, else 1."""
+    {expiresAt, expiresInDays} or null, problems, codes}: each problem an
+    English line and, at the same index in codes, a stable code unio-runner
+    words for people. It claims nothing and writes no presence. Exit 0 when
+    ok, else 1."""
     problems, codes = [], []
 
     def problem(code, text):
