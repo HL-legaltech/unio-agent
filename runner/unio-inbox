@@ -8021,8 +8021,8 @@ def print_needs(rows):
 
 def check_profile(cfg):
     """--check: whether this profile can answer, as one JSON object on stdout,
-    {ok, workspace: {clerkId, name}, agent: {name}, language, problems,
-    codes}: each problem an English line and, at the same index in codes, a
+    {ok, workspace: {clerkId, name}, agent: {name}, language, token:
+    {expiresAt, expiresInDays} or null, problems, codes}: each problem an English line and, at the same index in codes, a
     stable code unio-runner words for people. It claims nothing and writes
     no presence. Exit 0 when ok, else 1."""
     problems, codes = [], []
@@ -8031,7 +8031,8 @@ def check_profile(cfg):
         codes.append(code)
         problems.append(text)
 
-    result = {"ok": False, "workspace": None, "agent": None, "language": None, "problems": problems, "codes": codes}
+    result = {"ok": False, "workspace": None, "agent": None, "language": None, "token": None, "problems": problems,
+              "codes": codes}
     token = cfg.token()
     if not token:
         problem("no_token", f"no runner token in {cfg.token_file}")
@@ -8053,9 +8054,12 @@ def check_profile(cfg):
         elif status:
             ws = me.get("workspace") if isinstance(me.get("workspace"), dict) else {}
             agent = me.get("agent") if isinstance(me.get("agent"), dict) else {}
-            purpose = (me.get("token") or {}).get("purpose") if isinstance(me.get("token"), dict) else None
+            token_row = me.get("token") if isinstance(me.get("token"), dict) else {}
+            purpose = token_row.get("purpose")
             result.update(workspace={"clerkId": ws.get("clerkId"), "name": ws.get("name")},
-                          agent={"name": agent.get("name")}, language=writing_language(me))
+                          agent={"name": agent.get("name")}, language=writing_language(me),
+                          token={"expiresAt": token_row.get("expiresAt"),
+                                 "expiresInDays": token_row.get("expiresInDays")} if token_row else None)
             if purpose != "runner":
                 problem("not_runner_token", f"the token's purpose is {purpose or 'not given'}, not runner: issue a "
                                             "runner token for the answering service")
