@@ -81,7 +81,7 @@ The service's token lasts 30, 90 or 365 days, as chosen when it was generated. T
 
 When Unio refuses the token (it expired, was revoked, or the person who generated it lost access), the service writes one `token_refused` line to its log and from then on only counts the refused polls, which back off to one every 5 minutes. It also stops sending its heartbeat, so the agent's page shows it offline. A restart or a self-update keeps the count and the pace. Unio answers the same refusal in all three cases, so the service names the cause from the expiry it last read: `expired` when that date has passed, `refused` when it has not, and `unknown` when it never read one.
 
-To fix it, a developer who administers the workspace clicks Trocar o token on the Agentes page (Configurações > Workspace > Agentes), and then, on the service's computer, runs `unio runner setup --workspace org_…` with the new token. Setup checks and stores it and restarts the service, whose first poll takes it at once and writes one `token_accepted` line. A token file edited by hand is taken within 5 minutes, or at once with `unio runner restart --workspace org_…`.
+To fix it, a developer who administers the workspace clicks Trocar o token on the Agentes page (Configurações > Workspace > Agentes), and then, on the service's computer, runs `unio runner setup --workspace org_…` with the new token. Setup checks and stores it, clears the old token's refusal and expiry from `health.json` (so `unio runner status` reads the new one at once, with `--no-service` too), and restarts the service, whose first poll takes it at once. A token file edited by hand is taken within 5 minutes, or at once with `unio runner restart --workspace org_…`.
 
 ## Research
 

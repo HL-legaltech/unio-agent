@@ -1209,8 +1209,9 @@ def count_words(n):
 
 def token_status(prof, now=None):
     """How the profile's token stands, from the token block unio-inbox keeps in
-    health.json; never raises. A block from before a token setup replaced is
-    stale only until the restarted service's first poll."""
+    health.json; never raises. Setup rewrites the block once Unio accepts a
+    new token (note_accepted_token), so a refusal it shows is the token's
+    on disk, or one a service still running wrote before its next poll."""
     now = now or datetime.now(timezone.utc)
     try:
         has_token = prof.token.exists()
@@ -1244,6 +1245,33 @@ def token_status(prof, now=None):
     elif expires:
         row["state"] = "ok"
     return row
+
+
+def note_accepted_token(prof, expires, agent_name, now):
+    """After setup's check accepted the token: the health block's refusal and
+    old expiry are another token's, and would keep status saying refused or
+    expired until a service polls, which after --no-service may be never."""
+    path = prof.state / "health.json"
+    try:
+        h = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(h, dict) or not isinstance(h.get("token"), dict):
+        return
+    block = {k: v for k, v in h["token"].items()
+             if k not in ("refusedSince", "lastRefusedAt", "refusedCount", "cause", "expiresAt", "checkedAt")}
+    at = parse_iso(expires)
+    if at:
+        block.update(expiresAt=expires, checkedAt=now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if agent_name:
+        block["agentName"] = agent_name
+    block["state"] = "expiring" if at and days_left(at, now) <= TOKEN_WARN_DAYS else "ok"
+    h["token"] = block
+    # A running service may rewrite its own copy first; its next accepted poll clears it the same way.
+    try:
+        write_atomic(path, (json.dumps(h, indent=2) + "\n").encode("utf-8"), mode=0o600)
+    except OSError:
+        pass
 
 
 def token_words(org, row, now=None):
@@ -1473,6 +1501,7 @@ def setup(opts):
     if parse_iso(expires):
         say("Ele vence em %s; %s status avisa na última semana." % (
             when_words(expires, datetime.now(timezone.utc)), self_command()))
+    note_accepted_token(prof, expires, clean(agent.get("name") or "").strip() or None, datetime.now(timezone.utc))
     if api:
         set_env_value(prof.env_file, "UNIO_API_URL", api)
 

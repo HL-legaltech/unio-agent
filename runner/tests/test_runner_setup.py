@@ -128,6 +128,35 @@ class SetupWithoutService(Base):
         self.assertEqual(code, 1, out)
         self.assertEqual(self.token(), RUNNER)
 
+    def test_an_accepted_token_ends_the_recorded_refusal(self):
+        refused = {"state": "refused", "expiresAt": "2026-11-22T00:14:03Z", "agentName": "Unio Bot",
+                   "checkedAt": "2026-11-21T18:00:00Z", "refusedSince": "2026-11-22T00:15:00Z",
+                   "lastRefusedAt": "2026-11-25T12:00:00Z", "refusedCount": 4312, "cause": "expired"}
+        health = self.state / "health.json"
+        health.parent.mkdir(parents=True, exist_ok=True)
+        health.write_text(json.dumps({"lastPollAt": "2026-11-25T12:00:00Z", "token": refused}), encoding="utf-8")
+        code, out = self.setup("--yes", token=REVOKED)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(json.loads(health.read_text(encoding="utf-8"))["token"], refused)
+        code, out = self.setup("--yes")
+        self.assertEqual(code, 0, out)
+        h = json.loads(health.read_text(encoding="utf-8"))
+        self.assertEqual(h["lastPollAt"], "2026-11-25T12:00:00Z")
+        block = h["token"]
+        for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause"):
+            self.assertNotIn(key, block)
+        self.assertEqual((block["state"], block["expiresAt"], block["agentName"]),
+                         ("ok", "2027-01-01T00:00:00.000Z", AGENT))
+        self.assertIsNotNone(ur.parse_iso(block["checkedAt"]))
+        # With no service to poll, status already reads the new token.
+        prof = ur.Profile("org_test", self.config, self.state, self.token_file)
+        self.assertEqual(ur.token_status(prof)["state"], "ok")
+        self.assertNoTokenLeaked(out, health.read_text(encoding="utf-8"))
+
+    def test_setup_writes_no_health_file_of_its_own(self):
+        self.assertEqual(self.setup("--yes")[0], 0)
+        self.assertFalse((self.state / "health.json").exists())
+
     def test_no_answer_from_unio(self):
         code, out = self.box.runner(["setup", "--workspace", "org_test", "--api", closed_port_url(), "--token-stdin",
                                      "--no-service", "--yes"], input_text=RUNNER + "\n")
