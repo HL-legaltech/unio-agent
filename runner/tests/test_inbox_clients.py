@@ -288,8 +288,12 @@ class Handle(HomeCase):
     def test_a_timeout_note_goes_under_the_claim(self):
         api, _ = self.handle(inbox.Verdict("too_large", error="cap"))
         seen = api.seen()
-        self.assertLess(seen.index(("POST", f"/agents/customers/{CLIENT_ID}/notes", SCOPED)),
+        notes = f"/agents/customers/{CLIENT_ID}/notes"
+        self.assertLess(seen.index(("POST", notes, SCOPED)),
                         seen.index(("POST", "/agents/inbox/complete", None)))
+        body = next(b for m, p, b, _ in api.calls if p == notes)
+        self.assertEqual(body["content"], inbox.CLIENT_TOO_LARGE_REPLY["pt-BR"])
+        self.assertNotIn("sessão de código", body["content"], "a client's page has no coding session")
 
 
 class SessionCap(HomeCase):

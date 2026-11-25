@@ -39,8 +39,8 @@ class Language(unittest.TestCase):
             self.assertIn(marker, line)
 
     def test_fixed_replies_in_both_languages(self):
-        for table in (inbox.TOO_LARGE_REPLY, inbox.PROJECT_MADE_REPLY, inbox.FINAL_REPLY, inbox.FAILURE_REASONS,
-                      inbox.PROJECTS_AND):
+        for table in (inbox.TOO_LARGE_REPLY, inbox.CLIENT_TOO_LARGE_REPLY, inbox.PROJECT_MADE_REPLY, inbox.FINAL_REPLY,
+                      inbox.FAILURE_REASONS, inbox.PROJECTS_AND):
             self.assertEqual(set(table), set(inbox.LANGUAGE_NAMES))
         self.assertEqual(set(inbox.FAILURE_REASONS["en"]), set(inbox.FAILURE_REASONS["pt-BR"]))
         self.assertIn("grande demais", inbox.TOO_LARGE_REPLY["pt-BR"])

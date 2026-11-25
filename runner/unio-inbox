@@ -268,6 +268,11 @@ TOO_LARGE_REPLY = {
     "pt-BR": ("**Este pedido é grande demais para uma resposta automática.** "
               "Faça uma pergunta mais específica ou leve-o para uma sessão de código."),
 }
+# A client note's readers have no coding session to take it to.
+CLIENT_TOO_LARGE_REPLY = {
+    "en": "**This request is too large to answer automatically.** Ask a narrower question.",
+    "pt-BR": "**Este pedido é grande demais para uma resposta automática.** Faça uma pergunta mais específica.",
+}
 # Instead of TOO_LARGE_REPLY when a reply ran out of time while a slow cause
 # held (timeout_cause): fixed copy around one SLOW_SENTENCES line, never a
 # figure, a program name or the host.
@@ -6183,9 +6188,10 @@ class Runner:
             # Only a reply that ran out of time: a stop, the web check or the turn cap is no slowness.
             cause = timeout_cause(slow_run, ai_retry_delay(s.retry_credits)) if s.timed_out else None
             if not s.succeeded & COMMENT_WRITES:
+                too_large = CLIENT_TOO_LARGE_REPLY if item_subject(item) == "customer" else TOO_LARGE_REPLY
                 text = project_note(s, self.language) or (
                     SLOW_TIMEOUT_REPLY[self.language].format(cause=SLOW_SENTENCES[self.language][cause]) if cause
-                    else TOO_LARGE_REPLY[self.language])
+                    else too_large[self.language])
                 note_error = self.reply(api, item, claim, text, f"unio-inbox:note:{key}:{claim['claimId']}")
             # The complete allowlist has no reason field: the code travels in the note.
             note = f"timed out ({cause})" if cause else TOO_LARGE_NOTE
