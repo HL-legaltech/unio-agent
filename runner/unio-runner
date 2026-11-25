@@ -95,9 +95,11 @@ Comandos:
     --no-service              Prepara o perfil sem instalar o serviço.
     --yes                     Mantém o token e os repositórios já salvos, sem
                               perguntar.
-  status [--json]             Estado, versão, última linha do registro e
-                              atualização automática de cada serviço; com
-                              --json, o mesmo em JSON.
+  status [--json]             Estado, token, versão, última linha do
+                              registro e atualização automática de cada
+                              serviço; com --json, o mesmo em JSON. Sai com 1
+                              quando o token de algum serviço foi recusado ou
+                              venceu.
   start                       Liga o serviço.
   stop                        Para o serviço até o próximo start.
   restart                     Reinicia o serviço.
@@ -1163,6 +1165,122 @@ def project_status_words(block):
     return words
 
 
+# unio-inbox's TOKEN_WARN_DAYS, the web's EXPIRY_WARNING_DAYS.
+TOKEN_WARN_DAYS = 7
+# What the web's formatDay prints (lib/agent-tokens.ts); never the machine's locale.
+MONTHS = ("jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez.")
+
+
+def parse_iso(value):
+    """unio-inbox's parse_iso: Python 3.9 reads no Z."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+
+
+def days_left(expires, now):
+    """unio-inbox's days_left: local midnights, as the Agentes page counts."""
+    return (expires.astimezone().date() - now.astimezone().date()).days
+
+
+def day_words(value, now):
+    """"22 de nov.", with the year when it is not this one, on this computer's clock."""
+    local = value.astimezone()
+    year = "" if local.year == now.astimezone().year else " de %d" % local.year
+    return "%d de %s%s" % (local.day, MONTHS[local.month - 1], year)
+
+
+def when_words(value, now):
+    """"22 de nov., às 21:14" for an ISO time, on this computer's clock."""
+    at = parse_iso(value)
+    if at is None:
+        return "?"
+    local = at.astimezone()
+    return "%s, às %02d:%02d" % (day_words(at, now), local.hour, local.minute)
+
+
+def count_words(n):
+    return "%s %s" % (("{:,}".format(n)).replace(",", "."), "tentativa" if n == 1 else "tentativas")
+
+
+def token_status(prof, now=None):
+    """How the profile's token stands, from the token block unio-inbox keeps in
+    health.json; never raises. A block from before a token setup replaced is
+    stale only until the restarted service's first poll."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        has_token = prof.token.exists()
+    except OSError:
+        has_token = False
+    try:
+        block = json.loads((prof.state / "health.json").read_text(encoding="utf-8")).get("token")
+    except (OSError, ValueError, AttributeError):
+        block = None
+    block = block if isinstance(block, dict) else None
+    get = (lambda key: block.get(key)) if block else (lambda key: None)
+    expires = parse_iso(get("expiresAt"))
+    count = get("refusedCount")
+    row = {"state": "unknown", "cause": None, "expiresAt": get("expiresAt") if expires else None,
+           "expiresInDays": days_left(expires, now) if expires else None,
+           "refusedSince": get("refusedSince") if parse_iso(get("refusedSince")) else None,
+           "refusedCount": count if isinstance(count, int) and count >= 0 else None,
+           "checkedAt": get("checkedAt") if parse_iso(get("checkedAt")) else None,
+           "agentName": clean(get("agentName"), 80) if isinstance(get("agentName"), str) else None}
+    if not has_token:
+        row["state"] = "missing"
+    elif block is None:
+        row["state"] = "unknown"
+    elif row["refusedSince"]:
+        cause = get("cause")
+        row.update(state="refused", cause=cause if cause in ("expired", "refused") else "unknown")
+    elif expires and expires <= now:
+        row["state"] = "expired"
+    elif expires and row["expiresInDays"] <= TOKEN_WARN_DAYS:
+        row["state"] = "expiring"
+    elif expires:
+        row["state"] = "ok"
+    return row
+
+
+def token_words(org, row, now=None):
+    """The "token" lines of status, and how to fix a token that stopped or is about to."""
+    now = now or datetime.now(timezone.utc)
+    state = row.get("state")
+    agent = row.get("agentName") or "agente"
+    fix = ("  para corrigir: em %s, no %s, clique em Trocar o token e rode %s setup --workspace %s neste computador"
+           % (AGENTS_PAGE, agent, self_command(), org))
+    tries = count_words(row.get("refusedCount") or 0)
+    if state == "refused" and row.get("cause") == "expired":
+        return ["  token: venceu em %s, e o Unio o recusa desde então (%s)"
+                % (when_words(row["expiresAt"], now), tries), fix]
+    if state == "refused":
+        why = ("Ele foi revogado, ou quem o gerou perdeu o acesso." if row.get("cause") == "refused" else
+               "Ele venceu, foi revogado, ou quem o gerou perdeu o acesso.")
+        return ["  token: recusado pelo Unio desde %s (%s). %s" % (when_words(row["refusedSince"], now), tries, why),
+                fix]
+    if state == "expired":
+        return ["  token: venceu em %s" % when_words(row["expiresAt"], now), fix]
+    if state == "expiring":
+        days = row["expiresInDays"]
+        left = "vence hoje" if days <= 0 else "vence amanhã" if days == 1 else "vence em %d dias" % days
+        return ["  token: %s, em %s" % (left, when_words(row["expiresAt"], now)),
+                "  para não parar: troque-o antes em %s, no %s (Trocar o token), e rode %s setup --workspace %s "
+                "neste computador" % (AGENTS_PAGE, agent, self_command(), org)]
+    if state == "ok":
+        return ["  token: vale até %s" % day_words(parse_iso(row["expiresAt"]), now)]
+    if state == "missing":
+        return ["  token: nenhum salvo neste computador; rode %s setup --workspace %s" % (self_command(), org)]
+    return ["  token: validade ainda não lida (o serviço lê no próximo início)"]
+
+
+def token_stopped(row):
+    return row.get("state") in ("refused", "expired")
+
+
 # The web app's labels for unio-inbox's slow-answer causes (SLOW_CODES), in its order.
 SLOW_LABELS = {
     "slow_network": "rede instável",
@@ -1412,15 +1530,21 @@ def status(opts):
                             "version": running_version(prof), "autoUpdate": autoupdate_off(prof) is None,
                             "token": prof.token.exists(), "lastLog": entries[-1] if entries else None,
                             "projectStatus": project_status(prof), "research": research_limits(prof),
-                            "vitals": vitals(prof)}))
+                            "vitals": vitals(prof), "tokenStatus": token_status(prof)}))
+    code = 1 if any(token_stopped(row["tokenStatus"]) for _, row in rows) else 0
     if opts.get("--json"):
         say(json.dumps({"workspaces": [row for _, row in rows]}))
-        return 0
+        return code
     if not rows:
         say("Nenhum serviço de respostas está configurado neste computador. Para ligar um, rode o comando da "
             "página %s, no Unio." % AGENTS_PAGE)
     for prof, row in rows:
-        say("%s: %s" % (row["workspace"], STATE_WORDS[row["state"]]))
+        words = STATE_WORDS[row["state"]]
+        if row["state"] == "running" and token_stopped(row["tokenStatus"]):
+            words += ", mas não atende ninguém"
+        say("%s: %s" % (row["workspace"], words))
+        for line in token_words(row["workspace"], row["tokenStatus"]):
+            say(line)
         say("  versão: %s" % (row["version"] or "ainda não começou"))
         say("  atualização automática: %s" % autoupdate(prof))
         say("  status dos projetos: %s" % project_status_words(row["projectStatus"]))
@@ -1431,7 +1555,7 @@ def status(opts):
         for line in rest:
             say("    %s" % line)
         say("  última linha do registro: %s" % (format_entry(row["lastLog"]) if row["lastLog"] else "nenhuma"))
-    return 0
+    return code
 
 
 def installed_service(org):

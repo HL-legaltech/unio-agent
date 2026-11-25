@@ -7,8 +7,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -96,12 +97,14 @@ class Commands(unittest.TestCase):
         self.box = Sandbox(self)
         self.config, self.state, self.token_file = self.box.paths()
 
-    def make_profile(self, org="org_test", lines=(), token=True, env=None):
+    def make_profile(self, org="org_test", lines=(), token=True, env=None, token_block=None):
         config, state, token_file = self.box.paths(org)
         config.mkdir(parents=True, exist_ok=True)
         state.mkdir(parents=True, exist_ok=True)
         if token:
             token_file.write_text(RUNNER, encoding="utf-8")
+        if token_block is not None:
+            (state / "health.json").write_text(json.dumps({"token": token_block}), encoding="utf-8")
         if lines:
             (state / "log.jsonl").write_text("".join(json.dumps(e) + "\n" for e in lines), encoding="utf-8")
         if env:
@@ -251,12 +254,15 @@ class Commands(unittest.TestCase):
         self.assertEqual(code, 0, out)
         # Without an env file, a runner updates itself when its clone is a git clone.
         in_clone = (ur.CLONE / ".git").exists()
+        unread = {"cause": None, "expiresAt": None, "expiresInDays": None, "refusedSince": None,
+                  "refusedCount": None, "checkedAt": None, "agentName": None}
         self.assertEqual(json.loads(out), {"workspaces": [
             {"workspace": "org_gone", "state": "absent", "version": None, "autoUpdate": in_clone, "token": False,
-             "lastLog": None, "projectStatus": None, "research": None, "vitals": None},
+             "lastLog": None, "projectStatus": None, "research": None, "vitals": None,
+             "tokenStatus": dict(unread, state="missing")},
             {"workspace": "org_test", "state": "absent", "version": "2.0.0", "autoUpdate": False, "token": True,
              "lastLog": {"at": "2026-10-23T11:00:30Z", "event": "idle", "items": 0}, "projectStatus": None,
-             "research": None, "vitals": None}]})
+             "research": None, "vitals": None, "tokenStatus": dict(unread, state="unknown")}]})
         code, out = self.box.runner(["status", "--json", "--workspace", "org_test"])
         self.assertEqual([w["workspace"] for w in json.loads(out)["workspaces"]], ["org_test"])
 
@@ -361,6 +367,169 @@ class Commands(unittest.TestCase):
         with self.box.inside(), captured() as out, mock.patch.object(ur.time, "sleep", nap):
             self.assertEqual(ur.main(["logs", "-f", "-n", "1"]), 0)
         self.assertEqual(out.getvalue().splitlines()[:2], ["t0 poll", "t1 claimed"])
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TokenStatus(unittest.TestCase):
+    """The token lines of status, from the token block unio-inbox keeps in health.json."""
+
+    setUp = Commands.setUp
+    make_profile = Commands.make_profile
+
+    def refused(self, cause, expires_at=None):
+        now = datetime.now(timezone.utc)
+        return {"state": "refused", "expiresAt": expires_at or iso(now - timedelta(days=3)), "agentName": "Unio Bot",
+                "checkedAt": iso(now - timedelta(days=4)), "refusedSince": iso(now - timedelta(days=3)),
+                "lastRefusedAt": iso(now), "refusedCount": 4312, "cause": cause}
+
+    def running_status(self, *args):
+        svc = mock.Mock()
+        svc.state.return_value = "running"
+        with self.box.inside(), captured() as out, mock.patch.object(ur, "service", lambda kind=None: svc):
+            code = ur.main(["status", "--workspace", "org_test", *args])
+        return code, out.getvalue()
+
+    def test_status_says_a_refused_token_first(self):
+        block = self.refused("expired")
+        self.make_profile(token_block=block)
+        code, out = self.running_status()
+        self.assertEqual(code, 1, out)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "org_test: ligado, mas não atende ninguém")
+        now = datetime.now(timezone.utc)
+        self.assertEqual(lines[1], "  token: venceu em %s, e o Unio o recusa desde então (4.312 tentativas)"
+                         % ur.when_words(block["expiresAt"], now))
+        self.assertTrue(lines[2].startswith("  para corrigir: em Configurações > Workspace > Agentes, no Unio Bot, "
+                                            "clique em Trocar o token e rode "), lines[2])
+        self.assertTrue(lines[2].endswith("unio runner setup --workspace org_test neste computador"), lines[2])
+        self.assertTrue(lines[3].startswith("  versão:"), lines[3])
+        code, out = self.running_status("--json")
+        self.assertEqual(code, 1, out)
+        row = json.loads(out)["workspaces"][0]["tokenStatus"]
+        self.assertEqual((row["state"], row["cause"], row["refusedCount"]), ("refused", "expired", 4312))
+
+    def test_status_names_the_cause_of_a_refusal(self):
+        for cause, words in (("refused", "Ele foi revogado, ou quem o gerou perdeu o acesso."),
+                             ("unknown", "Ele venceu, foi revogado, ou quem o gerou perdeu o acesso.")):
+            with self.subTest(cause=cause):
+                block = self.refused(cause)
+                self.make_profile(token_block=block)
+                code, out = self.box.runner(["status", "--workspace", "org_test"])
+                self.assertEqual(code, 1, out)
+                self.assertIn("org_test: sem serviço instalado\n", out)
+                self.assertIn("  token: recusado pelo Unio desde %s (4.312 tentativas). %s" % (
+                    ur.when_words(block["refusedSince"], datetime.now(timezone.utc)), words), out)
+                self.assertIn("  para corrigir: em Configurações > Workspace > Agentes", out)
+
+    def test_status_names_all_three_causes_when_the_expiry_is_unknown(self):
+        block = self.refused("unknown")
+        block.pop("expiresAt")
+        self.make_profile(token_block=block)
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("Ele venceu, foi revogado, ou quem o gerou perdeu o acesso.", out)
+
+    def test_status_says_an_expired_token_the_service_has_not_met(self):
+        expires = iso(datetime.now(timezone.utc) - timedelta(hours=2))
+        self.make_profile(token_block={"state": "ok", "expiresAt": expires, "agentName": "Unio Bot"})
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("  token: venceu em %s\n" % ur.when_words(expires, datetime.now(timezone.utc)), out)
+        self.assertIn("  para corrigir:", out)
+
+    def test_status_warns_in_the_last_week(self):
+        now = datetime.now(timezone.utc)
+        expires = iso(now + timedelta(days=3))
+        self.make_profile(token_block={"state": "expiring", "expiresAt": expires, "agentName": "Unio Bot"})
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  token: vence em %d dias, em %s\n" % (ur.days_left(ur.parse_iso(expires), now),
+                                                            ur.when_words(expires, now)), out)
+        self.assertIn("  para não parar: troque-o antes em Configurações > Workspace > Agentes, no Unio Bot "
+                      "(Trocar o token), e rode ", out)
+        self.assertIn("unio runner setup --workspace org_test neste computador", out)
+
+    def test_today_and_tomorrow_have_their_words(self):
+        now = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc)
+        for days, words in ((0, "vence hoje, em "), (1, "vence amanhã, em ")):
+            row = {"state": "expiring", "expiresInDays": days, "expiresAt": iso(now + timedelta(days=days)),
+                   "agentName": None}
+            first, fix = ur.token_words("org_test", row, now)
+            self.assertTrue(first.startswith("  token: " + words), first)
+            self.assertIn(", no agente (Trocar o token)", fix)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ is read only on POSIX")
+    def test_status_counts_local_midnights(self):
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Sao_Paulo"
+        time.tzset()
+
+        def restore():
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+        self.addCleanup(restore)
+        # 07:00, and the expiry two days later at 08:00, in São Paulo: the server's ceil says 3.
+        now = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+        self.make_profile(token_block={"state": "ok", "expiresAt": "2026-11-22T11:00:00Z"})
+        prof = ur.Profile("org_test", self.config, self.state, self.token_file)
+        row = ur.token_status(prof, now)
+        self.assertEqual((row["state"], row["expiresInDays"]), ("expiring", 2))
+        self.assertEqual(ur.token_words("org_test", row, now)[0], "  token: vence em 2 dias, em 22 de nov., às 08:00")
+
+    def test_status_dates_a_working_token(self):
+        now = datetime.now(timezone.utc)
+        expires = iso(now + timedelta(days=40))
+        self.make_profile(token_block={"state": "ok", "expiresAt": expires})
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  token: vale até %s\n" % ur.day_words(ur.parse_iso(expires), now), out)
+        self.assertNotIn("para corrigir", out)
+
+    def test_status_before_the_service_read_the_expiry(self):
+        self.make_profile()
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  token: validade ainda não lida (o serviço lê no próximo início)", out)
+        self.make_profile("org_gone", token=False)
+        code, out = self.box.runner(["status", "--workspace", "org_gone"])
+        self.assertIn("  token: nenhum salvo neste computador; rode ", out)
+        self.assertIn("setup --workspace org_gone", out)
+
+    def test_status_dates_are_portuguese_whatever_the_locale(self):
+        expires = "2027-03-15T12:00:00Z"
+        self.make_profile(token_block={"state": "ok", "expiresAt": expires})
+        done = subprocess.run([sys.executable, str(ur.HERE / "unio-runner"), "status", "--workspace", "org_test"],
+                              stdin=subprocess.DEVNULL, capture_output=True, env=non_utf8_locale(self.box.env()),
+                              timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = done.stdout.decode("utf-8", "replace")
+        self.assertIn("  token: vale até %s" % ur.day_words(ur.parse_iso(expires), datetime.now(timezone.utc)), out)
+        self.assertIn(" de mar.", out)
+
+    def test_the_token_never_shows(self):
+        self.make_profile(token_block=self.refused("expired"))
+        for args in ([], ["--json"]):
+            code, out = self.box.runner(["status", "--workspace", "org_test"] + args)
+            self.assertEqual(code, 1, out)
+            self.assertNotIn(RUNNER, out)
+            self.assertNotIn("unio_", out)
+
+    def test_dates_read_on_this_computers_clock(self):
+        now = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc)
+        at = datetime(2026, 11, 22, 21, 14, tzinfo=timezone.utc)
+        local = at.astimezone()
+        self.assertEqual(ur.when_words(iso(at), now), "%d de %s, às %02d:%02d" % (
+            local.day, ur.MONTHS[local.month - 1], local.hour, local.minute))
+        self.assertIn(" de 2027, às ", ur.when_words("2027-06-15T12:00:00Z", now))
+        self.assertEqual(ur.count_words(1), "1 tentativa")
+        self.assertEqual(ur.count_words(4312), "4.312 tentativas")
 
 
 class EnvFile(unittest.TestCase):
