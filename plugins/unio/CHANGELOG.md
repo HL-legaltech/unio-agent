@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0
+
+- O agente passa a trabalhar em tarefas e projetos ligados a um cliente como em qualquer outro: comenta, planeja projetos e atualiza o status deles.
+
 ## 1.4.1
 
 - As sessões passam a informar, para cada hora, o modelo, o modo rápido, a duração do cache e o número de chamadas, da conversa principal e dos subagentes. Com isso, a página do agente no Unio mostra quanto o uso custaria em preço de API.
