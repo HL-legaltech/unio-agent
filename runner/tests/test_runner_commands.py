@@ -496,7 +496,13 @@ class TokenStatus(unittest.TestCase):
         self.make_profile()
         code, out = self.box.runner(["status", "--workspace", "org_test"])
         self.assertEqual(code, 0, out)
-        self.assertIn("  token: validade ainda não lida (o serviço lê no próximo início)", out)
+        unknown = "  token: validade ainda não lida (o serviço lê na próxima consulta ao Unio)\n"
+        self.assertIn(unknown, out)
+        # A running service whose read of the new token's expiry failed retries it on its own.
+        self.make_profile(token_block={"state": "ok"})
+        code, out = self.box.runner(["status", "--workspace", "org_test"])
+        self.assertEqual(code, 0, out)
+        self.assertIn(unknown, out)
         self.make_profile("org_gone", token=False)
         code, out = self.box.runner(["status", "--workspace", "org_gone"])
         self.assertIn("  token: nenhum salvo neste computador; rode ", out)

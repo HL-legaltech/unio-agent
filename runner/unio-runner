@@ -1274,7 +1274,7 @@ def token_words(org, row, now=None):
         return ["  token: vale até %s" % day_words(parse_iso(row["expiresAt"]), now)]
     if state == "missing":
         return ["  token: nenhum salvo neste computador; rode %s setup --workspace %s" % (self_command(), org)]
-    return ["  token: validade ainda não lida (o serviço lê no próximo início)"]
+    return ["  token: validade ainda não lida (o serviço lê na próxima consulta ao Unio)"]
 
 
 def token_stopped(row):
