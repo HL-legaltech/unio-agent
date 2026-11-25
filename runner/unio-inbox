@@ -189,7 +189,7 @@ except ImportError:  # a Python built without libffi: macOS and Windows then rea
 # web app answers project comments only once a live presence reports
 # "unio-inbox 1.7" or later (AGENT_INBOX_PROJECTS_SINCE), client notes from
 # 2.9 (AGENT_INBOX_CUSTOMERS_SINCE), and reads MAJOR.MINOR.
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 # Asked for on every inbox read; a server that predates them refuses the field (see list_inbox).
 SUBJECTS = "task,project,customer"
 # What a server before client notes takes: its validator refuses "customer".
