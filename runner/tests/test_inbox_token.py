@@ -180,16 +180,21 @@ class Token(HomeCase):
         self.assertEqual(self.me_calls(), before + 1)
 
     def test_teams_refused_mid_item_counts_nothing(self):
+        # Only the inbox decides a refusal: /agents/me answers 401 while it answers 200.
+        self.write_block({"state": "ok", "expiresAt": "2027-01-01T00:00:00.000Z"})
+        self.fake.me_status = 401
         runner = self.runner()
         with mock.patch.object(runner.presence, "hold") as hold:
-            self.fake.refused.add(FakeUnio.RUNNER)
-            api = inbox.Api(self.fake.url, FakeUnio.RUNNER)
-            runner.agent_teams(api)
-            self.fake.refused.clear()
-            self.poll(runner, START)
-        hold.assert_not_called()
-        self.assertNotIn("refusedCount", self.block())
-        self.assertEqual(self.block()["state"], "ok")
+            self.assertEqual(self.poll(runner, START), 0)
+            self.assertEqual(self.poll(runner, START + timedelta(minutes=16)), 0)
+        self.assertEqual(self.me_calls(), 2)
+        self.assertNotIn(mock.call(True), hold.call_args_list)
+        self.assertEqual(self.events("token_refused"), [])
+        block = self.block()
+        self.assertNotIn("refusedCount", block)
+        self.assertNotIn("refusedSince", block)
+        self.assertEqual(block["state"], "ok")
+        self.assertEqual(runner.next_wait(), runner.cfg.interval)
 
     def test_refused_polls_back_off(self):
         runner = self.runner()
