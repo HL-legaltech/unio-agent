@@ -5214,7 +5214,7 @@ class Runner:
             self.token.update(refusedCount=(count if isinstance(count, int) else 0) + 1, lastRefusedAt=iso(now))
         self.presence.hold(True)
 
-    def token_accepted(self, now):
+    def token_accepted(self, h, now):
         """An inbox poll Unio accepted. After a refusal or a missing token it is
         likely a new token, so its expiry is read again on this same poll."""
         if self.token.get("state") not in ("refused", "missing"):
@@ -5226,6 +5226,8 @@ class Runner:
             self.token.pop(key, None)
         self.token["state"] = self.token_state(now)
         self._token_tried_at = None
+        # The release sends `want` at once, and the refused poll left its problem there.
+        self.report_state(h, now)
         self.presence.hold(False)
 
     def token_missing(self, now):
@@ -6493,7 +6495,7 @@ class Runner:
         if dry_run:
             print_items(items)
             return len(items)
-        self.token_accepted(now)
+        self.token_accepted(h, now)
         h["lastOkAt"] = iso(now)
         self.tidy_orphans(api, h, items, now)
         if not stopping.is_set():

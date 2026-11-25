@@ -213,6 +213,25 @@ class Token(HomeCase):
         presence = [r for r in self.fake.seen("PUT") if r["path"].startswith("/v1/agents/presence/")]
         self.assertEqual([r["body"]["state"] for r in presence], ["idle"])
 
+    def test_a_release_sends_the_accepted_poll_state(self):
+        # A serving process: the refused poll left a problem body behind the hold.
+        self.fake.refused.add(FakeUnio.RUNNER)
+        runner = self.runner()
+        self.poll(runner, START)
+        self.assertEqual(runner.presence.want["state"], "problem")
+        self.fake.refused.clear()
+        released = []
+        hold = runner.presence.hold
+
+        def record(on):
+            hold(on)
+            if not on:
+                released.append(runner.presence._body()["state"])
+
+        with mock.patch.object(runner.presence, "hold", side_effect=record):
+            self.poll(runner, START + timedelta(minutes=1))
+        self.assertEqual(released, ["idle"])
+
     def test_the_held_presence_sends_nothing(self):
         cfg = inbox.Config(dict(os.environ), "org_test")
         p = inbox.Presence(cfg)
