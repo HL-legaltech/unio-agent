@@ -1469,6 +1469,10 @@ def setup(opts):
     name = clean(workspace.get("name") or org).strip() or org
     agent_name = clean(agent.get("name") or "O agente").strip() or "O agente"
     say("Token aceito: %s, no workspace %s. Ele fica em %s." % (agent_name, name, tilde(prof.token)))
+    expires = (check.get("token") or {}).get("expiresAt") if isinstance(check.get("token"), dict) else None
+    if parse_iso(expires):
+        say("Ele vence em %s; %s status avisa na última semana." % (
+            when_words(expires, datetime.now(timezone.utc)), self_command()))
     if api:
         set_env_value(prof.env_file, "UNIO_API_URL", api)
 

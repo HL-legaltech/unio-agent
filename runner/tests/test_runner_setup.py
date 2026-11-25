@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from runner_support import (AGENT, BARRED, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
@@ -54,6 +55,12 @@ class SetupWithoutService(Base):
         self.assertIn("Claude Code 2.1.309 encontrado.", out)
         self.assertIn("Claude Code conectado a uma conta.", out)
         self.assertIn("Token aceito: %s, no workspace %s." % (AGENT, WORKSPACE), out)
+        # The fake's expiresAt, on this computer's clock as setup reads it.
+        expiry = ur.when_words("2027-01-01T00:00:00.000Z", datetime.now(timezone.utc))
+        line = next(line for line in out.splitlines() if line.startswith("Ele vence em "))
+        self.assertTrue(line.startswith("Ele vence em %s; " % expiry), line)
+        self.assertTrue(line.endswith(" status avisa na última semana."), line)
+        self.assertLess(out.index("Token aceito"), out.index("Ele vence em "))
         self.assertEqual(self.token(), RUNNER)
         if os.name != "nt":
             self.assertEqual(self.token_file.stat().st_mode & 0o777, 0o600)
