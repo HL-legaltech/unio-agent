@@ -33,6 +33,12 @@ their repositories written in for each run.
 The runner tells Unio what it is doing (idle, the item and step it works on,
 or the problem that holds it), so the workspace sees it on the agent's page.
 
+The token's expiry is read from GET /agents/me at each start and every 6 h
+into health.json's token block, which unio runner status reads. A refused
+token is one token_refused line and a count, with polls backed off to every
+5 minutes; the block keeps both across restarts and self-updates, and the
+heartbeat pauses until a poll is accepted again.
+
 Research: a task comment whose first words ask to find something out
 (pesquise, levante, compare, research, look up...), a reply in a thread the
 agent answered with research, or an item a reply run hands over with
@@ -843,6 +849,13 @@ def parse_iso(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def days_left(expires, now):
+    """Calendar days between two times on this computer's clock: the web's
+    rule (local midnights), not the server's ceil of 24-hour spans, so
+    unio runner status and the Agentes page give the same number."""
+    return (expires.astimezone().date() - now.astimezone().date()).days
 
 
 def short(text, limit=300):
@@ -2223,6 +2236,13 @@ def apply_env_file(path, environ=os.environ):
 # exit status that asks the service manager to start the runner again (EX_TEMPFAIL).
 UPDATE_EVERY = timedelta(hours=6)
 RESTART_EXIT = 75
+# The token's expiry is read again this often, and a read that failed waits TOKEN_RETRY.
+TOKEN_CHECK_EVERY = timedelta(hours=6)
+TOKEN_RETRY = timedelta(minutes=15)
+# A refused token is final (a lookup failure answers 500), so polls back off to this, in seconds.
+TOKEN_REFUSED_MAX_WAIT = 300
+# The web's EXPIRY_WARNING_DAYS (lib/agent-tokens.ts).
+TOKEN_WARN_DAYS = 7
 # A file in a profile's state folder that stops its runner as SIGTERM does. On
 # Windows nothing can send the windowless pythonw.exe a signal it can catch, and
 # Task Scheduler's /End kills it with its item still claimed, so unio-runner
@@ -2916,6 +2936,8 @@ class Presence:
         self.thread = None
         self.closing = False
         self.loop_error = None
+        # While Unio refuses the token, nothing is sent: every write would be refused too.
+        self.held = False
 
     @property
     def heartbeat(self):
@@ -2935,6 +2957,17 @@ class Presence:
         with self.lock:
             self.want = body
         self.wake.set()
+
+    def hold(self, on):
+        """Holds every write while on. A release sends the current state at once:
+        the last body was taken as sent while held, so the dedupe would wait the
+        heartbeat for it."""
+        with self.lock:
+            self.held = bool(on)
+            if not on:
+                self.sent = None
+        if not on:
+            self.wake.set()
 
     def overlay(self, reason, message, state=None):
         """The slow cause, and the owner's detail beside it, that an idle or
@@ -3010,6 +3043,9 @@ class Presence:
         with self.lock:
             body = dict(self._body())
             self.sent_at = time.monotonic()
+            if self.held:
+                self.sent = body
+                return
         token = self.cfg.token()
         try:
             if not token:
@@ -5103,6 +5139,12 @@ class Runner:
         self.probe_hold = None
         # ready()'s time in this poll, for the first item's log line alone: it runs once per poll.
         self.ready_ms = None
+        # health.json's token block (see token_refused). Seeded from disk, so a
+        # refusal's start, count and backoff outlive a restart or a self-update.
+        block = self.state.health().get("token")
+        self.token = dict(block) if isinstance(block, dict) else {}
+        self._token_checked_this_run = False
+        self._token_tried_at = None
 
     @staticmethod
     def session_env():
@@ -5118,7 +5160,87 @@ class Runner:
         status = self.presence.status()
         if status:
             h["presence"] = status
+        if self.token:
+            h["token"] = dict(self.token)
         self.state.save_health(h)
+
+    def token_state(self, now):
+        """refused, expiring or ok, from the block's refusal and expiry."""
+        if self.token.get("refusedSince"):
+            return "refused"
+        expires = parse_iso(self.token.get("expiresAt"))
+        return "expiring" if expires and days_left(expires, now) <= TOKEN_WARN_DAYS else "ok"
+
+    def note_me(self, me, now):
+        """The token's expiry from a GET /agents/me that answered 200."""
+        token = me.get("token") if isinstance(me, dict) else None
+        if not isinstance(token, dict):
+            return
+        agent = me.get("agent") if isinstance(me.get("agent"), dict) else {}
+        expires = token.get("expiresAt") if isinstance(token.get("expiresAt"), str) else None
+        name = agent.get("name") if isinstance(agent.get("name"), str) else None
+        before = self.token.get("state")
+        self.token.update(expiresAt=expires, agentName=name, checkedAt=iso(now))
+        self.token["state"] = self.token_state(now)
+        if self.token["state"] == "expiring" and before != "expiring":
+            self.state.log("token_expiring", expiresAt=expires, days=days_left(parse_iso(expires), now))
+
+    def token_tick(self, api, now):
+        """Reads the token's expiry once per process and every TOKEN_CHECK_EVERY;
+        a read that failed is tried again after TOKEN_RETRY."""
+        checked = parse_iso(self.token.get("checkedAt"))
+        if self._token_checked_this_run and checked and now - checked < TOKEN_CHECK_EVERY:
+            return
+        if self._token_tried_at and now - self._token_tried_at < TOKEN_RETRY:
+            return
+        self._token_tried_at = now
+        self.agent_teams(api, force=True)
+
+    def token_refused(self, status, data, now):
+        """An inbox poll Unio refused with a 401: the first of a refusal logs
+        one line, the rest only count. The server's answer is the same for an
+        expired, revoked or orphaned token, so the cause comes from the expiry
+        last read."""
+        if self.token.get("state") != "refused":
+            expires = parse_iso(self.token.get("expiresAt"))
+            cause = "unknown" if expires is None else "expired" if expires <= now else "refused"
+            self.token.update(state="refused", refusedSince=iso(now), lastRefusedAt=iso(now), refusedCount=1,
+                              cause=cause)
+            self.state.log("token_refused", since=iso(now), cause=cause,
+                           code=data.get("code") if isinstance(data, dict) else None,
+                           expiresAt=self.token.get("expiresAt"))
+        else:
+            count = self.token.get("refusedCount")
+            self.token.update(refusedCount=(count if isinstance(count, int) else 0) + 1, lastRefusedAt=iso(now))
+        self.presence.hold(True)
+
+    def token_accepted(self, now):
+        """An inbox poll Unio accepted. After a refusal or a missing token it is
+        likely a new token, so its expiry is read again on this same poll."""
+        if self.token.get("state") not in ("refused", "missing"):
+            return
+        self.state.log("token_accepted", refusedSince=self.token.get("refusedSince"),
+                       refused=self.token.get("refusedCount"))
+        # The old token's expiry would read as expired until the new one's comes.
+        for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause", "checkedAt", "expiresAt"):
+            self.token.pop(key, None)
+        self.token["state"] = self.token_state(now)
+        self._token_tried_at = None
+        self.presence.hold(False)
+
+    def token_missing(self, now):
+        if self.token.get("state") != "missing":
+            self.token["state"] = "missing"
+            self.state.log("token_missing", file=str(self.cfg.token_file))
+
+    def next_wait(self):
+        """Seconds until the next poll: the interval, doubled per refused poll
+        while the token is refused, up to TOKEN_REFUSED_MAX_WAIT."""
+        if self.token.get("state") != "refused":
+            return self.cfg.interval
+        count = self.token.get("refusedCount")
+        count = count if isinstance(count, int) and count > 0 else 1
+        return max(self.cfg.interval, min(self.cfg.interval * 2 ** min(count, 10), TOKEN_REFUSED_MAX_WAIT))
 
     def claude_args(self, mcp_path, snapshots, protocol=None):
         # The prompt goes in on stdin: --add-dir, --tools and the other list
@@ -5738,12 +5860,14 @@ class Runner:
             st, d = api.settle("POST", f"/agents/inbox/{action}", body, idem)
         return st, d
 
-    def agent_teams(self, api):
-        """"Name (KEY)" for each team the agent is in, refreshed every TEAMS_REFRESH;
-        the last list (or None) when the API cannot say. The same answer
-        gives the writing language and the rows for the workspace section."""
+    def agent_teams(self, api, force=False):
+        """"Name (KEY)" for each team the agent is in, refreshed every TEAMS_REFRESH
+        (or now, with `force`); the last list (or None) when the API cannot say.
+        The same answer gives the writing language, the rows for the workspace
+        section and the token's expiry. A 401 here counts no refusal: it runs
+        in the middle of an item, a review or a needs check."""
         now = utcnow()
-        if self._teams_at and now - self._teams_at < TEAMS_REFRESH:
+        if not force and self._teams_at and now - self._teams_at < TEAMS_REFRESH:
             return self._teams
         try:
             status, data = api.call("GET", "/agents/me", timeout=10)
@@ -5755,6 +5879,8 @@ class Runner:
             self._workspace = me["workspace"]
         if isinstance(me, dict):
             self.language = writing_language(me)
+            self._token_checked_this_run = True
+            self.note_me(me, now)
         if isinstance(teams, list):
             self._team_rows = [t for t in teams if isinstance(t, dict) and t.get("identifier")]
             self._teams = [f"{t.get('name')} ({t.get('identifier')})" for t in self._team_rows]
@@ -6349,24 +6475,34 @@ class Runner:
                 h.setdefault("orphans", []).append(left)
         token = self.cfg.token()
         if not token:
-            return self._poll_error(h, f"no token in {self.cfg.token_file} ({self.cfg.token_hint})", dry_run)
+            if not dry_run:
+                self.token_missing(now)
+            return self._poll_error(h, f"no token in {self.cfg.token_file} ({self.cfg.token_hint})", dry_run,
+                                    log=False)
         api = Api(self.cfg.api, token)
         try:
             status, data = self.list_inbox(api)
         except ApiUnreachable as e:
             return self._poll_error(h, str(e), dry_run)
         items = (data or {}).get("data") if isinstance(data, dict) else None
+        if status == 401 and not dry_run:
+            self.token_refused(status, data, now)
+            return self._poll_error(h, f"inbox: {describe(status, data)}", dry_run, log=False)
         if status != 200 or not isinstance(items, list):
             return self._poll_error(h, f"inbox: {describe(status, data)}", dry_run)
         if dry_run:
             print_items(items)
             return len(items)
+        self.token_accepted(now)
         h["lastOkAt"] = iso(now)
         self.tidy_orphans(api, h, items, now)
         if not stopping.is_set():
             self.recheck_limit(api, h, now)
         if items and not stopping.is_set():
             self._handle_items(api, items, h, now)
+        # After the items, so a waiting answer is never held behind it.
+        if not stopping.is_set():
+            self.token_tick(api, utcnow())
         self.report_state(h, utcnow())
         self.save(h)
         return len(items)
@@ -6497,12 +6633,14 @@ class Runner:
             if step == "stop":
                 break
 
-    def _poll_error(self, h, message, dry_run):
+    def _poll_error(self, h, message, dry_run, log=True):
+        """`log=False` when the token's own line already said it (token_refused, token_missing)."""
         if dry_run:
             print(f"unio-inbox: {message}", file=sys.stderr)
             return None
         self.state.record_error(h, message)
-        self.state.log("poll_error", error=short(message, 500))
+        if log:
+            self.state.log("poll_error", error=short(message, 500))
         self.presence.set("problem", reason="unio_unavailable", message=problem_message("inbox_unreadable"))
         self.save(h)
         return None
@@ -6569,7 +6707,7 @@ class Runner:
                 self.state.record_error(h, f"runner: {type(e).__name__}: {e}")
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
                 self.save(h)
-            stopping.wait(self.cfg.interval)
+            stopping.wait(self.next_wait())
         self.vitals_call("stop")
         # A restart for an update keeps the row online: the new process takes it over within seconds.
         self.presence.close(ended=not moved)

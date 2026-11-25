@@ -97,12 +97,15 @@ class HomeCase(unittest.TestCase):
 class FakeUnio:
     """Unio's API as the runner calls it, served from a thread on 127.0.0.1.
     GET /v1/agents/me answers by bearer token: RUNNER is a runner token of
-    workspace org_test, SESSION a person's token there, OTHER a runner
-    token of another workspace and OFF one whose workspace has agents
-    switched off; any other token gets 401. Every request is kept in
+    workspace org_test, RUNNER2 the one that replaces it, SESSION a
+    person's token there, OTHER a runner token of another workspace and OFF
+    one whose workspace has agents switched off; any other token, and one
+    in `refused`, gets 401 on every route. `me_status` makes GET
+    /v1/agents/me answer that status instead. Every request is kept in
     `requests` as {method, path, query, body, headers}."""
 
     RUNNER = "unio_rt_test_runner_token"
+    RUNNER2 = "unio_rt_test_runner_token_2"
     SESSION = "unio_at_test_session_token"
     OTHER = "unio_rt_test_other_workspace"
     OFF = "unio_rt_test_agents_off"
@@ -111,6 +114,9 @@ class FakeUnio:
         self.workspace = workspace
         self.language = language
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
+        self.expires_at = "2027-01-01T00:00:00.000Z"
+        self.refused = set()
+        self.me_status = None
         # What GET /agents/inbox lists; a completed item leaves it.
         self.items = []
         self.task_files_refused = False
@@ -148,10 +154,13 @@ class FakeUnio:
                     if (method is None or r["method"] == method) and (path is None or r["path"] == path)]
 
     def me(self, token):
-        workspaces = {self.RUNNER: (self.workspace, "runner"), self.SESSION: (self.workspace, "session"),
-                      self.OTHER: ("org_other", "runner"), self.OFF: (self.workspace, "runner")}
-        if token not in workspaces:
+        workspaces = {self.RUNNER: (self.workspace, "runner"), self.RUNNER2: (self.workspace, "runner"),
+                      self.SESSION: (self.workspace, "session"), self.OTHER: ("org_other", "runner"),
+                      self.OFF: (self.workspace, "runner")}
+        if token not in workspaces or token in self.refused:
             return 401, {"error": "Token de agente inválido.", "code": "invalid_agent_token"}
+        if self.me_status:
+            return self.me_status, {"error": "Indisponível.", "code": "unavailable"}
         if token == self.OFF:
             return 403, {"error": "O acesso de agentes está desativado neste workspace.", "code": "agents_disabled"}
         clerk, purpose = workspaces[token]
@@ -161,7 +170,7 @@ class FakeUnio:
             "workspace": {"clerkId": clerk, "name": "Workspace Marker", "sigla": "WM", "appUrl": "https://unio.so"},
             "teams": self.teams,
             "token": {"id": 9, "name": "Runner", "prefix": token[:12], "purpose": purpose,
-                      "expiresAt": "2027-01-01T00:00:00.000Z", "expiresInDays": 70},
+                      "expiresAt": self.expires_at, "expiresInDays": 70},
         }}
 
     def route(self, request):
@@ -169,7 +178,8 @@ class FakeUnio:
         method, path = request["method"], request["path"]
         if method == "GET" and path == "/v1/agents/me":
             return self.me(request["token"])
-        if request["token"] not in (self.RUNNER, self.SESSION, self.OTHER):
+        if request["token"] not in (self.RUNNER, self.RUNNER2, self.SESSION, self.OTHER) \
+                or request["token"] in self.refused:
             return 401, {"error": "Token de agente inválido.", "code": "invalid_agent_token"}
         body = request["body"] if isinstance(request["body"], dict) else {}
         if method == "GET" and path == "/v1/agents/inbox":
