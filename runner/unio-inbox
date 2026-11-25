@@ -4783,8 +4783,6 @@ def task_view(task):
         "status": task.get("status"),
         "statusCategory": task.get("statusCategory"),
         "needsLabels": [lb["id"] for lb in labels if label_key(lb.get("name")) == label_key(NEEDS_LABEL)],
-        # get_task's own rule (read_tools.ts): a client's task, or one an integration feeds.
-        "clientLinked": bool(task.get("customer")) or task.get("isIntegrationLinked") is True,
         "deleted": bool(task.get("deletedAt")),
     }
 
@@ -7241,10 +7239,9 @@ class Runner:
         row = {"id": tid, "key": view["key"], "updatedAt": view["updatedAt"], "people": [s["name"] for s in sections],
                "open": len(pending), "ticked": sum(len(s["items"]) for s in sections) - len(pending),
                "label": labelled, "decision": "none", "judge": "no: no open item"}
-        if view["deleted"] or view["clientLinked"]:
+        if view["deleted"]:
             entries.pop(tid, None)
-            row.update(decision="skip: " + ("deleted" if view["deleted"] else "a client's task"), judge="no",
-                       skip=True)
+            row.update(decision="skip: deleted", judge="no", skip=True)
             return row
         entry = entries.setdefault(tid, {})
         entry.update(key=view["key"], teamKey=view["teamKey"], lastSeenAt=iso(now), labelSeen=labelled,
