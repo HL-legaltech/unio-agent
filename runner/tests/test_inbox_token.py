@@ -179,6 +179,20 @@ class Token(HomeCase):
         self.assertEqual(block["expiresAt"], FAR_EXPIRY)
         self.assertEqual(self.me_calls(), before + 1)
 
+    def test_a_token_replaced_under_a_running_service_is_read_again(self):
+        runner = self.runner()
+        self.poll(runner, START)
+        self.assertEqual(self.me_calls(), 1)
+        self.fake.expires_at = inbox.iso(START + timedelta(days=365))
+        (self.config / "runner-token").write_text(FakeUnio.RUNNER2 + "\n", encoding="utf-8")
+        self.poll(runner, START + timedelta(minutes=1))
+        self.assertEqual(self.me_calls(), 2)
+        self.assertEqual(len(self.events("token_replaced")), 1)
+        self.assertEqual(self.block()["expiresAt"], self.fake.expires_at)
+        self.assertEqual(self.block()["state"], "ok")
+        self.poll(runner, START + timedelta(minutes=2))
+        self.assertEqual(self.me_calls(), 2)
+
     def test_teams_refused_mid_item_counts_nothing(self):
         # Only the inbox decides a refusal: /agents/me answers 401 while it answers 200.
         self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
