@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from runner_support import (AGENT, BARRED, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
+from runner_support import (AGENT, BARRED, FAR_EXPIRY, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
                             FakeApi, Sandbox, captured, closed_port_url, load_runner)
 
 ur = load_runner()
@@ -56,7 +56,7 @@ class SetupWithoutService(Base):
         self.assertIn("Claude Code conectado a uma conta.", out)
         self.assertIn("Token aceito: %s, no workspace %s." % (AGENT, WORKSPACE), out)
         # The fake's expiresAt, on this computer's clock as setup reads it.
-        expiry = ur.when_words("2027-01-01T00:00:00.000Z", datetime.now(timezone.utc))
+        expiry = ur.when_words(FAR_EXPIRY, datetime.now(timezone.utc))
         line = next(line for line in out.splitlines() if line.startswith("Ele vence em "))
         self.assertTrue(line.startswith("Ele vence em %s; " % expiry), line)
         self.assertTrue(line.endswith(" status avisa na última semana."), line)
@@ -146,7 +146,7 @@ class SetupWithoutService(Base):
         for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause"):
             self.assertNotIn(key, block)
         self.assertEqual((block["state"], block["expiresAt"], block["agentName"]),
-                         ("ok", "2027-01-01T00:00:00.000Z", AGENT))
+                         ("ok", FAR_EXPIRY, AGENT))
         self.assertIsNotNone(ur.parse_iso(block["checkedAt"]))
         # With no service to poll, status already reads the new token.
         prof = ur.Profile("org_test", self.config, self.state, self.token_file)

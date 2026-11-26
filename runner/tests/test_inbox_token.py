@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox
+from inbox_support import FAR_EXPIRY, FakeUnio, HomeCase, inbox
 
 START = datetime(2026, 11, 21, 18, 0, 0, tzinfo=timezone.utc)
 
@@ -65,7 +65,7 @@ class Token(HomeCase):
     def test_the_expiry_is_read_at_start_and_kept(self):
         self.assertEqual(self.once(), 0)
         block = self.block()
-        self.assertEqual(block["expiresAt"], "2027-01-01T00:00:00.000Z")
+        self.assertEqual(block["expiresAt"], FAR_EXPIRY)
         self.assertEqual(block["state"], "ok")
         self.assertEqual(block["agentName"], "Agent Marker")
         self.assertIsNotNone(inbox.parse_iso(block["checkedAt"]))
@@ -176,12 +176,12 @@ class Token(HomeCase):
         for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause"):
             self.assertNotIn(key, block)
         self.assertEqual(block["state"], "ok")
-        self.assertEqual(block["expiresAt"], "2027-01-01T00:00:00.000Z")
+        self.assertEqual(block["expiresAt"], FAR_EXPIRY)
         self.assertEqual(self.me_calls(), before + 1)
 
     def test_teams_refused_mid_item_counts_nothing(self):
         # Only the inbox decides a refusal: /agents/me answers 401 while it answers 200.
-        self.write_block({"state": "ok", "expiresAt": "2027-01-01T00:00:00.000Z"})
+        self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
         self.fake.me_status = 401
         runner = self.runner()
         with mock.patch.object(runner.presence, "hold") as hold:

@@ -509,7 +509,8 @@ class TokenStatus(unittest.TestCase):
         self.assertIn("setup --workspace org_gone", out)
 
     def test_status_dates_are_portuguese_whatever_the_locale(self):
-        expires = "2027-03-15T12:00:00Z"
+        # March of next year: always months away, so the block stays "ok".
+        expires = "%d-03-15T12:00:00Z" % (datetime.now(timezone.utc).year + 1)
         self.make_profile(token_block={"state": "ok", "expiresAt": expires})
         done = subprocess.run([sys.executable, str(ur.HERE / "unio-runner"), "status", "--workspace", "org_test"],
                               stdin=subprocess.DEVNULL, capture_output=True, env=non_utf8_locale(self.box.env()),

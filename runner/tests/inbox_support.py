@@ -16,9 +16,14 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+
+# A token that stays valid however long after today the tests run: a fixed
+# date would turn every "ok" assertion into "expiring" once it came near.
+FAR_EXPIRY = (datetime.now(timezone.utc) + timedelta(days=90)).strftime("%Y-%m-%dT00:00:00.000Z")
 
 # unio-inbox has no .py suffix, so a cache file would land as runner/__pycache__/unio-inbox.*.
 sys.dont_write_bytecode = True
@@ -114,7 +119,7 @@ class FakeUnio:
         self.workspace = workspace
         self.language = language
         self.teams = [{"id": 1, "name": "Product", "identifier": "ABC"}]
-        self.expires_at = "2027-01-01T00:00:00.000Z"
+        self.expires_at = FAR_EXPIRY
         self.refused = set()
         self.me_status = None
         # What GET /agents/inbox lists; a completed item leaves it.
