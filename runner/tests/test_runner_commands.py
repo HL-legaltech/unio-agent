@@ -404,7 +404,7 @@ class TokenStatus(unittest.TestCase):
                          % ur.when_words(block["expiresAt"], now))
         self.assertTrue(lines[2].startswith("  para corrigir: em Configurações > Workspace > Agentes, no Unio Bot, "
                                             "clique em Trocar o token e rode "), lines[2])
-        self.assertTrue(lines[2].endswith("unio runner setup --workspace org_test neste computador"), lines[2])
+        self.assertTrue(lines[2].endswith("runner setup --workspace org_test neste computador"), lines[2])
         self.assertTrue(lines[3].startswith("  versão:"), lines[3])
         code, out = self.running_status("--json")
         self.assertEqual(code, 1, out)
@@ -450,7 +450,7 @@ class TokenStatus(unittest.TestCase):
                                                             ur.when_words(expires, now)), out)
         self.assertIn("  para não parar: troque-o antes em Configurações > Workspace > Agentes, no Unio Bot "
                       "(Trocar o token), e rode ", out)
-        self.assertIn("unio runner setup --workspace org_test neste computador", out)
+        self.assertIn("runner setup --workspace org_test neste computador", out)
 
     def test_today_and_tomorrow_have_their_words(self):
         now = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc)
