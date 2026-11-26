@@ -45,7 +45,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
@@ -1247,16 +1247,27 @@ def token_status(prof, now=None):
     return row
 
 
+# A service polls at least every 5 minutes, even backed off from a refused token.
+SERVICE_POLLING = timedelta(minutes=15)
+
+
 def note_accepted_token(prof, expires, agent_name, now):
     """After setup's check accepted the token: the health block's refusal and
     old expiry are another token's, and would keep status saying refused or
-    expired until a service polls, which after --no-service may be never."""
+    expired until a service polls, which after --no-service may be never.
+
+    Only when no service has polled lately: one that runs rewrites the whole
+    file from memory, so this write could undo its latest one or be undone,
+    and its own next poll clears the old token's state anyway."""
     path = prof.state / "health.json"
     try:
         h = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if not isinstance(h, dict) or not isinstance(h.get("token"), dict):
+        return
+    polled = parse_iso(h.get("lastPollAt"))
+    if polled and now - polled < SERVICE_POLLING:
         return
     block = {k: v for k, v in h["token"].items()
              if k not in ("refusedSince", "lastRefusedAt", "refusedCount", "cause", "expiresAt", "checkedAt")}
@@ -1267,7 +1278,6 @@ def note_accepted_token(prof, expires, agent_name, now):
         block["agentName"] = agent_name
     block["state"] = "expiring" if at and days_left(at, now) <= TOKEN_WARN_DAYS else "ok"
     h["token"] = block
-    # A running service may rewrite its own copy first; its next accepted poll clears it the same way.
     try:
         write_atomic(path, (json.dumps(h, indent=2) + "\n").encode("utf-8"), mode=0o600)
     except OSError:

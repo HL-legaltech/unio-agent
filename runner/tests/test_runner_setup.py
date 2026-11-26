@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from runner_support import (AGENT, BARRED, FAR_EXPIRY, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
@@ -152,6 +152,17 @@ class SetupWithoutService(Base):
         prof = ur.Profile("org_test", self.config, self.state, self.token_file)
         self.assertEqual(ur.token_status(prof)["state"], "ok")
         self.assertNoTokenLeaked(out, health.read_text(encoding="utf-8"))
+
+    def test_a_polling_service_keeps_its_own_health_file(self):
+        refused = {"state": "refused", "expiresAt": "2026-11-22T00:14:03Z", "refusedSince": "2026-11-22T00:15:00Z",
+                   "refusedCount": 12, "cause": "expired"}
+        polled = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        health = self.state / "health.json"
+        health.parent.mkdir(parents=True, exist_ok=True)
+        health.write_text(json.dumps({"lastPollAt": polled, "token": refused}), encoding="utf-8")
+        code, out = self.setup("--yes")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(health.read_text(encoding="utf-8")), {"lastPollAt": polled, "token": refused})
 
     def test_setup_writes_no_health_file_of_its_own(self):
         self.assertEqual(self.setup("--yes")[0], 0)
