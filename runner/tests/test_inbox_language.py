@@ -78,6 +78,8 @@ class Teams(HomeCase):
         self.assertEqual(runner._team_rows, [{"id": 1, "name": "Team", "identifier": "ABC"}])
         runner.agent_teams(api)
         self.assertEqual(api.calls, 1, "teams are read again only after TEAMS_REFRESH")
+        # An answer without a token row leaves the token block alone.
+        self.assertNotIn("expiresAt", runner.token)
 
 
 class WorkspaceSection(unittest.TestCase):

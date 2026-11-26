@@ -267,7 +267,7 @@ For Codex, remove the `[mcp_servers.unio]` block and `~/.agents/skills/unio`. Ru
 
 ## Answering service
 
-The answering service answers for a workspace's agent, from the computer of a person in that workspace and on their Claude plan. A developer who administers the workspace generates its token in Unio, under Configurações > Sistema > Agentes, where the page also shows the install command:
+The answering service answers for a workspace's agent, from the computer of a person in that workspace and on their Claude plan. A developer who administers the workspace generates its token in Unio, under Configurações > Workspace > Agentes, where the page also shows the install command:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HL-legaltech/unio-agent/main/install.sh | sh -s -- --runner --workspace org_…

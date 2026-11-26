@@ -10,7 +10,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox
+from inbox_support import FAR_EXPIRY, FakeUnio, HomeCase, inbox
 
 
 class Check(HomeCase):
@@ -34,8 +34,9 @@ class Check(HomeCase):
     def test_ok(self):
         result = self.check(FakeUnio.RUNNER)
         self.assertEqual(result, {"ok": True, "workspace": {"clerkId": "org_test", "name": "Workspace Marker"},
-                                  "agent": {"name": "Agent Marker"}, "language": "pt-BR", "problems": [],
-                                  "codes": []})
+                                  "agent": {"name": "Agent Marker"}, "language": "pt-BR",
+                                  "token": {"expiresAt": FAR_EXPIRY, "expiresInDays": 70},
+                                  "problems": [], "codes": []})
         self.assertEqual([(r["method"], r["path"]) for r in self.fake.seen()], [("GET", "/v1/agents/me")])
 
     def test_writes_nothing(self):
@@ -62,7 +63,9 @@ class Check(HomeCase):
         self.assertIn("org_other", result["problems"][0])
 
     def test_refused(self):
-        self.assertEqual(self.check("unio_rt_revoked")["codes"], ["token_refused"])
+        result = self.check("unio_rt_revoked")
+        self.assertEqual(result["codes"], ["token_refused"])
+        self.assertIsNone(result["token"])
 
     def test_agents_off(self):
         self.assertEqual(self.check(FakeUnio.OFF)["codes"], ["agents_off"])

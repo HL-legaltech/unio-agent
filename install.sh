@@ -593,7 +593,7 @@ paste_secret() {
     200) ;;
     000) say "O Unio não respondeu: confira a rede e rode o comando de novo. Nada foi salvo."; return 1 ;;
     401) say "O Unio recusou o token. Gere outro na página Agente de código e rode o comando de novo."; return 1 ;;
-    403) say "Os agentes do Unio estão desligados neste workspace, então o token não serve agora. Nada foi salvo. Um administrador pode ligá-los em Configurações > Sistema > Agentes."; return 1 ;;
+    403) say "Os agentes do Unio estão desligados neste workspace, então o token não serve agora. Nada foi salvo. Um administrador pode ligá-los em Configurações > Workspace > Agentes."; return 1 ;;
     *) say "O Unio respondeu HTTP $code. Nada foi salvo; rode o comando de novo em instantes."; return 1 ;;
   esac
   owner=$(json_field "$json" workspace clerkId)
