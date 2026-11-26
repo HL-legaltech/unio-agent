@@ -45,9 +45,15 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 HERE = Path(__file__).resolve().parent
 CLONE = HERE.parent
@@ -1247,27 +1253,60 @@ def token_status(prof, now=None):
     return row
 
 
-# A service polls at least every 5 minutes, even backed off from a refused token.
-SERVICE_POLLING = timedelta(minutes=15)
+@contextmanager
+def poll_lock(path):
+    """Whether this process took the service's poll lock (unio-inbox's
+    file_lock on the same file), without waiting: flock on POSIX, the file's
+    first byte on Windows."""
+    with open(path, "a", encoding="utf-8") as f:
+        if os.name != "nt":
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+            return
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
 
 
 def note_accepted_token(prof, expires, agent_name, now):
     """After setup's check accepted the token: the health block's refusal and
     old expiry are another token's, and would keep status saying refused or
-    expired until a service polls, which after --no-service may be never.
+    expired until a service polls, which after --no-service may be never."""
+    if not (prof.state / "health.json").exists():
+        return
+    # The service writes health.json under this lock; a poll that holds it
+    # would undo this write or be undone by it, and clears the old token's
+    # state itself once its next poll is accepted.
+    try:
+        with poll_lock(prof.state / "lock") as held:
+            if held:
+                rewrite_token_block(prof, expires, agent_name, now)
+    except OSError:
+        pass
 
-    Only when no service has polled lately: one that runs rewrites the whole
-    file from memory, so this write could undo its latest one or be undone,
-    and its own next poll clears the old token's state anyway."""
+
+def rewrite_token_block(prof, expires, agent_name, now):
     path = prof.state / "health.json"
     try:
         h = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if not isinstance(h, dict) or not isinstance(h.get("token"), dict):
-        return
-    polled = parse_iso(h.get("lastPollAt"))
-    if polled and now - polled < SERVICE_POLLING:
         return
     block = {k: v for k, v in h["token"].items()
              if k not in ("refusedSince", "lastRefusedAt", "refusedCount", "cause", "expiresAt", "checkedAt")}
