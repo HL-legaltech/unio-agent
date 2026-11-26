@@ -5205,6 +5205,8 @@ class Runner:
         self.token = dict(block) if isinstance(block, dict) else {}
         self._token_checked_this_run = False
         self._token_tried_at = None
+        # A digest of the token last polled with, never the token itself.
+        self._token_seen = None
 
     @staticmethod
     def session_env():
@@ -5289,6 +5291,22 @@ class Runner:
         # The release sends `want` at once, and the refused poll left its problem there.
         self.report_state(h, now)
         self.presence.hold(False)
+
+    def token_replaced(self, token, now):
+        """A token file replaced under a running service (setup --no-service, or
+        by hand): the expiry last read is the old token's, so this poll reads the
+        new one's. A refused or missing state is token_accepted's to clear."""
+        seen = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        replaced = self._token_seen is not None and seen != self._token_seen
+        self._token_seen = seen
+        if not replaced or self.token.get("state") in ("refused", "missing"):
+            return
+        self.state.log("token_replaced")
+        for key in ("checkedAt", "expiresAt"):
+            self.token.pop(key, None)
+        self.token["state"] = self.token_state(now)
+        self._token_checked_this_run = False
+        self._token_tried_at = None
 
     def token_missing(self, now):
         if self.token.get("state") != "missing":
@@ -6591,6 +6609,8 @@ class Runner:
                 self.token_missing(now)
             return self._poll_error(h, f"no token in {self.cfg.token_file} ({self.cfg.token_hint})", dry_run,
                                     log=False)
+        if not dry_run:
+            self.token_replaced(token, now)
         api = Api(self.cfg.api, token)
         try:
             status, data = self.list_inbox(api)
@@ -6815,10 +6835,14 @@ class Runner:
             try:
                 self.locked_poll()
             except Exception as e:  # the service outlives any one bad poll
-                h = self.state.health()
-                self.state.record_error(h, f"runner: {type(e).__name__}: {e}")
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
-                self.save(h)
+                # Under the poll lock, as every write of health.json: unio runner setup rewrites its token
+                # block under it. Whoever holds it now writes the file; this error stays in the log.
+                with file_lock(self.state.lock_file) as held:
+                    if held:
+                        h = self.state.health()
+                        self.state.record_error(h, f"runner: {type(e).__name__}: {e}")
+                        self.save(h)
             stopping.wait(self.next_wait())
         self.vitals_call("stop")
         # A restart for an update keeps the row online: the new process takes it over within seconds.

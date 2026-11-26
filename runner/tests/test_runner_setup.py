@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from runner_support import (AGENT, BARRED, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
+from runner_support import (AGENT, BARRED, FAR_EXPIRY, OFF, OTHER, REVOKED, RUNNER, RUNNER_DIR, SESSION, TOKENS, WORKSPACE,
                             FakeApi, Sandbox, captured, closed_port_url, load_runner)
 
 ur = load_runner()
@@ -56,7 +56,7 @@ class SetupWithoutService(Base):
         self.assertIn("Claude Code conectado a uma conta.", out)
         self.assertIn("Token aceito: %s, no workspace %s." % (AGENT, WORKSPACE), out)
         # The fake's expiresAt, on this computer's clock as setup reads it.
-        expiry = ur.when_words("2027-01-01T00:00:00.000Z", datetime.now(timezone.utc))
+        expiry = ur.when_words(FAR_EXPIRY, datetime.now(timezone.utc))
         line = next(line for line in out.splitlines() if line.startswith("Ele vence em "))
         self.assertTrue(line.startswith("Ele vence em %s; " % expiry), line)
         self.assertTrue(line.endswith(" status avisa na última semana."), line)
@@ -146,12 +146,26 @@ class SetupWithoutService(Base):
         for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause"):
             self.assertNotIn(key, block)
         self.assertEqual((block["state"], block["expiresAt"], block["agentName"]),
-                         ("ok", "2027-01-01T00:00:00.000Z", AGENT))
+                         ("ok", FAR_EXPIRY, AGENT))
         self.assertIsNotNone(ur.parse_iso(block["checkedAt"]))
         # With no service to poll, status already reads the new token.
         prof = ur.Profile("org_test", self.config, self.state, self.token_file)
         self.assertEqual(ur.token_status(prof)["state"], "ok")
         self.assertNoTokenLeaked(out, health.read_text(encoding="utf-8"))
+
+    def test_a_running_poll_keeps_its_own_health_file(self):
+        refused = {"state": "refused", "expiresAt": "2026-11-22T00:14:03Z", "refusedSince": "2026-11-22T00:15:00Z",
+                   "refusedCount": 12, "cause": "expired"}
+        # An old lastPollAt: a poll that handles items for long writes it only at its start.
+        before = {"lastPollAt": "2026-11-25T12:00:00Z", "token": refused}
+        health = self.state / "health.json"
+        health.parent.mkdir(parents=True, exist_ok=True)
+        health.write_text(json.dumps(before), encoding="utf-8")
+        with ur.poll_lock(self.state / "lock") as held:
+            self.assertTrue(held)
+            code, out = self.setup("--yes")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(health.read_text(encoding="utf-8")), before)
 
     def test_setup_writes_no_health_file_of_its_own(self):
         self.assertEqual(self.setup("--yes")[0], 0)

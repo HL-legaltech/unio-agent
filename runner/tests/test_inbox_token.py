@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox
+from inbox_support import FAR_EXPIRY, FakeUnio, HomeCase, inbox
 
 START = datetime(2026, 11, 21, 18, 0, 0, tzinfo=timezone.utc)
 
@@ -65,7 +65,7 @@ class Token(HomeCase):
     def test_the_expiry_is_read_at_start_and_kept(self):
         self.assertEqual(self.once(), 0)
         block = self.block()
-        self.assertEqual(block["expiresAt"], "2027-01-01T00:00:00.000Z")
+        self.assertEqual(block["expiresAt"], FAR_EXPIRY)
         self.assertEqual(block["state"], "ok")
         self.assertEqual(block["agentName"], "Agent Marker")
         self.assertIsNotNone(inbox.parse_iso(block["checkedAt"]))
@@ -176,12 +176,47 @@ class Token(HomeCase):
         for key in ("refusedSince", "lastRefusedAt", "refusedCount", "cause"):
             self.assertNotIn(key, block)
         self.assertEqual(block["state"], "ok")
-        self.assertEqual(block["expiresAt"], "2027-01-01T00:00:00.000Z")
+        self.assertEqual(block["expiresAt"], FAR_EXPIRY)
         self.assertEqual(self.me_calls(), before + 1)
+
+    def test_a_token_replaced_under_a_running_service_is_read_again(self):
+        runner = self.runner()
+        self.poll(runner, START)
+        self.assertEqual(self.me_calls(), 1)
+        self.fake.expires_at = inbox.iso(START + timedelta(days=365))
+        (self.config / "runner-token").write_text(FakeUnio.RUNNER2 + "\n", encoding="utf-8")
+        self.poll(runner, START + timedelta(minutes=1))
+        self.assertEqual(self.me_calls(), 2)
+        self.assertEqual(len(self.events("token_replaced")), 1)
+        self.assertEqual(self.block()["expiresAt"], self.fake.expires_at)
+        self.assertEqual(self.block()["state"], "ok")
+        self.poll(runner, START + timedelta(minutes=2))
+        self.assertEqual(self.me_calls(), 2)
+
+    def test_a_failed_poll_writes_its_error_only_under_the_poll_lock(self):
+        self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
+        before = self.health()
+        runner = self.runner()
+        self.addCleanup(inbox.stopping.clear)
+
+        def fail():
+            inbox.stopping.set()
+            raise RuntimeError("boom")
+
+        runner.state.ensure()
+        with mock.patch.object(runner, "locked_poll", side_effect=fail):
+            with inbox.file_lock(runner.state.lock_file) as held:
+                self.assertTrue(held)
+                self.assertEqual(runner.serve(), 0)
+            self.assertEqual(self.health(), before)
+            inbox.stopping.clear()
+            self.assertEqual(runner.serve(), 0)
+        self.assertEqual(self.health()["lastError"], "runner: RuntimeError: boom")
+        self.assertEqual(len([e for e in self.events("poll_error") if "boom" in e["error"]]), 2)
 
     def test_teams_refused_mid_item_counts_nothing(self):
         # Only the inbox decides a refusal: /agents/me answers 401 while it answers 200.
-        self.write_block({"state": "ok", "expiresAt": "2027-01-01T00:00:00.000Z"})
+        self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
         self.fake.me_status = 401
         runner = self.runner()
         with mock.patch.object(runner.presence, "hold") as hold:

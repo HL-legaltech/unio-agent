@@ -10,7 +10,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from inbox_support import FakeUnio, HomeCase, inbox
+from inbox_support import FAR_EXPIRY, FakeUnio, HomeCase, inbox
 
 
 class Check(HomeCase):
@@ -35,7 +35,7 @@ class Check(HomeCase):
         result = self.check(FakeUnio.RUNNER)
         self.assertEqual(result, {"ok": True, "workspace": {"clerkId": "org_test", "name": "Workspace Marker"},
                                   "agent": {"name": "Agent Marker"}, "language": "pt-BR",
-                                  "token": {"expiresAt": "2027-01-01T00:00:00.000Z", "expiresInDays": 70},
+                                  "token": {"expiresAt": FAR_EXPIRY, "expiresInDays": 70},
                                   "problems": [], "codes": []})
         self.assertEqual([(r["method"], r["path"]) for r in self.fake.seen()], [("GET", "/v1/agents/me")])
 

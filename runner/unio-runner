@@ -45,9 +45,15 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 HERE = Path(__file__).resolve().parent
 CLONE = HERE.parent
@@ -1247,10 +1253,54 @@ def token_status(prof, now=None):
     return row
 
 
+@contextmanager
+def poll_lock(path):
+    """Whether this process took the service's poll lock (unio-inbox's
+    file_lock on the same file), without waiting: flock on POSIX, the file's
+    first byte on Windows."""
+    with open(path, "a", encoding="utf-8") as f:
+        if os.name != "nt":
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+            return
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+
+
 def note_accepted_token(prof, expires, agent_name, now):
     """After setup's check accepted the token: the health block's refusal and
     old expiry are another token's, and would keep status saying refused or
     expired until a service polls, which after --no-service may be never."""
+    if not (prof.state / "health.json").exists():
+        return
+    # The service writes health.json under this lock; a poll that holds it
+    # would undo this write or be undone by it, and clears the old token's
+    # state itself once its next poll is accepted.
+    try:
+        with poll_lock(prof.state / "lock") as held:
+            if held:
+                rewrite_token_block(prof, expires, agent_name, now)
+    except OSError:
+        pass
+
+
+def rewrite_token_block(prof, expires, agent_name, now):
     path = prof.state / "health.json"
     try:
         h = json.loads(path.read_text(encoding="utf-8"))
@@ -1267,7 +1317,6 @@ def note_accepted_token(prof, expires, agent_name, now):
         block["agentName"] = agent_name
     block["state"] = "expiring" if at and days_left(at, now) <= TOKEN_WARN_DAYS else "ok"
     h["token"] = block
-    # A running service may rewrite its own copy first; its next accepted poll clears it the same way.
     try:
         write_atomic(path, (json.dumps(h, indent=2) + "\n").encode("utf-8"), mode=0o600)
     except OSError:

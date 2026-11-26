@@ -31,10 +31,14 @@ import subprocess
 import sys
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+
+# A token that stays valid however long after today the tests run: a fixed
+# date would turn every "ok" assertion into "expiring" once it came near.
+FAR_EXPIRY = (datetime.now(timezone.utc) + timedelta(days=90)).strftime("%Y-%m-%dT00:00:00.000Z")
 
 RUNNER_DIR = Path(__file__).resolve().parent.parent
 UNIO_RUNNER = RUNNER_DIR / "unio-runner"
@@ -73,7 +77,7 @@ def me_body(org, purpose):
         "workspace": {"clerkId": org, "name": WORKSPACE, "sigla": "WNM", "appUrl": "https://unio.so"},
         "teams": TEAMS,
         "token": {"id": 3, "name": "Runner", "prefix": "unio_", "purpose": purpose,
-                  "expiresAt": "2027-01-01T00:00:00.000Z", "expiresInDays": 70},
+                  "expiresAt": FAR_EXPIRY, "expiresInDays": 70},
     }}
 
 
