@@ -6725,10 +6725,14 @@ class Runner:
             try:
                 self.locked_poll()
             except Exception as e:  # the service outlives any one bad poll
-                h = self.state.health()
-                self.state.record_error(h, f"runner: {type(e).__name__}: {e}")
                 self.state.log("poll_error", error=f"runner: {type(e).__name__}: {short(e, 400)}")
-                self.save(h)
+                # Under the poll lock, as every write of health.json: unio runner setup rewrites its token
+                # block under it. Whoever holds it now writes the file; this error stays in the log.
+                with file_lock(self.state.lock_file) as held:
+                    if held:
+                        h = self.state.health()
+                        self.state.record_error(h, f"runner: {type(e).__name__}: {e}")
+                        self.save(h)
             stopping.wait(self.next_wait())
         self.vitals_call("stop")
         # A restart for an update keeps the row online: the new process takes it over within seconds.

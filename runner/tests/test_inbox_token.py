@@ -193,6 +193,27 @@ class Token(HomeCase):
         self.poll(runner, START + timedelta(minutes=2))
         self.assertEqual(self.me_calls(), 2)
 
+    def test_a_failed_poll_writes_its_error_only_under_the_poll_lock(self):
+        self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
+        before = self.health()
+        runner = self.runner()
+        self.addCleanup(inbox.stopping.clear)
+
+        def fail():
+            inbox.stopping.set()
+            raise RuntimeError("boom")
+
+        runner.state.ensure()
+        with mock.patch.object(runner, "locked_poll", side_effect=fail):
+            with inbox.file_lock(runner.state.lock_file) as held:
+                self.assertTrue(held)
+                self.assertEqual(runner.serve(), 0)
+            self.assertEqual(self.health(), before)
+            inbox.stopping.clear()
+            self.assertEqual(runner.serve(), 0)
+        self.assertEqual(self.health()["lastError"], "runner: RuntimeError: boom")
+        self.assertEqual(len([e for e in self.events("poll_error") if "boom" in e["error"]]), 2)
+
     def test_teams_refused_mid_item_counts_nothing(self):
         # Only the inbox decides a refusal: /agents/me answers 401 while it answers 200.
         self.write_block({"state": "ok", "expiresAt": FAR_EXPIRY})
